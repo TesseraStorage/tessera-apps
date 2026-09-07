@@ -33,18 +33,24 @@ jobs:
             target: linux
             electron-arch: ''
             artifact: tessera-linux-x64
+
+          # Apple Silicon (arm64) — macos-latest is currently macos-14
           - os: macos-latest
             target: mac
             electron-arch: '--arm64'
             artifact: tessera-macos-arm64
-          - os: macos-13
+
+          # Intel Mac (x64)
+          - os: macos-26-intel
             target: mac
             electron-arch: '--x64'
             artifact: tessera-macos-x64
+
           - os: windows-latest
             target: win
             electron-arch: ''
             artifact: tessera-win-x64
+
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -55,10 +61,23 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Debug toolchain
+        shell: bash
+        run: |
+          echo "=== electron ==="
+          npx electron --version 2>&1 || true
+          echo "=== electron-builder ==="
+          npx electron-builder --version 2>&1 || true
+          echo "=== app-builder-bin ==="
+          node -e "console.log(require('app-builder-bin').appBuilderPath)" 2>&1 || true
+          ls -la "$(node -e "console.log(require('app-builder-bin').appBuilderPath)")" 2>&1 || true
+          echo "=== sia-storage native ==="
+          ls node_modules/@siafoundation/ 2>&1 || true
+
       - name: Build Vite frontend
         run: npm run build:desktop
 
-      - name: Package Electron app (${{ matrix.target }})
+      - name: Package Electron app (${{ matrix.target }} ${{ matrix.electron-arch }})
         shell: bash
         run: |
           cd apps/desktop

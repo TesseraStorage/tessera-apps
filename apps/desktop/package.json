@@ -1,6 +1,8 @@
 {
   "name": "@tessera/desktop",
   "version": "1.0.0",
+  "description": "Tessera desktop client — decentralized storage on Sia",
+  "author": "Tessera Storage",
   "type": "module",
   "private": true,
   "main": "electron/main.js",
@@ -23,36 +25,36 @@
       "electron/**/*",
       "package.json"
     ],
+    "includeSubNodeModules": true,
+    "npmRebuild": false,
     "mac": {
       "category": "public.app-category.utilities",
-      "target": [
-        "dmg",
-        "zip"
-      ],
+      "target": ["dmg", "zip"],
       "icon": "assets/icon.icns"
     },
     "linux": {
-      "target": [
-        "AppImage",
-        "deb"
-      ],
+      "target": ["AppImage", "deb"],
       "category": "Utility",
       "icon": "assets/icon.png"
     },
     "win": {
-      "target": [
-        "nsis",
-        "portable"
-      ],
+      "target": ["nsis", "portable"],
       "icon": "assets/icon.ico"
     }
   },
   "dependencies": {
-    "@tessera/shared": "*"
+    "@siafoundation/sia-storage": "0.0.14"
+  },
+  "optionalDependencies": {
+    "@siafoundation/sia-storage-darwin-arm64": "0.0.14",
+    "@siafoundation/sia-storage-darwin-x64": "0.0.14",
+    "@siafoundation/sia-storage-linux-x64-gnu": "0.0.14",
+    "@siafoundation/sia-storage-linux-arm64-gnu": "0.0.14",
+    "@siafoundation/sia-storage-win32-x64-msvc": "0.0.14"
   },
   "devDependencies": {
     "electron": "33.4.11",
-    "electron-builder": "^25.0.0",
+    "electron-builder": "24.13.3",
     "vite": "^6.0.0"
   }
 }
