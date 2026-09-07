@@ -94,6 +94,7 @@ jobs:
             apps/desktop/dist-electron/*.dmg
             apps/desktop/dist-electron/*.AppImage
             apps/desktop/dist-electron/*.deb
+            apps/desktop/dist-electron/*.rpm
             apps/desktop/dist-electron/*.exe
           if-no-files-found: error
 
@@ -121,6 +122,7 @@ jobs:
             artifacts/*.dmg
             artifacts/*.AppImage
             artifacts/*.deb
+            artifacts/*.rpm
             artifacts/*.exe
           name: ${{ github.ref_name }}
           generate_release_notes: true
