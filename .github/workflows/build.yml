@@ -31,15 +31,19 @@ jobs:
         include:
           - os: ubuntu-latest
             target: linux
-            extra-flags: ''
+            electron-arch: ''
             artifact: tessera-linux-x64
           - os: macos-latest
             target: mac
-            extra-flags: '--universal'
-            artifact: tessera-macos-universal
+            electron-arch: '--arm64'
+            artifact: tessera-macos-arm64
+          - os: macos-13
+            target: mac
+            electron-arch: '--x64'
+            artifact: tessera-macos-x64
           - os: windows-latest
             target: win
-            extra-flags: ''
+            electron-arch: ''
             artifact: tessera-win-x64
     runs-on: ${{ matrix.os }}
     steps:
@@ -47,14 +51,19 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - run: npm ci
+
+      - name: Install dependencies
+        run: npm ci
+
       - name: Build Vite frontend
         run: npm run build:desktop
+
       - name: Package Electron app (${{ matrix.target }})
         shell: bash
         run: |
           cd apps/desktop
-          npx electron-builder --${{ matrix.target }} ${{ matrix.extra-flags }}
+          npx electron-builder --${{ matrix.target }} ${{ matrix.electron-arch }}
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
