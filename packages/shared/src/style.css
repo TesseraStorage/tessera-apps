@@ -199,6 +199,36 @@ input:focus { border-color: var(--cyan); }
   margin: 14px 0;
 }
 
+/* ── recovery input ───────────────────────────────────── */
+.recover-input {
+  width: 100%;
+  background: var(--bg);
+  border: 2px solid var(--border2);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  font-family: var(--font-mono);
+  font-size: 14px;
+  line-height: 1.8;
+  letter-spacing: 0.03em;
+  word-spacing: 0.3em;
+  color: var(--ink1);
+  resize: vertical;
+  margin: 14px 0;
+  min-height: 80px;
+  box-sizing: border-box;
+}
+.recover-input:focus {
+  outline: none;
+  border-color: var(--cyan);
+  box-shadow: 0 0 0 3px rgba(0, 245, 245, 0.12);
+}
+.recover-input::placeholder {
+  color: var(--ink3);
+  word-spacing: normal;
+  letter-spacing: normal;
+  font-style: italic;
+}
+
 /* ── drag & drop zone ─────────────────────────────────── */
 .dropzone {
   border: 2px dashed var(--border2);

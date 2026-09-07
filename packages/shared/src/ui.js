@@ -11,6 +11,8 @@ import {
   tryReconnect,
   clearCredentials,
   getSaved,
+  beginRecovery,
+  completeRecovery,
 } from './auth.js'
 import {
   listFiles, computeTotals, uploadFile, downloadToDisk,
@@ -25,12 +27,14 @@ import { formatBytes, esc, fmtDateTime, $ } from './utils.js'
 // ── refs ─────────────────────────────────────────────────
 let root
 const r = {}
+let _recoveryMode = false   // true when we're in the recovery flow (vs new-account connect)
 
 function cacheRefs() {
   const ids = [
     'header','readyDot','storageSummary','btnLogout',
     'connectScreen','connectHint','btnConnect','connectApprovalBox','approvalLink','approvalUrl',
-    'connectStatus','connectRetry',
+    'connectStatus','connectRetry','btnRecoverAccount',
+    'recoverScreen','recoverPhraseInput','btnRecover','recoverStatus','btnBackToConnect',
     'phraseScreen','phraseText','btnPhraseDone','phraseStatus',
     'phraseEncryptCheck','phraseEncryptFields','phrasePassword','phrasePasswordConfirm',
     'mainScreen','dropzone','fileInput','fileList','fileActions',
@@ -65,6 +69,9 @@ const SKELETON = /*html*/`
     <p style="margin-top:12px">
       <button id="btnConnect" class="btn btn-primary btn-lg" disabled>Connect</button>
     </p>
+    <p style="margin-top:8px">
+      <button id="btnRecoverAccount" class="btn btn-ghost">Recover existing account</button>
+    </p>
     <div id="connectApprovalBox" class="hidden" style="margin-top:14px">
       <p style="color:var(--amber);font-weight:500">
         \u{1F517} Open this link to approve:
@@ -81,6 +88,25 @@ const SKELETON = /*html*/`
     </div>
     <p id="connectHint" class="hint" style="margin-top:8px">Loading\u2026</p>
     <p id="connectStatus" class="status-text"></p>
+  </section>
+
+  <!-- RECOVER -->
+  <section id="recoverScreen" class="panel hidden">
+    <h2>Recover your account</h2>
+    <p>
+      Enter your <strong>12-word recovery phrase</strong> to restore
+      your account. The phrase was shown to you when you first connected.
+    </p>
+    <textarea id="recoverPhraseInput" class="recover-input"
+              placeholder="Enter your 12-word recovery phrase\u2026"
+              rows="3" autocomplete="off" spellcheck="false"></textarea>
+    <p style="margin-top:14px">
+      <button id="btnRecover" class="btn btn-primary btn-lg">Recover my account</button>
+    </p>
+    <p style="margin-top:8px">
+      <button id="btnBackToConnect" class="btn btn-ghost">\u2190 Back to Connect</button>
+    </p>
+    <p id="recoverStatus" class="status-text"></p>
   </section>
 
   <!-- PHRASE -->
@@ -158,6 +184,9 @@ export async function mountApp(container) {
   // wire events
   r.btnConnect.addEventListener('click', onConnect)
   r.connectRetry.addEventListener('click', onConnectRetry)
+  r.btnRecoverAccount.addEventListener('click', onShowRecover)
+  r.btnBackToConnect.addEventListener('click', onBackToConnect)
+  r.btnRecover.addEventListener('click', onSubmitRecovery)
   r.btnPhraseDone.addEventListener('click', onPhraseDone)
   r.btnLogout.addEventListener('click', onLogout)
   r.phraseEncryptCheck.addEventListener('change', () => {
@@ -220,7 +249,8 @@ export async function mountApp(container) {
 // ── screens ──────────────────────────────────────────────
 
 function renderScreen(s) {
-  r.connectScreen.classList.toggle('hidden', s !== 'connect')
+  r.connectScreen.classList.toggle('hidden', s !== 'connect' && s !== 'recoverApproval')
+  r.recoverScreen.classList.toggle('hidden', s !== 'recover')
   r.phraseScreen.classList.toggle('hidden', s !== 'phrase')
   r.mainScreen.classList.toggle('hidden', s !== 'main')
   r.header.classList.toggle('hidden', s === 'loading')
@@ -229,8 +259,10 @@ function renderScreen(s) {
 // ── boot ─────────────────────────────────────────────────
 
 async function doBoot() {
+  _recoveryMode = false
   r.connectHint.textContent = 'Loading\u2026'
   r.btnConnect.disabled = true
+  r.btnRecoverAccount.disabled = true
   setScreen('connect')
 
   try { await initSia() } catch (e) {
@@ -249,12 +281,15 @@ async function doBoot() {
 
   r.connectHint.textContent = 'Click Connect to link this browser to your Tessera account.'
   r.btnConnect.disabled = false
+  r.btnRecoverAccount.disabled = false
 }
 
 // ── connect ──────────────────────────────────────────────
 
 async function onConnect() {
+  _recoveryMode = false
   r.btnConnect.disabled = true
+  r.btnRecoverAccount.disabled = true
   r.connectHint.textContent = 'Contacting indexer\u2026'
   r.connectStatus.textContent = ''
 
@@ -281,16 +316,117 @@ async function onConnect() {
   } catch (e) {
     r.connectStatus.textContent = 'Connection failed: ' + (e.message || 'Unknown error')
     r.btnConnect.disabled = false
+    r.btnRecoverAccount.disabled = false
     console.error(e)
   }
 }
 
 async function onConnectRetry() {
+  _recoveryMode = false
   r.connectApprovalBox.classList.add('hidden')
   r.btnConnect.disabled = false
+  r.btnRecoverAccount.disabled = false
   r.btnConnect.classList.remove('hidden')
   r.connectStatus.textContent = ''
   r.connectHint.textContent = 'Click Connect to try again.'
+}
+
+// ── recovery ─────────────────────────────────────────────
+
+function onShowRecover() {
+  _recoveryMode = true
+  r.recoverPhraseInput.value = ''
+  r.recoverStatus.textContent = ''
+  r.connectApprovalBox.classList.add('hidden')
+  setScreen('recover')
+}
+
+function onBackToConnect() {
+  _recoveryMode = false
+  r.connectApprovalBox.classList.add('hidden')
+  r.connectStatus.textContent = ''
+  r.recoverStatus.textContent = ''
+  setScreen('connect')
+  // re-enable connect buttons
+  r.btnConnect.disabled = false
+  r.btnRecoverAccount.disabled = false
+  r.connectHint.textContent = 'Click Connect to link this browser to your Tessera account.'
+}
+
+async function onSubmitRecovery() {
+  const phrase = r.recoverPhraseInput.value.trim()
+  if (!phrase) {
+    r.recoverStatus.textContent = 'Please enter your 12-word recovery phrase.'
+    return
+  }
+
+  // Basic check: should have at least a few words
+  if (phrase.split(/\s+/).length < 12) {
+    r.recoverStatus.textContent = 'Please enter all 12 words of your recovery phrase.'
+    return
+  }
+
+  r.btnRecover.disabled = true
+  r.btnBackToConnect.disabled = true
+  r.recoverStatus.textContent = ''
+
+  try {
+    const result = await beginRecovery(phrase, msg => {
+      r.recoverStatus.textContent = msg
+    })
+
+    if (!result.needsApproval) {
+      // Direct recovery succeeded
+      patchState({ sdk: result.sdk, builder: null, phrase: '' })
+      registerSdk(result.sdk)
+      await initNativeBridge()
+      await initRelay()
+      await enterMain()
+      return
+    }
+
+    // Needs approval — show approval box (reuse connectApprovalBox)
+    r.approvalLink.href = result.approvalUrl
+    r.approvalLink.textContent = 'Open Tessera approval page \u2197'
+    r.approvalUrl.value = result.approvalUrl
+    r.connectApprovalBox.classList.remove('hidden')
+    // Override the retry button to trigger recovery retry
+    r.connectRetry.onclick = onRecoverRetry
+
+    // Store recovery context in state
+    patchState({ builder: result.builder, appId: result.appId, phrase: result.phrase })
+
+    setScreen('recoverApproval')
+
+    // Poll for approval
+    await result.builder.waitForApproval()
+    r.recoverStatus.textContent = 'Approved! Completing recovery\u2026'
+
+    // Complete recovery
+    const sdk = await completeRecovery(result.builder, result.phrase)
+    patchState({ sdk, builder: null, phrase: '' })
+    registerSdk(sdk)
+    r.connectApprovalBox.classList.add('hidden')
+    await initNativeBridge()
+    await initRelay()
+    await enterMain()
+  } catch (e) {
+    const msg = e.message || 'Unknown error'
+    r.recoverStatus.textContent = 'Recovery failed: ' + msg
+    r.btnRecover.disabled = false
+    r.btnBackToConnect.disabled = false
+    console.error(e)
+  }
+}
+
+async function onRecoverRetry() {
+  r.connectApprovalBox.classList.add('hidden')
+  r.recoverStatus.textContent = ''
+  setScreen('recover')
+  r.btnRecover.disabled = false
+  r.btnBackToConnect.disabled = false
+  // Restore normal retry behavior
+  r.connectRetry.onclick = onConnectRetry
 }
 
 // ── phrase ───────────────────────────────────────────────

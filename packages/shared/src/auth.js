@@ -6,6 +6,7 @@ import {
   Builder,
   AppKey,
   generateRecoveryPhrase,
+  validateRecoveryPhrase,
   registerSdk,
 } from './sdk.js'
 import { randomAppId, fromHex, toHex } from './utils.js'
@@ -119,4 +120,80 @@ export async function tryReconnect() {
     console.error('Reconnect failed:', e)
     return null
   }
+}
+
+// ── recovery flow ───────────────────────────────────────
+
+/**
+ * Recover an existing account from a 12-word BIP-39 recovery phrase.
+ *
+ * First attempts direct recovery (without approval) by calling
+ * builder.register() which derives the AppKey from the mnemonic.
+ * If that fails (account needs re-approval), falls back to the
+ * approval-based flow.
+ *
+ * Returns { sdk, needsApproval, builder, appId, approvalUrl }.
+ * When needsApproval is true, the caller must show the approval URL
+ * and then call completeRecovery().
+ */
+export async function beginRecovery(phrase, onStatus) {
+  await initSia()
+
+  // Validate the phrase first — throws if invalid
+  validateRecoveryPhrase(phrase)
+
+  let { appId } = getSaved()
+  if (!appId) {
+    appId = randomAppId()
+    persist({ appId })
+  }
+
+  const idxUrl = getIndexerUrl()
+  const builder = new Builder(idxUrl, {
+    appId,
+    name: 'Tessera',
+    description: 'Tessera storage client',
+    serviceUrl: idxUrl,
+  })
+
+  // Try direct recovery first (no approval needed)
+  try {
+    if (onStatus) onStatus('Validating recovery phrase\u2026')
+    const sdk = await builder.register(phrase)
+    const appKeyHex = toHex(sdk.appKey().export())
+    persist({ appId, appKey: appKeyHex })
+    registerSdk(sdk)
+    if (onStatus) onStatus('Account recovered!')
+    return { sdk, needsApproval: false }
+  } catch (e) {
+    console.warn('Direct recovery failed, falling back to approval flow:', e.message)
+  }
+
+  // Fall back to approval-based recovery with a fresh builder
+  if (onStatus) onStatus('Requesting approval\u2026')
+
+  const approvalBuilder = new Builder(idxUrl, {
+    appId,
+    name: 'Tessera',
+    description: 'Tessera storage client',
+    serviceUrl: idxUrl,
+  })
+
+  await approvalBuilder.requestConnection()
+  const approvalUrl = approvalBuilder.responseUrl()
+
+  return { builder: approvalBuilder, appId, approvalUrl, phrase, needsApproval: true, sdk: null }
+}
+
+/**
+ * Complete recovery after the user has approved.
+ * Returns the connected SDK instance.
+ */
+export async function completeRecovery(builder, phrase) {
+  const sdk = await builder.register(phrase)
+  const appKeyHex = toHex(sdk.appKey().export())
+  const { appId } = getSaved()
+  persist({ appId, appKey: appKeyHex })
+  registerSdk(sdk)
+  return sdk
 }
