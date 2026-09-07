@@ -110,3 +110,6 @@ jobs:
           files: artifacts/**
           name: ${{ github.ref_name }}
           generate_release_notes: true
+          fail_on_unmatched_files: false
+      - name: Wait for release stabilization
+        run: sleep 5
