@@ -1,5 +1,5 @@
 {
-  "name": "@tessera/desktop",
+  "name": "tessera-desktop",
   "version": "1.0.0",
   "description": "Tessera desktop client — decentralized storage on Sia",
   "homepage": "https://github.com/TesseraStorage/tessera-apps",
@@ -21,6 +21,7 @@
   "build": {
     "appId": "dev.tessera.desktop",
     "productName": "Tessera",
+    "artifactName": "${productName}-${version}-${arch}.${ext}",
     "directories": {
       "output": "dist-electron"
     },
