@@ -1,0 +1,26 @@
+{
+  "name": "tessera-apps",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/shared",
+    "apps/web",
+    "apps/desktop"
+  ],
+  "scripts": {
+    "proxy": "node packages/proxy/index.js",
+    "dev:web": "node scripts/start-dev.js web",
+    "build:web": "npm -w apps/web run build",
+    "prod:web": "node packages/proxy/index.js --static apps/web/dist",
+    "dev:desktop": "node scripts/start-dev.js desktop",
+    "build:desktop": "npm -w apps/desktop run build",
+    "package:desktop:mac": "npm -w apps/desktop run package:mac",
+    "package:desktop:linux": "npm -w apps/desktop run package:linux",
+    "package:desktop:win": "npm -w apps/desktop run package:win"
+  },
+  "dependencies": {
+    "@siafoundation/sia-storage": "^0.0.14",
+    "@siafoundation/sia-storage-linux-x64-gnu": "^0.0.14",
+    "selenium-webdriver": "^4.48.0"
+  }
+}

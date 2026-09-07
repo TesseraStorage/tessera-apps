@@ -1,0 +1,3 @@
+/* Re-export styles so that '@tessera/shared/style.css' resolves
+   in all bundler configurations. */
+@import './src/style.css';

@@ -1,0 +1,10 @@
+node_modules/
+dist-electron/
+.DS_Store
+*.log
+.env
+.env.*
+!.env.example
+*.local
+apps/web/dist/
+apps/desktop/dist/

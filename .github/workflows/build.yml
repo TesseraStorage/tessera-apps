@@ -1,0 +1,84 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ── Web app (WASM-based, no native deps) ─────────────────
+  build-web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - run: npm run build:web
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tessera-web
+          path: apps/web/dist
+
+  # ── Desktop app (Electron + native per platform) ─────────
+  build-desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux
+            extra-flags: ''
+            artifact: tessera-linux-x64
+          - os: macos-latest
+            target: mac
+            extra-flags: '--universal'
+            artifact: tessera-macos-universal
+          - os: windows-latest
+            target: win
+            extra-flags: ''
+            artifact: tessera-win-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Build Vite frontend
+        run: npm run build:desktop
+      - name: Package Electron app (${{ matrix.target }})
+        shell: bash
+        run: |
+          cd apps/desktop
+          npx electron-builder --${{ matrix.target }} ${{ matrix.extra-flags }}
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: apps/desktop/dist-electron/*
+
+  # ── GitHub Release (tag pushes only) ─────────────────────
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-web, build-desktop]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: tessera-*
+          path: artifacts
+          merge-multiple: true
+      - name: List artifacts
+        run: find artifacts -type f -exec ls -lh {} \;
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**
+          name: ${{ github.ref_name }}
+          generate_release_notes: true

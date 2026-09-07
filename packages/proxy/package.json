@@ -1,0 +1,10 @@
+{
+  "name": "@tessera/proxy",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  }
+}

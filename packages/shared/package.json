@@ -1,0 +1,14 @@
+{
+  "name": "@tessera/shared",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./style.css": "./src/style.css"
+  },
+  "files": [
+    "src",
+    "vendor"
+  ]
+}
