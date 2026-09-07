@@ -87,7 +87,15 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: apps/desktop/dist-electron/*
+          # Only the final distributable binaries — never the unpacked
+          # directories (mac-*, win-unpacked, linux-unpacked) or .blockmap
+          # files, which is what flooded the release with 100+ junk assets.
+          path: |
+            apps/desktop/dist-electron/*.dmg
+            apps/desktop/dist-electron/*.AppImage
+            apps/desktop/dist-electron/*.deb
+            apps/desktop/dist-electron/*.exe
+          if-no-files-found: error
 
   # ── GitHub Release (tag pushes only) ─────────────────────
   release:
@@ -107,9 +115,13 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/**
+          # Exactly the 5 distributables: deb, AppImage, win exe, and
+          # the two macOS dmg files. Nothing else.
+          files: |
+            artifacts/*.dmg
+            artifacts/*.AppImage
+            artifacts/*.deb
+            artifacts/*.exe
           name: ${{ github.ref_name }}
           generate_release_notes: true
           fail_on_unmatched_files: false
-      - name: Wait for release stabilization
-        run: sleep 5

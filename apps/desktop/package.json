@@ -34,16 +34,16 @@
     "npmRebuild": false,
     "mac": {
       "category": "public.app-category.utilities",
-      "target": ["dmg", "zip"],
+      "target": ["dmg"],
       "icon": "assets/icon.icns"
     },
     "linux": {
-      "target": ["AppImage", "deb", "rpm"],
+      "target": ["AppImage", "deb"],
       "category": "Utility",
       "icon": "assets/icon.png"
     },
     "win": {
-      "target": ["nsis", "portable"],
+      "target": ["nsis"],
       "icon": "assets/icon.ico"
     }
   },
