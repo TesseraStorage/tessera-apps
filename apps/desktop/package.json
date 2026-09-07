@@ -2,7 +2,11 @@
   "name": "@tessera/desktop",
   "version": "1.0.0",
   "description": "Tessera desktop client — decentralized storage on Sia",
-  "author": "Tessera Storage",
+  "homepage": "https://github.com/TesseraStorage/tessera-apps",
+  "author": {
+    "name": "Tessera Storage",
+    "email": "hello@tessera.dev"
+  },
   "type": "module",
   "private": true,
   "main": "electron/main.js",
@@ -33,7 +37,7 @@
       "icon": "assets/icon.icns"
     },
     "linux": {
-      "target": ["AppImage", "deb"],
+      "target": ["AppImage", "deb", "rpm"],
       "category": "Utility",
       "icon": "assets/icon.png"
     },
