@@ -7,6 +7,8 @@
 // In the Electron desktop app the relay is a local server started by main.js.
 // In the web app the relay is the proxy's /__tunnel__ WebSocket endpoint.
 
+import { proxyOrigin } from './utils.js'
+
 const INDEXER_HOST = 'index.dithr.dev'
 
 // ── Fetch interceptor for indexer requests ───────────────
@@ -16,14 +18,13 @@ export function installFetchInterceptor() {
   if (window.___tfi___) return
   window.___tfi___ = true
 
-  const PROXY = 'http://localhost:3099'
   const _R = window.Request
 
   window.Request = function (input, init) {
     let url = typeof input === 'string' ? input : input instanceof _R ? input.url : ''
     // Only proxy indexer URLs; skip already-proxied URLs and localhost
     if (url.includes(INDEXER_HOST) && !url.includes('/__proxy__') && !url.includes('localhost')) {
-      const proxyUrl = PROXY + '/__proxy__?url=' + encodeURIComponent(url)
+      const proxyUrl = proxyOrigin() + '/__proxy__?url=' + encodeURIComponent(url)
       if (typeof input === 'string') return new _R(proxyUrl, init)
       const opts = { method: input.method, headers: input.headers, mode: input.mode, credentials: input.credentials }
       if (input.body) { opts.body = input.body; opts.duplex = 'half' }
@@ -36,7 +37,7 @@ export function installFetchInterceptor() {
   window.fetch = function (input, init) {
     let url = typeof input === 'string' ? input : input instanceof _R ? input.url : ''
     if (url.includes(INDEXER_HOST) && !url.includes('/__proxy__') && !url.includes('localhost'))
-      return _f(PROXY + '/__proxy__?url=' + encodeURIComponent(url), init)
+      return _f(proxyOrigin() + '/__proxy__?url=' + encodeURIComponent(url), init)
     return _f(input, init)
   }
 }
@@ -51,8 +52,8 @@ async function getTunnelBaseUrl() {
       if (port) return 'ws://127.0.0.1:' + port
     } catch (_) { /* fall through to proxy */ }
   }
-  // Web: use the proxy's WebSocket tunnel endpoint
-  return 'ws://localhost:3099'
+  // Web: use the proxy's WebSocket tunnel endpoint (same origin in prod)
+  return proxyOrigin().replace(/^http/, 'ws')
 }
 
 // ── WebTransport → WebSocket bridge ──────────────────────

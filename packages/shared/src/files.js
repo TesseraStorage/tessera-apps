@@ -5,6 +5,7 @@
 //      because WebTransport can't reach siamux hosts from the browser.
 
 import { PinnedObject } from './sdk.js'
+import { proxyOrigin } from './utils.js'
 
 // ── helpers ──────────────────────────────────────────────
 
@@ -13,7 +14,7 @@ function isDesktop() {
 }
 
 function relayUrl(path) {
-  return 'http://localhost:3099/__sia__/' + path
+  return proxyOrigin() + '/__sia__/' + path
 }
 
 function relayCreds() {

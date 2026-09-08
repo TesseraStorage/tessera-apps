@@ -2,6 +2,7 @@ import { defineConfig } from 'vite'
 
 export default defineConfig({
   root: '.',
+  base: './',
   build: { outDir: 'dist', target: 'esnext', assetsInlineLimit: 0 },
   server: {
     port: 5173,

@@ -70,3 +70,26 @@ export function fmtDateTime(d) {
   const dt = d instanceof Date ? d : new Date(d)
   return dt.toLocaleString('en-US', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
 }
+
+/**
+ * Return the origin to use for proxy/relay/tunnel requests.
+ *
+ * In local dev the standalone proxy listens on port 3099, so we return
+ * http://localhost:3099 including the deployment page's base path.
+ *
+ * In production the proxy paths are served through the same origin
+ * (nginx reverse-proxies them to the local proxy).  We derive the base
+ * path from the current page URL so the app works at any deployment
+ * prefix (e.g. /v2/tessera/drop/ on siagate.dev).
+ */
+export function proxyOrigin() {
+  if (typeof window === 'undefined') return 'http://localhost:3099'
+  const host = window.location.hostname
+  if (host === 'localhost' || host === '127.0.0.1') {
+    return 'http://localhost:3099'
+  }
+  // production — same origin; derive base path from page URL
+  const path = window.location.pathname  // e.g. /v2/tessera/drop/ or /v2/tessera/drop/index.html
+  const base = path.substring(0, path.lastIndexOf('/') + 1)  // /v2/tessera/drop/
+  return window.location.origin + base.substring(0, base.length - 1)  // strip trailing /
+}
