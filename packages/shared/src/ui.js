@@ -179,6 +179,7 @@ export async function mountApp(container) {
   if (!root) throw new Error('Container not found')
 
   root.innerHTML = SKELETON
+  root.classList.remove('boot-spinner')
   cacheRefs()
 
   // wire events
