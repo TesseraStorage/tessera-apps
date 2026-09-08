@@ -83,6 +83,7 @@ async function getUserSdk(appId, appKey) {
   })
 
   const sdk = await builder.connected(key)
+  if (!sdk) throw new Error('User SDK connection returned null — key may not be registered with the indexer')
   userSdks.set(idKey, sdk)
   console.error('[proxy] user SDK connected (appId ' + idKey.substring(0, 12) + '…)')
   return sdk
