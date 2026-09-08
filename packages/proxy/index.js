@@ -24,6 +24,11 @@ const SERVICE_APP_KEY = '6be4f21d5a4da5ab422077cb8188885e947f10aced92cded35c5aa9
 let nativeSdk = null
 let serviceSdk = null  // cached service account SDK for host ops
 
+// Per-user SDK cache — each user gets their own SDK instance so that
+// indexer operations (list, pin, delete, share) are scoped to that user.
+// Keyed by appId hex string.
+const userSdks = new Map()
+
 async function getNativeSdk() {
   if (!nativeSdk) {
     nativeSdk = await import('@siafoundation/sia-storage')
@@ -51,6 +56,36 @@ async function getServiceSdk() {
   serviceSdk = await builder.connected(key)
   console.error('[proxy] service SDK connected')
   return serviceSdk
+}
+
+/**
+ * Return a user-specific SDK instance, creating one if needed.
+ * User SDKs handle indexer operations (list, pin, delete, share) scoped
+ * to the user's own account.  The service SDK is used only for raw host
+ * data operations (upload/download bytes) because it has pre-formed contracts.
+ */
+async function getUserSdk(appId, appKey) {
+  // Normalize appId to lowercase hex for reliable cache lookups
+  const idKey = appId.toLowerCase()
+  const cached = userSdks.get(idKey)
+  if (cached) return cached
+
+  const { AppKey, Builder } = await getNativeSdk()
+  const appIdBytes = new Uint8Array(Buffer.from(appId, 'hex'))
+  const appKeyBytes = new Uint8Array(Buffer.from(appKey, 'hex'))
+  const key = new AppKey(appKeyBytes)
+
+  const builder = new Builder('https://index.dithr.dev', {
+    id: appIdBytes,
+    name: 'Tessera User',
+    description: 'Tessera web user',
+    serviceUrl: 'https://index.dithr.dev',
+  })
+
+  const sdk = await builder.connected(key)
+  userSdks.set(idKey, sdk)
+  console.error('[proxy] user SDK connected (appId ' + idKey.substring(0, 12) + '…)')
+  return sdk
 }
 
 // ── static serving ──────────────────────────────────────
@@ -129,7 +164,9 @@ async function handleConnect(req, res) {
   try {
     const body = JSON.parse((await readBody(req)).toString())
     if (!body.appId || !body.appKey) return json(res, { ok: false, error: 'Missing appId or appKey' }, 400)
-    await getServiceSdk()
+    // Create (or reuse) a user-specific SDK so indexer operations are scoped
+    // to this user.  The service SDK is only pre-warmed as a side effect.
+    await getUserSdk(body.appId, body.appKey)
     json(res, { ok: true })
   } catch (e) {
     json(res, { ok: false, error: e.message }, 500)
@@ -146,12 +183,13 @@ async function handleUpload(req, res) {
     const mimeType = q.get('mime') || 'application/octet-stream'
     if (!appId || !appKey) return json(res, { ok: false, error: 'Missing appId or appKey' }, 400)
 
-    const sdk = await getServiceSdk()
+    const userSdk = await getUserSdk(appId, appKey)
+    const serviceSdk = await getServiceSdk()
     const { PinnedObject } = await getNativeSdk()
 
     const fileData = await readBody(req)
 
-    console.error('[proxy] uploading ' + fileName + ' (' + fileData.length + ' bytes)')
+    console.error('[proxy] uploading ' + fileName + ' (' + fileData.length + ' bytes) for ' + appId.substring(0, 12) + '…')
 
     const meta = new TextEncoder().encode(JSON.stringify({ name: fileName, mime: mimeType }))
     let obj = new PinnedObject()
@@ -164,10 +202,12 @@ async function handleUpload(req, res) {
       },
     })
 
-    console.error('[proxy] calling sdk.upload...')
-    obj = await sdk.upload(obj, source, { dataShards: 10, parityShards: 20 })
-    console.error('[proxy] upload returned, id=' + obj.id() + ', pinning...')
-    await sdk.pinObject(obj)
+    // Upload raw bytes through the service SDK (has pre-formed host contracts),
+    // then pin the object through the USER's SDK so it appears in their file list.
+    console.error('[proxy] calling serviceSdk.upload...')
+    obj = await serviceSdk.upload(obj, source, { dataShards: 10, parityShards: 20 })
+    console.error('[proxy] upload returned, id=' + obj.id() + ', pinning under user SDK...')
+    await userSdk.pinObject(obj)
     console.error('[proxy] pin done')
     json(res, { ok: true, id: obj.id(), size: Number(obj.size()) })
   } catch (e) {
@@ -187,11 +227,13 @@ async function handleDownload(req, res) {
     if (!appId || !appKey) return json(res, { ok: false, error: 'Missing appId or appKey' }, 400)
     if (!objectId || objectId.length < 10) return json(res, { ok: false, error: 'Missing objectId' }, 400)
 
-    const sdk = await getServiceSdk()
-    const obj = await sdk.object(objectId)
+    const userSdk = await getUserSdk(appId, appKey)
+    const serviceSdk = await getServiceSdk()
+    const obj = await userSdk.object(objectId)
     if (!obj) return json(res, { ok: false, error: 'Object not found' }, 404)
 
-    const stream = sdk.download(obj)
+    // Download raw bytes through the service SDK (has host contracts)
+    const stream = serviceSdk.download(obj)
     const reader = stream.getReader()
     const chunks = []
     while (true) {
@@ -233,7 +275,7 @@ async function handleList(req, res) {
     const appKey = q.get('appKey')
     if (!appId || !appKey) return json(res, { ok: false, error: 'Missing appId or appKey' }, 400)
 
-    const sdk = await getServiceSdk()
+    const sdk = await getUserSdk(appId, appKey)
     const byId = new Map()
     let cursor = null
 
@@ -284,7 +326,7 @@ async function handleDelete(req, res) {
     const appKey = q.get('appKey')
     if (!appId || !appKey) return json(res, { ok: false, error: 'Missing appId or appKey' }, 400)
 
-    const sdk = await getServiceSdk()
+    const sdk = await getUserSdk(appId, appKey)
     await sdk.deleteObject(objectId)
     json(res, { ok: true })
   } catch (e) {
@@ -304,7 +346,7 @@ async function handleShare(req, res) {
     const objectId = body.objectId
     if (!objectId) return json(res, { ok: false, error: 'Missing objectId' }, 400)
 
-    const sdk = await getServiceSdk()
+    const sdk = await getUserSdk(appId, appKey)
     const obj = await sdk.object(objectId)
     if (!obj) return json(res, { ok: false, error: 'Object not found' }, 404)
 
