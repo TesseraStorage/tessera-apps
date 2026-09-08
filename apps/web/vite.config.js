@@ -1,9 +1,20 @@
 import { defineConfig } from 'vite'
+import { resolve } from 'path'
 
 export default defineConfig({
   root: '.',
   base: './',
-  build: { outDir: 'dist', target: 'esnext', assetsInlineLimit: 0 },
+  build: {
+    outDir: 'dist',
+    target: 'esnext',
+    assetsInlineLimit: 0,
+    rollupOptions: {
+      input: {
+        main: resolve(__dirname, 'index.html'),
+        download: resolve(__dirname, 'd/download.html'),
+      },
+    },
+  },
   server: {
     port: 5173,
     // Proxy requests that go through the fetch interceptor to the standalone

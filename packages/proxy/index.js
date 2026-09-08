@@ -386,6 +386,12 @@ const srv = http.createServer((req, res) => {
   const handler = matchRoute(req.method, req.url)
   if (handler) return handler(req, res)
 
+  // Download page shortcuts
+  if (req.url === '/d' || req.url === '/d/') {
+    res.writeHead(302, { location: '/d/download.html' + (req.url.includes('?') ? '?' + req.url.split('?')[1] : '') })
+    return res.end()
+  }
+
   // Indexer proxy
   if (req.url.startsWith('/__proxy__')) return proxy(req, res)
 

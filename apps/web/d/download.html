@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tessera — Shared File</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='28' font-size='28'>&#x25C6;</text></svg>">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #080c12; color: #e2e8f0;
+    font-family: system-ui, -apple-system, sans-serif;
+    min-height: 100vh; display: flex; align-items: center; justify-content: center;
+  }
+  .card {
+    background: #0f1724; border: 1px solid #1e2d3d; border-radius: 12px;
+    padding: 32px; max-width: 480px; width: 100%; margin: 24px;
+    text-align: center;
+  }
+  .logo { font-size: 20px; font-weight: 700; color: #06b6d4; margin-bottom: 24px; }
+  .icon { font-size: 48px; margin-bottom: 16px; }
+  .title { font-size: 18px; font-weight: 600; margin-bottom: 8px; }
+  .meta { font-size: 13px; color: #64748b; margin-bottom: 24px; }
+  .btn {
+    display: inline-block; background: #06b6d4; color: #080c12;
+    border: none; border-radius: 8px; padding: 12px 32px;
+    font-size: 15px; font-weight: 600; cursor: pointer;
+    text-decoration: none; transition: background .15s;
+  }
+  .btn:hover { background: #0891b2; }
+  .btn:disabled { background: #1e2d3d; color: #475569; cursor: not-allowed; }
+  .progress-wrap { margin-top: 16px; display: none; }
+  .progress-track {
+    height: 6px; background: #1e2d3d; border-radius: 3px; overflow: hidden;
+  }
+  .progress-fill {
+    height: 100%; background: #06b6d4; border-radius: 3px;
+    width: 0%; transition: width .3s;
+  }
+  .progress-label { font-size: 12px; color: #64748b; margin-top: 6px; }
+  .error { color: #ef4444; font-size: 13px; margin-top: 12px; }
+  .spinner {
+    display: inline-block; width: 18px; height: 18px;
+    border: 2px solid #1e2d3d; border-top-color: #06b6d4;
+    border-radius: 50%; animation: spin .7s linear infinite;
+    vertical-align: middle; margin-right: 8px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="logo">&#x25C6; Tessera</div>
+  <div class="icon" id="icon">&#x1F4E6;</div>
+  <div class="title" id="title">Shared file</div>
+  <div class="meta" id="meta">Preparing download&hellip;</div>
+  <button class="btn" id="btnDownload" disabled>
+    <span class="spinner" id="spinner"></span> Loading&hellip;
+  </button>
+  <div class="progress-wrap" id="progressWrap">
+    <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
+    <div class="progress-label" id="progressLabel"></div>
+  </div>
+  <div class="error" id="error"></div>
+</div>
+<script type="module" src="./download.js"></script>
+</body>
+</html>

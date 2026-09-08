@@ -261,11 +261,23 @@ export async function createShareURL(sdk, objOrId) {
 
   const objectId = typeof objOrId === 'string' ? objOrId : objOrId.id()
 
+  /**
+   * Wrap a raw SDK share URL into a URL that points to the Tessera
+   * download page so recipients can actually download the file.
+   *
+   * In development the app runs on the Vite dev server (port 5173);
+   * in production everything is served from the same origin as this page.
+   */
+  function wrapShareUrl(rawUrl) {
+    const base = window.location.origin + window.location.pathname.replace(/\/[^/]*$/, '')
+    return base + '/d/download.html?share=' + encodeURIComponent(rawUrl)
+  }
+
   // Web: use proxy relay
   try {
     const resp = await relayFetch('POST', 'share', JSON.stringify({ objectId }))
     const result = await resp.json()
-    if (result.ok) return result.url
+    if (result.ok) return wrapShareUrl(result.url)
     throw new Error(result.error || 'Share failed')
   } catch (e) {
     if (e.message.includes('Not connected')) throw e
@@ -275,7 +287,8 @@ export async function createShareURL(sdk, objOrId) {
   const obj = typeof objOrId === 'string' ? await getObject(sdk, objOrId) : objOrId
   if (!obj) throw new Error('Object not found')
   const expires = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)
-  return sdk.shareObject(obj, expires)
+  const rawUrl = sdk.shareObject(obj, expires)
+  return wrapShareUrl(rawUrl)
 }
 
 // ── account ─────────────────────────────────────────────
