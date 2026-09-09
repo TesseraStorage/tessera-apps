@@ -165,9 +165,8 @@ async function handleConnect(req, res) {
   try {
     const body = JSON.parse((await readBody(req)).toString())
     if (!body.appId || !body.appKey) return json(res, { ok: false, error: 'Missing appId or appKey' }, 400)
-    // Create (or reuse) a user-specific SDK so indexer operations are scoped
-    // to this user.  The service SDK is only pre-warmed as a side effect.
-    await getUserSdk(body.appId, body.appKey)
+    // SDK creation is deferred until first upload/download to avoid
+    // triggering host fetches and false occupancy on El Grande.
     json(res, { ok: true })
   } catch (e) {
     json(res, { ok: false, error: e.message }, 500)
