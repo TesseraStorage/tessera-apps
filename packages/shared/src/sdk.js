@@ -9,7 +9,17 @@ import { installFetchInterceptor, installWebTransportShim, registerSdk } from '.
 let _ready = false
 export async function initSia(fetchMode) {
   if (_ready) return
-  installWebTransportShim()    // must install BEFORE initWasm — WebTransport is called during WASM init
+  // GATE (2026-09-14, "tessera-web-native-wt"): "Tessera Web must not shim
+  // WebTransport. new WebTransport(...) is the browser's. No rewrite to
+  // /__tunnel__." fetchMode === 'idx' is already Tessera Web's unique,
+  // exclusive signal (Drop never passes it -- every Drop call site below
+  // calls initSia() with no argument or a non-'idx' mode). Reusing it here
+  // instead of adding a new parameter keeps every call site
+  // (beginConnection/reconnectWithAppKey/beginRecovery/etc in auth.js)
+  // unchanged and keeps Drop's default (shimmed, tunnel-based) behavior
+  // byte-for-byte identical -- only Web's initSia('idx') call skips the
+  // shim install.
+  if (fetchMode !== 'idx') installWebTransportShim()    // must install BEFORE initWasm — WebTransport is called during WASM init
   installFetchInterceptor(fetchMode)
   await initWasm()
   _ready = true

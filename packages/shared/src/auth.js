@@ -207,10 +207,10 @@ export async function completeRegistration(builder, phrase, prefix = 'tessera') 
  * Try to reconnect using saved credentials.
  * Returns SDK or null.
  */
-export async function tryReconnect(prefix = 'tessera') {
+export async function tryReconnect(prefix = 'tessera', fetchMode) {
   const saved = getSaved(prefix)
   if (!saved.appKey || !saved.appId) return null
-  return reconnectWithAppKey(saved.appId, saved.appKey)
+  return reconnectWithAppKey(saved.appId, saved.appKey, fetchMode)
 }
 
 /**
@@ -219,9 +219,16 @@ export async function tryReconnect(prefix = 'tessera') {
  * from vault.unwrapAppKey(password), never from a plaintext read.
  * Returns SDK or null (never throws -- same "reconnect failed, let the
  * caller decide what to show" contract as tryReconnect()).
+ *
+ * FIX (2026-09-14, "tessera-web-native-wt"): this was the one auth.js
+ * function with no fetchMode passthrough to initSia() at all -- meaning
+ * every Tessera Web Unlock (the actual primary return-visit path) called
+ * initSia() with fetchMode===undefined, which still installed the
+ * WebTransport shim regardless of the invite-connect path's 'idx' mode.
+ * Now threads fetchMode through like every other auth.js function.
  */
-export async function reconnectWithAppKey(appId, appKeyHex) {
-  await initSia()
+export async function reconnectWithAppKey(appId, appKeyHex, fetchMode) {
+  await initSia(fetchMode)
   try {
     const idxUrl = getIndexerUrl()
     const builder = new Builder(idxUrl, {
@@ -254,8 +261,8 @@ export async function reconnectWithAppKey(appId, appKeyHex) {
  * When needsApproval is true, the caller must show the approval URL
  * and then call completeRecovery().
  */
-export async function beginRecovery(phrase, onStatus, prefix = 'tessera') {
-  await initSia()
+export async function beginRecovery(phrase, onStatus, prefix = 'tessera', fetchMode) {
+  await initSia(fetchMode)
 
   // Validate the phrase first — throws if invalid
   validateRecoveryPhrase(phrase)

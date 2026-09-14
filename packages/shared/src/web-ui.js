@@ -528,7 +528,7 @@ async function onRecoverContinue() {
   r.recoverStatus.textContent = ''
 
   try {
-    const result = await beginRecovery(phrase, msg => { r.recoverStatus.textContent = msg }, PREFIX)
+    const result = await beginRecovery(phrase, msg => { r.recoverStatus.textContent = msg }, PREFIX, 'idx')
 
     if (!result.needsApproval) {
       patchState({ sdk: result.sdk, builder: null, phrase: '' })
@@ -566,7 +566,7 @@ async function onUnlock() {
   try {
     const appKeyHex = await unwrapAppKey(pw, PREFIX)
     const { appId } = getSaved(PREFIX)
-    const sdk = await reconnectWithAppKey(appId, appKeyHex)
+    const sdk = await reconnectWithAppKey(appId, appKeyHex, 'idx')
     if (!sdk) {
       // Wrong password or a stale/rejected key -- stay, do NOT delete
       // the vault, per law.

@@ -207,24 +207,25 @@ export async function uploadFile(sdk, file, onProgress) {
   const tick = (s, p) => { if (onProgress) onProgress({ stage: s, percent: p, elapsed: Date.now() - start }) }
   tick('preparing', 0)
 
-  // FIX (2026-09-14, "tessera-web-upload-hang"): root cause of the
-  // stuck-at-~5% bar was sdk.upload() opening a WebTransport (shimmed to a
-  // WebSocket at <origin>/__tunnel__) that Tessera Web's nginx config does
-  // not serve at all (no /v2/tessera/web/__tunnel__ location exists; only
-  // Drop has one, and even that is currently unserved since
-  // tessera-proxy.service is dead by law). Every host connection the wasm
-  // SDK opens fails, but that failure was invisible to the UI -- the
-  // upload sat on files.js's own 5-minute client timeout with the
-  // progress bar frozen at the first tick after 'preparing' (~5%).
-  // Confirmed live: a direct WS attempt at the real tunnel URL gets
-  // onerror+onclose(code 1006) in well under a second -- so one quick
-  // preflight probe here fails the upload immediately and visibly instead
-  // of occupying the account for up to 5 minutes per attempt.
-  const tunnelOk = await checkTunnelReachable()
-  if (!tunnelOk) {
-    throw new Error(
-      'File storage is temporarily unavailable. Please try again in a few minutes.'
-    )
+  // GATE (2026-09-14, "tessera-web-native-wt"): the tunnel preflight
+  // below (added by "tessera-web-upload-hang") is only meaningful when
+  // this browser's WebTransport is shimmed to the /__tunnel__ WebSocket
+  // relay -- that's Drop's default path, unchanged. Tessera Web now uses
+  // native, unshimmed WebTransport straight to hosts (no Tessera tunnel,
+  // no tessera-proxy), so probing for a tunnel that Web deliberately does
+  // not have would always fail and block every upload. window.___wtpoly___
+  // is set by installWebTransportShim() itself -- true only when the shim
+  // actually installed (Drop, or any future non-'idx' initSia() caller),
+  // false when Tessera Web's initSia('idx') skipped it. Gate on that,
+  // not on a hardcoded app check, so this keeps working correctly if
+  // Drop's own shim path ever changes independently of this file.
+  if (window.___wtpoly___) {
+    const tunnelOk = await checkTunnelReachable()
+    if (!tunnelOk) {
+      throw new Error(
+        'File storage is temporarily unavailable. Please try again in a few minutes.'
+      )
+    }
   }
 
   const meta = new TextEncoder().encode(JSON.stringify({
