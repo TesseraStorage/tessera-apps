@@ -600,17 +600,29 @@ async function enterFiles() {
   replaceScreen('files')
   const sdk = getState().sdk
 
+  // FIX (2026-09-14, "tessera-web-add-relay"): status used to stay on
+  // "Checking account..." until waitForReady(sdk) resolved -- which polls
+  // every 5s for up to 5 minutes. The Files screen (and its Add dropzone)
+  // is already rendered and clickable the instant replaceScreen() above
+  // runs, so that status line was sitting there stale/misleading long
+  // after the add box was usable -- exactly the "stuck Connecting" the
+  // packet calls out. Clear it immediately; run the real account-ready
+  // check and file list load in the background instead of gating on it.
+  patchState({ status: '' })
+  refreshFiles().catch(e => console.warn('[tessera-web] initial file list load failed:', e.message))
+
   try {
-    patchState({ status: 'Checking account\u2026' })
-    // No "Ready"/"Files" headline before Account.Ready is true, per law
-    // -- this status line is secondary text, not a screen/headline.
     await waitForReady(sdk)
     const acct = await getAccount(sdk)
-    patchState({ accountReady: !!acct.ready, status: '' })
-    await refreshFiles()
+    patchState({ accountReady: !!acct.ready })
   } catch (e) {
-    patchState({ status: 'Could not load files: ' + (e.message || 'error') })
-    console.error(e)
+    // Account-ready is only the header dot indicator now -- files already
+    // loaded via the background refreshFiles() call above and Add already
+    // works via the WASM fallback regardless of this promise's outcome.
+    // Don't overwrite status with a scary "Could not load files" here; that
+    // used to reintroduce a stuck-looking status line if this hangs (up to
+    // 5 minutes) and then fails. Log only.
+    console.warn('[tessera-web] account-ready check failed:', e.message)
   }
 }
 

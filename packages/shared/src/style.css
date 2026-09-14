@@ -280,7 +280,25 @@ input:focus { border-color: var(--cyan); }
   color: var(--amber);
   user-select: all;
   margin: 14px 0;
+  /* FIX (2026-09-14, "phrase-box-wrap"): this is a <pre> element -- its
+     default white-space:pre means long content never wraps, only grows
+     the box off the right edge of the screen. Recovery phrases render as
+     one space-joined line of 12 words with word-spacing:0.3em added on
+     top, so this was guaranteed to overflow on any viewport narrower than
+     the full unwrapped line. white-space:pre-wrap keeps <pre>'s literal
+     whitespace rendering (so word-spacing/letter-spacing above still
+     apply exactly as before) while allowing wraps at existing spaces;
+     word-break+overflow-wrap are the belt-and-suspenders fallback so a
+     single unbroken run can never force horizontal overflow either.
+     box-sizing:border-box makes the 18px/20px padding count toward the
+     parent-constrained width instead of adding to it. */
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: break-word;
+  box-sizing: border-box;
+  width: 100%;
 }
+
 
 /* ── recovery input ───────────────────────────────────── */
 .recover-input {

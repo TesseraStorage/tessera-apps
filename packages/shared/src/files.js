@@ -152,7 +152,17 @@ export async function uploadFile(sdk, file, onProgress) {
     return { id: result.id, size: result.size }
   }
 
-  // Web: use proxy relay
+  // Web: try proxy relay first
+  //
+  // FIX (2026-09-14, "tessera-web-add-relay"): this used to unconditionally
+  // re-throw on ANY relay failure -- including the always-expected "No relay
+  // credentials saved for this prefix" case (Tessera Web's 'tesseraweb'
+  // prefix never has relay creds; tessera-proxy stays dead by law). Every
+  // sibling op (listFiles/downloadToDisk/deleteFile/createShareURL) already
+  // falls through to the WASM SDK on relay miss -- upload was the one path
+  // that didn't, so "Add" was the only op that could surface an internal
+  // string like "No relay credentials saved for this prefix" to the
+  // customer. Now it falls through silently, same as the others.
   if (file) {
     const start = Date.now()
     const tick = (s, p) => { if (onProgress) onProgress({ stage: s, percent: p, elapsed: Date.now() - start }) }
@@ -177,8 +187,17 @@ export async function uploadFile(sdk, file, onProgress) {
       return { id: result.id, size: result.size }
     } catch (e) {
       clearInterval(timer)
+      // Fall through to the WASM SDK below on any relay miss -- including
+      // the always-expected "No relay credentials saved for this prefix"
+      // case, matching listFiles/downloadToDisk/deleteFile/createShareURL's
+      // fallback behavior. Only a genuine relay-reported "Not connected"
+      // (from the relay's own JSON error body, not the credential-missing
+      // guard above -- see relayFetch's comment) rethrows, same guard those
+      // three functions use.
       if (e.message.includes('Not connected')) throw e
-      throw e
+      // Reset progress to the start of the WASM path so the bar doesn't
+      // look like it's rewinding from ~85% back to 0/5%.
+      tick('uploading', 5)
     }
   }
 
