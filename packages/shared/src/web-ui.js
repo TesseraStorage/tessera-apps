@@ -77,9 +77,9 @@ const SKELETON = /*html*/`
   <!-- WELCOME -->
   <section id="welcomeScreen" class="panel">
     <h2>Tessera</h2>
-    <p>Your files. This browser.</p>
+    <p>Welcome to your private cloud</p>
     <p style="margin-top:14px">
-      <button id="btnCreate" class="btn btn-primary btn-lg">I&rsquo;m new</button>
+      <button id="btnCreate" class="btn btn-outline btn-lg">I&rsquo;m new</button>
     </p>
     <p style="margin-top:8px">
       <button id="btnHaveWords" class="btn btn-outline btn-lg">I already have an account</button>

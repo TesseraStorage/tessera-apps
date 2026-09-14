@@ -162,6 +162,7 @@ body {
    allows, just with a real visible border on first paint. */
 .btn-outline {
   background: transparent;
+  border-width: 2px;
   border-color: var(--border2);
   color: var(--ink2);
 }
