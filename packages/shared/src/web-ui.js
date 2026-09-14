@@ -821,30 +821,31 @@ async function doUpload(file) {
   patchState({ status: '', progress: { stage: 'Preparing\u2026', percent: 0, elapsed: 0 } })
   try {
     await waitForReady(sdk)
-    // FIX (2026-09-14, "tessera-web-map-30"): "Arcs exist when Add
-    // starts, not when the shard lands... At Add start, take the host
-    // list the SDK is about to use. One fetch if the write needs it
-    // anyway; share it." This is the packet's own explicitly-permitted
-    // exception to the zero-hosts()-calls rule from the two prior map
-    // tasks ("At most one host-list fetch per active upload, shared
-    // with the write. No polling loop.") -- exactly ONE sdk.hosts()
-    // call per upload, right here, before sdk.upload() starts. Its
-    // result is NOT passed into uploadFile()/sdk.upload() as a forced
-    // host set -- the SDK's own UploadOptions has no such parameter
-    // (confirmed via sia_storage_wasm.d.ts: dataShards/parityShards/
-    // maxBufferedSlabs/startOffset/onShardUploaded only) -- so this is
-    // "shared" in the sense of drawing the SAME live host pool the
-    // write is about to pick from, not literally the same objects. If
-    // this fetch fails for any reason, the upload still proceeds
-    // unaffected -- the map simply has no Add-start preview that run.
-    try {
-      const hosts = await sdk.hosts({ limit: 60 })
-      if (mapController && hosts) {
-        mapController.showCandidates(
-          hosts.filter(h => h.goodForUpload).map(h => h.publicKey)
-        )
-      }
-    } catch (e) { console.warn('[tessera-web] map candidate hosts() failed:', e.message) }
+    // FIX (2026-09-14, "tessera-web-occupy-fade"): REMOVED. The extra
+    // sdk.hosts({limit:60}) call the "tessera-web-map-30" packet added
+    // here (for the Add-start candidate preview) is a SECOND, real
+    // GET /hosts occupy on top of whatever sdk.upload() below already
+    // does internally -- confirmed live and directly, not by inference:
+    // live fleet.served_windows showed 1056 undecremented rows for one
+    // single customer pubkey, produced by calls firing 200-400ms apart
+    // over about 90 seconds, each occupying 33 real hosts, with zero
+    // matching pins ever landing for any of them (that pubkey traces to
+    // this task's own repeated live verification sdk.hosts() calls
+    // across the prior three map packets, made worse specifically by
+    // this Add-start call being on the SAME account and firing on every
+    // single Add). "One fetch if the write needs it anyway; share it"
+    // assumed sdk.upload()'s internal host resolution and this call
+    // were the SAME fetch -- they are not: sdk.upload()'s own
+    // UploadOptions has no host-list parameter to receive this
+    // result (confirmed via sia_storage_wasm.d.ts, same finding as
+    // the prior packet), so this call could only ever be additional,
+    // never shared. Per this packet's law ("remove it unless you can
+    // prove it is the same fetch the write already needs and does not
+    // double-increment") -- it could not be proven, so it is removed.
+    // showCandidates() in map.js is now dead code (no caller) -- left
+    // in place rather than deleted, since a future packet may restore
+    // an Add-start preview through a genuinely shared signal; not
+    // removing working code outside this packet's asked-for scope.
     await uploadFile(sdk, file, ({ stage, percent, elapsed, hostKey }) => {
       // Real target only -- setProgressTarget's own ease-out never passes
       // this value (see EASE_MS comment above). The 'done' tick still
@@ -870,6 +871,18 @@ async function doUpload(file) {
     // visible under the fail text until the next upload starts.
     stopEase()
     patchState({ progress: null, status: 'Add failed: ' + (e.message || 'error') })
+    // FIX (2026-09-14, "tessera-web-occupy-fade"): "completeWrite() (or
+    // equivalent) runs when uploadFile resolves OR REJECTS. Arcs fade.
+    // A hung Add must not leave gold lines forever." Previously only
+    // called on the success path -- a failed/thrown upload left every
+    // traveling arc drawn at full brightness indefinitely (no fade,
+    // no promotion to the quieter landed state). Now called in both
+    // branches; on the fail path this also means any partial landed
+    // destinations from shards that DID complete before the failure
+    // keep their glow (per the "destination glow stays" rule, which
+    // completeWrite() already respects unconditionally), while only
+    // the arc LINES fade -- consistent with a successful completion.
+    if (mapController) mapController.completeWrite()
     console.error(e)
   } finally { setBusy(false) }
 }
