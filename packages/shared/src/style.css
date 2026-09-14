@@ -549,6 +549,76 @@ input:focus { border-color: var(--cyan); }
 /* ── hidden ───────────────────────────────────────────── */
 .hidden { display: none !important; }
 
+/* ── files layout + upload map (2026-09-14, "tessera-web-map-progress")
+   Files column stays the existing .column-screen centered box by
+   default; on Add it gains .files-narrow (pushed left, narrower) while
+   .map-pane slides in from the right. Both live inside #filesLayout, a
+   plain flex row -- no new grid system, no second app shell. ────── */
+#filesLayout {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 0;
+  max-width: 100%;
+  position: relative;
+  overflow: hidden;
+}
+#filesLayout .column-screen {
+  transition: max-width .35s ease, margin .35s ease;
+  flex-shrink: 0;
+}
+#filesLayout .column-screen.files-narrow {
+  max-width: 300px;
+  margin: 60px 0 14px 24px;
+}
+.btn-show-map, .btn-hide-map {
+  font-size: 12px;
+}
+.btn-show-map {
+  margin-top: 10px;
+}
+.map-pane {
+  width: 0;
+  max-width: 480px;
+  flex-grow: 1;
+  margin: 60px 24px 14px 0;
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  overflow: hidden;
+  opacity: 0;
+  transform: translateX(24px);
+  transition: opacity .35s ease, transform .35s ease, width .35s ease;
+  min-height: 360px;
+}
+.map-pane:not(.hidden) {
+  width: 480px;
+  opacity: 1;
+  transform: translateX(0);
+}
+.map-canvas {
+  width: 100%;
+  height: 100%;
+  min-height: 360px;
+  display: block;
+}
+.btn-hide-map {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 5;
+  background: rgba(16, 23, 31, 0.85);
+}
+.map-caption {
+  position: absolute;
+  bottom: 10px;
+  left: 12px;
+  font-size: 12px;
+  color: var(--ink2);
+  z-index: 5;
+}
+
 /* ── scrollbar ────────────────────────────────────────── */
 .file-list::-webkit-scrollbar { width: 6px; }
 .file-list::-webkit-scrollbar-track { background: transparent; }

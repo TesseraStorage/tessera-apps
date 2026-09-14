@@ -204,7 +204,7 @@ export async function uploadFile(sdk, file, onProgress) {
 
   // WASM SDK fallback (no file = called from dropzone, or relay failed)
   const start = Date.now()
-  const tick = (s, p) => { if (onProgress) onProgress({ stage: s, percent: p, elapsed: Date.now() - start }) }
+  const tick = (s, p, hostKey) => { if (onProgress) onProgress({ stage: s, percent: p, elapsed: Date.now() - start, hostKey }) }
   tick('preparing', 0)
 
   // GATE (2026-09-14, "tessera-web-native-wt"): the tunnel preflight
@@ -260,7 +260,12 @@ export async function uploadFile(sdk, file, onProgress) {
       expectedShards = ev.expectedShards
     }
     const pct = 5 + Math.min(85, Math.round((shardsLanded / expectedShards) * 85))
-    tick('uploading (' + shardsLanded + '/' + expectedShards + ' shards)', pct)
+    // FIX (2026-09-14, "tessera-web-map-progress"): forward the event's
+    // own hostKey through onProgress so the caller (web-ui.js) can plot
+    // it on the upload map -- this is the exact same live callback field
+    // already used for the shard counter above, not a second signal or
+    // an extra hosts() call.
+    tick('uploading (' + shardsLanded + '/' + expectedShards + ' shards)', pct, ev && ev.hostKey)
   }
 
   const uploadOptions = { dataShards, parityShards, onShardUploaded }

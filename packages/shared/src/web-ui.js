@@ -28,6 +28,7 @@ import {
   deleteFile, createShareURL, getAccount, waitForReady, initRelay,
   setCredsPrefix,
 } from './files.js'
+import { createUploadMap } from './map.js'
 import {
   getState, patchState, subscribe, selectedFile,
   showToast, setBusy, setScreen,
@@ -54,6 +55,7 @@ function cacheRefs() {
     'unlockScreen', 'unlockPassword', 'btnUnlock', 'unlockStatus', 'btnForgotPassword',
     'filesScreen', 'dropzone', 'fileInput', 'fileList', 'fileActions',
     'btnDownload', 'btnShare', 'btnDelete', 'btnRemoveBrowser',
+    'filesLayout', 'btnShowMap', 'mapPane', 'btnHideMap', 'mapCanvas', 'mapCaption',
     'statusText', 'progressWrap', 'progressFill', 'progressLabel',
     'shareModal', 'shareLink', 'btnCopyLink', 'btnCloseModal',
     'toast',
@@ -167,33 +169,42 @@ const SKELETON = /*html*/`
     <p id="unlockStatus" class="status-text"></p>
   </section>
 
-  <!-- FILES -->
-  <section id="filesScreen" class="panel column-screen hidden">
-    <h2>Tessera</h2>
-    <div id="dropzone" class="dropzone">
-      <div class="dz-icon">\u{1F4C1}</div>
-      <div class="dz-text">Add a file</div>
-      <div class="dz-hint">or click to browse</div>
-    </div>
-    <input type="file" id="fileInput" hidden>
+  <!-- FILES + MAP -->
+  <div id="filesLayout" class="files-layout">
+    <section id="filesScreen" class="panel column-screen hidden">
+      <h2>Tessera</h2>
+      <div id="dropzone" class="dropzone">
+        <div class="dz-icon">\u{1F4C1}</div>
+        <div class="dz-text">Add a file</div>
+        <div class="dz-hint">or click to browse</div>
+      </div>
+      <input type="file" id="fileInput" hidden>
 
-    <div id="progressWrap" class="progress-wrap hidden">
-      <div class="progress-track"><div id="progressFill" class="progress-fill"></div></div>
-      <div class="progress-label"><span id="progressLabel"></span></div>
-    </div>
+      <div id="progressWrap" class="progress-wrap hidden">
+        <div class="progress-track"><div id="progressFill" class="progress-fill"></div></div>
+        <div class="progress-label"><span id="progressLabel"></span></div>
+      </div>
 
-    <div id="fileList" class="file-list"></div>
+      <div id="fileList" class="file-list"></div>
 
-    <div id="fileActions" class="actions-bar hidden">
-      <button id="btnDownload" class="btn" disabled>Download</button>
-      <button id="btnShare" class="btn" disabled>Share</button>
-      <button id="btnDelete" class="btn btn-danger" disabled>Delete</button>
-    </div>
-    <p id="statusText" class="status-text"></p>
-    <p style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border)">
-      <button id="btnRemoveBrowser" class="btn btn-ghost">Remove from this browser</button>
-    </p>
-  </section>
+      <div id="fileActions" class="actions-bar hidden">
+        <button id="btnDownload" class="btn" disabled>Download</button>
+        <button id="btnShare" class="btn" disabled>Share</button>
+        <button id="btnDelete" class="btn btn-danger" disabled>Delete</button>
+      </div>
+      <p id="statusText" class="status-text"></p>
+      <p style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border)">
+        <button id="btnRemoveBrowser" class="btn btn-ghost">Remove from this browser</button>
+      </p>
+      <button id="btnShowMap" class="btn btn-ghost btn-show-map hidden">Show map</button>
+    </section>
+
+    <aside id="mapPane" class="map-pane hidden">
+      <button id="btnHideMap" class="btn btn-ghost btn-hide-map">Hide map</button>
+      <canvas id="mapCanvas" class="map-canvas"></canvas>
+      <div id="mapCaption" class="map-caption"></div>
+    </aside>
+  </div>
 
   <!-- SHARE MODAL -->
   <div id="shareModal" class="modal-overlay hidden">
@@ -237,6 +248,8 @@ export async function mountApp(container) {
   r.btnForgotPassword.addEventListener('click', onForgotPassword)
   r.btnLock.addEventListener('click', onLock)
   r.btnRemoveBrowser.addEventListener('click', onRemoveBrowser)
+  r.btnHideMap.addEventListener('click', hideMap)
+  r.btnShowMap.addEventListener('click', showMap)
 
   r.dropzone.addEventListener('click', () => r.fileInput.click())
   r.fileInput.addEventListener('change', onFilePicked)
@@ -288,8 +301,18 @@ export async function mountApp(container) {
   subscribe('progress', v => {
     if (v) {
       r.progressWrap.classList.remove('hidden')
-      r.progressFill.style.width = v.percent + '%'
+      // FIX (2026-09-14, "tessera-web-map-progress"): percent is NOT
+      // painted here -- doUpload() already calls setProgressTarget(percent)
+      // synchronously right before this patchState fires, which starts
+      // (or updates) the ease-forward timer toward that same real value.
+      // Rendering v.percent directly here too would jump the bar straight
+      // to the target every tick and defeat the whole point of easing
+      // between shard events. This subscriber only owns the label text
+      // and the map pin -- renderProgressBar() is owned exclusively by
+      // setProgressTarget()'s timer (plus the explicit 0%/100% calls in
+      // doUpload at start/completion).
       r.progressLabel.textContent = v.stage + (v.elapsed ? ' \u00b7 ' + Math.round(v.elapsed / 1000) + 's' : '')
+      if (v.hostKey) mapController && mapController.landedHost(v.hostKey)
     } else {
       r.progressWrap.classList.add('hidden')
     }
@@ -329,6 +352,7 @@ function renderScreen(s) {
   r.recoverScreen.classList.toggle('hidden', s !== 'recover' && s !== 'recoverApproval')
   r.unlockScreen.classList.toggle('hidden', s !== 'unlock')
   r.filesScreen.classList.toggle('hidden', s !== 'files')
+  r.filesLayout.classList.toggle('hidden', s !== 'files')
   r.header.classList.toggle('hidden', s === 'loading' || s === 'welcome')
 }
 
@@ -706,19 +730,110 @@ async function processUploadQueue() {
   }
 }
 
+// ── upload map (2026-09-14, "tessera-web-map-progress") ─
+//
+// Lazily created on first Add so the map's CDN assets (topojson,
+// topojson-client) and geo.json only ever load once an upload actually
+// starts -- never on preload, never on boot. Kept as a stable module-
+// level reference (not re-created per upload) so seenHosts/marks reset
+// via mapController.reset() at the start of each upload instead of
+// tearing down and rebuilding the canvas every time.
+let mapController = null
+let mapShown = false
+
+function ensureMapController() {
+  if (!mapController) mapController = createUploadMap(r.mapCanvas, r.mapCaption)
+  return mapController
+}
+
+function showMap() {
+  ensureMapController()
+  r.filesScreen.classList.add('files-narrow')
+  r.mapPane.classList.remove('hidden')
+  r.btnShowMap.classList.add('hidden')
+  mapShown = true
+}
+
+function hideMap() {
+  r.filesScreen.classList.remove('files-narrow')
+  r.mapPane.classList.add('hidden')
+  // Only offer "Show map" again if this browser has actually seen a map
+  // this session (btnShowMap stays hidden before the first Add ever
+  // shows one) -- "one pair of controls, no third layout."
+  if (mapController) r.btnShowMap.classList.remove('hidden')
+  mapShown = false
+}
+
+// ── steady progress: interpolate between real shard ticks ─
+//
+// LAW: "Between ticks, the bar eases forward. It must never pass the
+// next real shard percent. It must never hit 100% before pinObject
+// returns. On fail, freeze and show the fail line." This is the ONLY
+// place percent is eased -- onShardUploaded's own tick() call in
+// files.js still drives the real target; this timer only interpolates
+// the LAST TWO real values it was given, and is killed immediately on
+// completion or failure so it can never run past what actually happened.
+let _easeTimer = null
+let _easeFrom = 0
+let _easeTo = 0
+let _easeStart = 0
+const EASE_MS = 1800  // slightly under typical inter-shard gap; never overshoots because _easeTo is always the last REAL target
+
+function renderProgressBar(pct) {
+  r.progressFill.style.width = pct + '%'
+}
+
+function stopEase() {
+  if (_easeTimer) { clearInterval(_easeTimer); _easeTimer = null }
+}
+
+function setProgressTarget(pct) {
+  stopEase()
+  _easeFrom = parseFloat(r.progressFill.style.width) || 0
+  _easeTo = pct
+  _easeStart = Date.now()
+  if (_easeTo <= _easeFrom) { renderProgressBar(_easeTo); return }
+  _easeTimer = setInterval(() => {
+    const t = Math.min(1, (Date.now() - _easeStart) / EASE_MS)
+    // ease-out: fast at first, settling just short of the target so a
+    // slow shard never makes the bar look "done" before the real tick
+    // arrives. Capped at _easeTo - 0.5 until the NEXT real tick calls
+    // setProgressTarget again (or completion explicitly sets exactly 100).
+    const eased = _easeFrom + (_easeTo - _easeFrom) * (1 - Math.pow(1 - t, 2))
+    renderProgressBar(Math.min(eased, _easeTo - (t < 1 ? 0.5 : 0)))
+    if (t >= 1) stopEase()
+  }, 80)
+}
+
 async function doUpload(file) {
   const sdk = getState().sdk; if (!sdk) return
   setBusy(true)
+  if (mapController) mapController.reset()
+  showMap()
+  stopEase()
+  renderProgressBar(0)
   patchState({ status: '', progress: { stage: 'Preparing\u2026', percent: 0, elapsed: 0 } })
   try {
     await waitForReady(sdk)
-    await uploadFile(sdk, file, ({ stage, percent, elapsed }) => {
-      patchState({ progress: { stage, percent, elapsed } })
+    await uploadFile(sdk, file, ({ stage, percent, elapsed, hostKey }) => {
+      // Real target only -- setProgressTarget's own ease-out never passes
+      // this value (see EASE_MS comment above). The 'done' tick still
+      // sets exactly 100, but only files.js ever calls that, after
+      // pinObject() has already returned -- never this eased path.
+      setProgressTarget(percent)
+      patchState({ progress: { stage, percent, elapsed, hostKey } })
     })
+    stopEase()
+    renderProgressBar(100)
     patchState({ progress: null })
     showToast('\u2705 ' + file.name + ' added')
     await refreshFiles()
   } catch (e) {
+    // "On fail, freeze and show the fail line." -- stop any in-flight
+    // ease immediately so the bar does not keep creeping toward a shard
+    // count that will never arrive; the exact frozen percent stays
+    // visible under the fail text until the next upload starts.
+    stopEase()
     patchState({ progress: null, status: 'Add failed: ' + (e.message || 'error') })
     console.error(e)
   } finally { setBusy(false) }
