@@ -108,6 +108,44 @@ async function getTunnelBaseUrl() {
   return proxyOrigin().replace(/^http/, 'ws')
 }
 
+// ── Tunnel reachability preflight ────────────────────────
+//
+// FIX (2026-09-14, "tessera-web-upload-hang"): sdk.upload() internally
+// opens a WebTransport per host, which this shim turns into a WebSocket to
+// <origin>/__tunnel__. On Tessera Web that nginx location does not exist
+// (only Drop has /v2/tessera/drop/__tunnel__ -- tessera-proxy.service is
+// also dead by law, so even Drop's tunnel is currently unserved). Each
+// individual WS attempt fails FAST client-side (~onerror/onclose within
+// milliseconds, confirmed live: code 1006 in well under a second) -- the
+// visible "hang at 5%" is not one slow connection, it's the wasm SDK
+// retrying across ~30 hosts and/or sitting on files.js's own 5-minute
+// upload timeout with no per-host failure surfaced to the progress
+// callback. This preflight makes exactly ONE real WS attempt against the
+// real tunnel URL before sdk.upload() is ever called, so a doomed upload
+// fails in under a second instead of silently occupying up to 5 minutes
+// (and, per the operator's own report, taking the host-selection "bag"
+// with it for that long -- Pinwatch customer TTL is 5 minutes).
+export async function checkTunnelReachable(timeoutMs = 2000) {
+  const base = await getTunnelBaseUrl()
+  const wsUrl = base + '/__tunnel__?host=preflight&port=9983'
+  return new Promise((resolve) => {
+    let done = false
+    const finish = (ok) => { if (!done) { done = true; try { ws.close() } catch (_) {} ; resolve(ok) } }
+    const timer = setTimeout(() => finish(false), timeoutMs)
+    let ws
+    try {
+      ws = new WebSocket(wsUrl)
+    } catch (_) {
+      clearTimeout(timer)
+      finish(false)
+      return
+    }
+    ws.onopen = () => { clearTimeout(timer); finish(true) }
+    ws.onerror = () => { clearTimeout(timer); finish(false) }
+    ws.onclose = () => { clearTimeout(timer); finish(false) }
+  })
+}
+
 // ── WebTransport → WebSocket bridge ──────────────────────
 //
 // Replaces window.WebTransport for sia host connections.  Each WebTransport

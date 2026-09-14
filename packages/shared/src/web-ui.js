@@ -250,7 +250,7 @@ export async function mountApp(container) {
   r.dropzone.addEventListener('dragleave', () => r.dropzone.classList.remove('dragover'))
   r.dropzone.addEventListener('drop', e => {
     e.preventDefault(); r.dropzone.classList.remove('dragover')
-    const f = e.dataTransfer.files; if (f && f.length) doUpload(f[0])
+    const f = e.dataTransfer.files; if (f && f.length) enqueueUpload(f[0])
   })
 
   // Browser Back (2026-09-14, "tessera-web-column-back-invite"): real History
@@ -669,7 +669,41 @@ function renderFileList() {
 function onFilePicked() {
   const f = r.fileInput.files && r.fileInput.files[0]
   r.fileInput.value = ''
-  if (f) doUpload(f)
+  if (f) enqueueUpload(f)
+}
+
+// FIX (2026-09-14, "tessera-web-upload-hang"): "Files are a queue. One
+// object at a time. Drop-while-busy enqueues. It does not start a second
+// upload. It does not call hosts() for the waiter." A second drop used to
+// call doUpload() directly, same as the first -- two concurrent
+// sdk.upload() calls, each independently driving the wasm SDK's own host
+// selection/occupancy. Now every drop goes through this queue; only the
+// front of the queue is ever an active upload, and a queued file makes NO
+// SDK call (no hosts(), no upload()) until it's actually its turn.
+let _uploadQueue = []
+let _uploadActive = false
+
+function enqueueUpload(file) {
+  _uploadQueue.push(file)
+  if (_uploadQueue.length > 1) {
+    showToast('\u23F3 Queued: ' + file.name + ' (waiting for current upload)')
+  }
+  processUploadQueue()
+}
+
+async function processUploadQueue() {
+  if (_uploadActive) return
+  const file = _uploadQueue.shift()
+  if (!file) return
+  _uploadActive = true
+  try {
+    await doUpload(file)
+  } finally {
+    _uploadActive = false
+    // Next queued file (if any) only starts now -- no parallel uploads,
+    // no extra hosts() call fired just because something is waiting.
+    processUploadQueue()
+  }
 }
 
 async function doUpload(file) {
