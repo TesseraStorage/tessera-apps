@@ -344,11 +344,12 @@ let _preloadStarted = false
 function kickoffPreload() {
   if (_preloadStarted) return
   _preloadStarted = true
-  // 1. wasm engine start, in the background. 'direct' fetch mode: Tessera
-  //    Web's indexer calls go straight to index.dithr.dev (CORS-open,
-  //    self-signed requests -- see connectWithInvite() in auth.js) instead
-  //    of through the dead tessera-proxy.service '/__proxy__' path Drop uses.
-  initSia('direct').catch(e => console.warn('[tessera-web] preload initSia failed:', e.message))
+  // 1. wasm engine start, in the background. 'idx' fetch mode: Tessera
+  //    Web's indexer calls route through this app's own same-origin
+  //    /v2/tessera/web/idx/ nginx proxy (2026-09-14 "tessera-web-invite-fetch"
+  //    fix -- see interceptor.js's MODE UPDATE comment for why 'direct'
+  //    broke the invite-approval POST specifically).
+  initSia('idx').catch(e => console.warn('[tessera-web] preload initSia failed:', e.message))
   // 2. warm the indexer proxy path with a harmless GET. Only meaningful
   //    once a real sdk exists (post-Unlock/Set-password reconnect) --
   //    with no sdk yet (fresh Welcome visit, no account attached), there
@@ -396,10 +397,14 @@ async function onInviteContinue() {
     // as the password.'"): the invite typed above IS the connect key,
     // submitted directly to the indexer's approval endpoint from here --
     // see connectWithInvite() in auth.js for the confirmed-live, no-Indexd-
-    // edit mechanism. If this ever stops working (endpoint hardened,
-    // CORS closed), it throws and the catch below shows the real error --
-    // this path does not fall back to a second tab.
-    const { builder, appId, phrase } = await connectWithInvite(invite, PREFIX, 'direct')
+    // edit mechanism. Routed through 'idx' (same-origin /v2/tessera/web/idx/
+    // proxy) as of "tessera-web-invite-fetch" -- the approval POST's target
+    // route has no CORS headers on index.dithr.dev directly, so 'direct'
+    // mode's cross-origin call was failing preflight ("Failed to fetch").
+    // If this ever stops working (proxy route removed, Indexd hardened),
+    // it throws and the catch below shows the real error -- this path does
+    // not fall back to a second tab.
+    const { builder, appId, phrase } = await connectWithInvite(invite, PREFIX, 'idx')
     patchState({ builder, appId, phrase })
     r.inviteInput.value = ''
     r.inviteStatus.textContent = ''

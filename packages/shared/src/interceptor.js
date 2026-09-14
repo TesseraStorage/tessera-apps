@@ -10,20 +10,30 @@
 // MODE (2026-09-14, "tessera-web-column-back-invite"): installFetchInterceptor
 // now takes an optional `mode` -- 'proxy' (default, Drop's exact original
 // behavior, unchanged) rewrites indexer URLs through proxyOrigin()+'/__proxy__'.
-// 'direct' skips that rewrite entirely and lets the request go straight to
-// index.dithr.dev. Tessera Web uses 'direct' because (a) tessera-proxy.service
-// stays dead per law, so '/__proxy__' 502s, and (b) the real indexer's
-// app-facing routes (/auth/connect, /auth/connect/:id/status,
-// /auth/connect/:id/register, /account, /objects, /sharing, /slabs) are all
-// CORS-enabled (Access-Control-Allow-Origin: *, confirmed live via curl) and
-// every wasm SDK request is self-signed (sc/ss/sv query params), so no Indexd
-// edit is needed to reach them same-origin-free. Drop is unaffected -- it
-// never passes a mode argument, so installFetchInterceptor(undefined) is
-// byte-identical to before this change.
-
+//
+// MODE UPDATE (2026-09-14, "tessera-web-invite-fetch"): 'direct' (the mode
+// Tessera Web previously used) is GONE -- it let indexer requests leave the
+// browser as real cross-origin calls to index.dithr.dev, and one route that
+// path depends on, POST /auth/connect/:requestID (the invite-approval call
+// connectWithInvite() makes), has NO CORS headers at all on that origin
+// (confirmed live: OPTIONS and POST both come back with zero
+// Access-Control-Allow-* headers -- it's in indexd's own "disabledRoutes"
+// bucket precisely to keep it off a second, unofficial cross-origin surface).
+// Every sibling route (/auth/connect, .../status, .../register, /account,
+// /objects, /sharing, /slabs) IS CORS-open, so this was easy to miss by
+// spot-checking only those -- the browser's real "Failed to fetch" is that
+// one route's own preflight failing, not a general CORS-vs-signed-URL
+// question.
+//
+// 'idx' is the fix: same-origin rewrite through THIS app's own
+// /v2/tessera/web/idx/ nginx location (proxy_pass https://index.dithr.dev/),
+// exactly like Drop's /v2/tessera/drop/idx/ already proves works. Because
+// the request never leaves the browser as cross-origin, CORS headers (or
+// their absence) on index.dithr.dev stop mattering entirely.
 import { proxyOrigin } from './utils.js'
 
 const INDEXER_HOST = 'index.dithr.dev'
+const INDEXER_ORIGIN = 'https://' + INDEXER_HOST
 
 // ── Fetch interceptor for indexer requests ───────────────
 
@@ -31,7 +41,34 @@ export function installFetchInterceptor(mode = 'proxy') {
   if (window.___tfi___) return
   window.___tfi___ = true
 
-  if (mode === 'direct') return  // let indexer requests go straight through; CORS is open
+  if (mode === 'idx') {
+    // Same-origin rewrite: https://index.dithr.dev/<path> -> <this origin>/idx/<path>
+    const rewrite = (url) => proxyOrigin() + '/idx/' + url.slice(INDEXER_ORIGIN.length).replace(/^\/+/, '')
+
+    const _R = window.Request
+    window.Request = function (input, init) {
+      let url = typeof input === 'string' ? input : input instanceof _R ? input.url : ''
+      if (url.includes(INDEXER_HOST) && !url.includes('/idx/') && !url.includes('localhost')) {
+        const idxUrl = rewrite(url)
+        if (typeof input === 'string') return new _R(idxUrl, init)
+        const opts = { method: input.method, headers: input.headers, mode: input.mode, credentials: input.credentials }
+        if (input.body) { opts.body = input.body; opts.duplex = 'half' }
+        return new _R(idxUrl, opts)
+      }
+      return new _R(input, init)
+    }
+
+    const _f = window.fetch.bind(window)
+    window.fetch = function (input, init) {
+      let url = typeof input === 'string' ? input : input instanceof _R ? input.url : ''
+      if (url.includes(INDEXER_HOST) && !url.includes('/idx/') && !url.includes('localhost'))
+        return _f(rewrite(url), init)
+      return _f(input, init)
+    }
+    return
+  }
+
+  if (mode === 'direct') return  // let indexer requests go straight through; CORS is open (legacy, unused by Tessera Web now)
 
   const _R = window.Request
 
