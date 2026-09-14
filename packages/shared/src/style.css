@@ -151,6 +151,22 @@ body {
 }
 .btn-ghost:hover:not(:disabled) { color: var(--ink); background: var(--surface2); }
 
+/* Welcome screen's secondary action (2026-09-14, "tessera-web-welcome-copy"):
+   plain .btn-ghost has a transparent border AND transparent background, so on
+   first paint (before :hover) it has no visible boundary at all -- it reads as
+   plain text sitting in the paragraph, not a button. That's exactly the bug this
+   packet reports. Scoped to a NEW class rather than editing .btn-ghost itself,
+   because .btn-ghost is also used on Unlock's "Forgot password" and Files'
+   "Lock" -- both explicitly off-limits this packet ("Do not redesign Files /
+   Unlock / Words / Password"). This class is the outline/ghost look the packet
+   allows, just with a real visible border on first paint. */
+.btn-outline {
+  background: transparent;
+  border-color: var(--border2);
+  color: var(--ink2);
+}
+.btn-outline:hover:not(:disabled) { color: var(--ink); border-color: var(--cyan-dim); background: var(--surface2); }
+
 .btn-lg { padding: 10px 24px; font-size: 14px; }
 
 /* ── inputs ───────────────────────────────────────────── */

@@ -79,10 +79,10 @@ const SKELETON = /*html*/`
     <h2>Tessera</h2>
     <p>Your files. This browser.</p>
     <p style="margin-top:14px">
-      <button id="btnCreate" class="btn btn-primary btn-lg">Create</button>
+      <button id="btnCreate" class="btn btn-primary btn-lg">I&rsquo;m new</button>
     </p>
     <p style="margin-top:8px">
-      <button id="btnHaveWords" class="btn btn-ghost">I have my words</button>
+      <button id="btnHaveWords" class="btn btn-outline btn-lg">I already have an account</button>
     </p>
   </section>
 
