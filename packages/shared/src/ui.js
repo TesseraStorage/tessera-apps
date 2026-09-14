@@ -9,10 +9,12 @@ import {
   waitForApproval,
   completeRegistration,
   tryReconnect,
+  reconnectWithAppKey,
   clearCredentials,
   getSaved,
   beginRecovery,
   completeRecovery,
+  setUnlockPassword,
 } from './auth.js'
 import {
   listFiles, computeTotals, uploadFile, downloadToDisk,
@@ -23,6 +25,7 @@ import {
   showToast, setBusy, setScreen,
 } from './store.js'
 import { formatBytes, esc, fmtDateTime, $ } from './utils.js'
+import { hasWrappedVault, unwrapAppKey } from './vault.js'
 
 // ── refs ─────────────────────────────────────────────────
 let root
@@ -37,6 +40,9 @@ function cacheRefs() {
     'recoverScreen','recoverPhraseInput','btnRecover','recoverStatus','btnBackToConnect',
     'phraseScreen','phraseText','btnPhraseDone','phraseStatus',
     'phraseEncryptCheck','phraseEncryptFields','phrasePassword','phrasePasswordConfirm',
+    'setPasswordScreen','setPasswordHint','newPassword','newPasswordConfirm',
+    'btnSetPassword','setPasswordStatus',
+    'unlockScreen','unlockPassword','btnUnlock','unlockStatus','btnForgotPassword',
     'mainScreen','dropzone','fileInput','fileList','fileActions',
     'btnDownload','btnShare','btnDelete',
     'statusText','progressWrap','progressFill','progressLabel',
@@ -131,6 +137,40 @@ const SKELETON = /*html*/`
     <p id="phraseStatus" class="status-text"></p>
   </section>
 
+  <!-- SET PASSWORD -->
+  <section id="setPasswordScreen" class="panel hidden">
+    <h2>Set an unlock password</h2>
+    <p id="setPasswordHint">
+      Choose a password to open Tessera in this browser next time.
+    </p>
+    <div style="display:flex;flex-direction:column;gap:8px;margin:14px 0">
+      <input type="password" id="newPassword" placeholder="Password" autocomplete="new-password">
+      <input type="password" id="newPasswordConfirm" placeholder="Confirm password" autocomplete="new-password">
+    </div>
+    <p style="margin-top:8px">
+      <button id="btnSetPassword" class="btn btn-primary btn-lg">Set password</button>
+    </p>
+    <p class="hint" style="margin-top:10px">
+      This password opens Tessera in this browser. The words are still
+      how you come back on a new one.
+    </p>
+    <p id="setPasswordStatus" class="status-text"></p>
+  </section>
+
+  <!-- UNLOCK -->
+  <section id="unlockScreen" class="panel hidden">
+    <h2>Unlock Tessera</h2>
+    <p>Enter your password to open this browser's Tessera account.</p>
+    <input type="password" id="unlockPassword" placeholder="Password" autocomplete="current-password" style="margin-top:14px">
+    <p style="margin-top:14px">
+      <button id="btnUnlock" class="btn btn-primary btn-lg">Unlock</button>
+    </p>
+    <p style="margin-top:8px">
+      <button id="btnForgotPassword" class="btn btn-ghost">Forgot password</button>
+    </p>
+    <p id="unlockStatus" class="status-text"></p>
+  </section>
+
   <!-- MAIN -->
   <section id="mainScreen" class="panel hidden">
     <div id="dropzone" class="dropzone">
@@ -189,6 +229,9 @@ export async function mountApp(container) {
   r.btnBackToConnect.addEventListener('click', onBackToConnect)
   r.btnRecover.addEventListener('click', onSubmitRecovery)
   r.btnPhraseDone.addEventListener('click', onPhraseDone)
+  r.btnSetPassword.addEventListener('click', onSetPassword)
+  r.btnUnlock.addEventListener('click', onUnlock)
+  r.btnForgotPassword.addEventListener('click', onForgotPassword)
   r.btnLogout.addEventListener('click', onLogout)
   r.phraseEncryptCheck.addEventListener('change', () => {
     r.phraseEncryptFields.classList.toggle('hidden', !r.phraseEncryptCheck.checked)
@@ -253,6 +296,8 @@ function renderScreen(s) {
   r.connectScreen.classList.toggle('hidden', s !== 'connect' && s !== 'recoverApproval')
   r.recoverScreen.classList.toggle('hidden', s !== 'recover')
   r.phraseScreen.classList.toggle('hidden', s !== 'phrase')
+  r.setPasswordScreen.classList.toggle('hidden', s !== 'setPassword')
+  r.unlockScreen.classList.toggle('hidden', s !== 'unlock')
   r.mainScreen.classList.toggle('hidden', s !== 'main')
   r.header.classList.toggle('hidden', s === 'loading')
 }
@@ -271,18 +316,49 @@ async function doBoot() {
     console.error(e); return
   }
 
-  // try reconnect
+  // BOOT ORDER (2026-09-14, "drop local latch"):
+  //   1. wrapped vault present            -> Unlock (never touch plaintext akey; there
+  //                                          shouldn't be one once a vault exists, but
+  //                                          this branch does not read it either way)
+  //   2. no vault, but plaintext akey     -> Set password (migration path for browsers
+  //                                          that attached before the latch existed)
+  //   3. neither                          -> normal Connect screen
+  if (hasWrappedVault()) {
+    r.unlockStatus.textContent = ''
+    r.unlockPassword.value = ''
+    setScreen('unlock')
+    return
+  }
+
   const saved = getSaved()
   if (saved.appKey && saved.appId) {
+    // No latch yet on this browser but a plaintext key already exists --
+    // this is either a pre-latch browser (migrate) or the tail end of a
+    // fresh connect (see onPhraseDone below, which also routes here).
+    // Attach first so the migration screen has a live sdk to show the
+    // header/ready-dot against, same as the pre-latch reconnect used to.
     r.connectHint.textContent = 'Reconnecting\u2026'
     const sdk = await tryReconnect()
-    if (sdk) { patchState({ sdk }); registerSdk(sdk); await initNativeBridge(); await initRelay(); await enterMain(); return }
+    if (sdk) {
+      patchState({ sdk }); registerSdk(sdk)
+      await initNativeBridge(); await initRelay()
+      goToSetPassword('Set a password to skip this reconnect next time.')
+      return
+    }
     clearCredentials()
   }
 
   r.connectHint.textContent = 'Click Connect to link this browser to your Tessera account.'
   r.btnConnect.disabled = false
   r.btnRecoverAccount.disabled = false
+}
+
+function goToSetPassword(hint) {
+  r.setPasswordHint.textContent = hint || 'Choose a password to open Tessera in this browser next time.'
+  r.newPassword.value = ''
+  r.newPasswordConfirm.value = ''
+  r.setPasswordStatus.textContent = ''
+  setScreen('setPassword')
 }
 
 // ── connect ──────────────────────────────────────────────
@@ -382,7 +458,7 @@ async function onSubmitRecovery() {
       registerSdk(result.sdk)
       await initNativeBridge()
       await initRelay()
-      await enterMain()
+      goToSetPassword()
       return
     }
 
@@ -410,7 +486,7 @@ async function onSubmitRecovery() {
     r.connectApprovalBox.classList.add('hidden')
     await initNativeBridge()
     await initRelay()
-    await enterMain()
+    goToSetPassword()
   } catch (e) {
     const msg = e.message || 'Unknown error'
     r.recoverStatus.textContent = 'Recovery failed: ' + msg
@@ -463,7 +539,7 @@ async function onPhraseDone() {
     registerSdk(sdk)
     await initNativeBridge()
     await initRelay()
-    await enterMain()
+    goToSetPassword()
   } catch (e) {
     r.phraseStatus.textContent = 'Registration failed: ' + (e.message || 'Unknown error')
     r.btnPhraseDone.disabled = false
@@ -488,6 +564,77 @@ async function encryptPhraseLocal(phrase, password) {
     encrypted: btoa(String.fromCharCode(...combined)),
     salt: btoa(String.fromCharCode(...salt)),
   }
+}
+
+// ── set password / unlock ─────────────────────────────────
+
+async function onSetPassword() {
+  const pw = r.newPassword.value
+  if (!pw) {
+    r.setPasswordStatus.textContent = 'Please enter a password.'
+    return
+  }
+  if (pw !== r.newPasswordConfirm.value) {
+    r.setPasswordStatus.textContent = 'Passwords do not match.'
+    return
+  }
+  r.btnSetPassword.disabled = true
+  r.setPasswordStatus.textContent = 'Setting password\u2026'
+  try {
+    await setUnlockPassword(pw)
+    r.newPassword.value = ''
+    r.newPasswordConfirm.value = ''
+    await enterMain()
+  } catch (e) {
+    r.setPasswordStatus.textContent = 'Could not set password: ' + (e.message || 'error')
+    r.btnSetPassword.disabled = false
+    console.error(e)
+  }
+}
+
+async function onUnlock() {
+  const pw = r.unlockPassword.value
+  if (!pw) {
+    r.unlockStatus.textContent = 'Please enter your password.'
+    return
+  }
+  r.btnUnlock.disabled = true
+  r.unlockStatus.textContent = 'Unlocking\u2026'
+  try {
+    const appKeyHex = await unwrapAppKey(pw)
+    const { appId } = getSaved()
+    const sdk = await reconnectWithAppKey(appId, appKeyHex)
+    if (!sdk) {
+      // Wrong password (AES-GCM auth-tag mismatch) or a stale/rejected
+      // key. Either way: stay on Unlock, do NOT delete the vault.
+      r.unlockStatus.textContent = 'Incorrect password.'
+      r.btnUnlock.disabled = false
+      return
+    }
+    patchState({ sdk })
+    registerSdk(sdk)
+    await initNativeBridge(appKeyHex)
+    await initRelay()
+    r.unlockPassword.value = ''
+    await enterMain()
+  } catch (e) {
+    // unwrapAppKey throws on a wrong password too (decrypt failure) --
+    // same "stay on Unlock, vault untouched" outcome as an sdk-level
+    // rejection above.
+    r.unlockStatus.textContent = 'Incorrect password.'
+    r.btnUnlock.disabled = false
+    console.error(e)
+  }
+}
+
+function onForgotPassword() {
+  // Existing Recover-from-phrase flow. This is a NEW attach on this
+  // browser (per the packet's law) -- it does not touch the existing
+  // wrapped vault directly; a successful recovery below re-wraps under
+  // a freshly-chosen password via the normal Set-password screen.
+  r.recoverPhraseInput.value = ''
+  r.recoverStatus.textContent = ''
+  setScreen('recover')
 }
 
 // ── main screen ──────────────────────────────────────────
@@ -645,8 +792,34 @@ async function onCopyLink() {
 }
 
 // ── logout ───────────────────────────────────────────────
-
+//
+// LOCK vs FORGET (2026-09-14, "drop local latch"): once a wrapped vault
+// exists, Log out becomes a LOCK -- drop the sdk from memory, leave the
+// wrapped vault (and appId) exactly as they are, next nav is Unlock.
+// This is deliberately non-destructive: the whole point of the latch is
+// that walking away from the browser should not require the recovery
+// phrase to come back.
+//
+// The OLD destructive behavior (confirm -> clearCredentials(), which
+// deletes appId/appKey AND now the vault too) is kept AS THE FORGET-
+// THIS-BROWSER PATH for browsers that have never set a password --
+// same button, same confirm copy, unchanged for that case. Once a
+// password is set, this button's meaning changes to the lock above;
+// there is no separate destructive control introduced by this packet.
 function onLogout() {
+  if (hasWrappedVault()) {
+    if (window.tesseraDesktop && window.tesseraDesktop.isDesktop) {
+      window.tesseraDesktop.siaDisconnect().catch(() => {})
+    }
+    patchState({
+      sdk: null, accountReady: false,
+      files: [], selectedIdx: -1, totals: { count: 0, totalBytes: 0 },
+      builder: null, phrase: '', status: '', progress: null,
+    })
+    doBoot()  // hasWrappedVault() -> Unlock, per the boot order above
+    return
+  }
+
   if (!confirm('Remove all local credentials? You will need your recovery phrase to log back in.')) return
   clearCredentials()
   // Disconnect native bridge if in desktop mode
@@ -666,13 +839,21 @@ function onLogout() {
 /**
  * In the Electron desktop app, also connect the native NAPI SDK
  * in the main process so upload/download work via raw TCP.
+ *
+ * `appKeyHex` is optional -- pass it explicitly when the key just came
+ * from somewhere other than plaintext localStorage (e.g. Unlock's
+ * unwrapAppKey() result), since getSaved().appKey is empty once the
+ * latch is on. Falls back to getSaved() for the pre-latch/no-vault
+ * case, unchanged from before this packet.
  */
-async function initNativeBridge() {
+async function initNativeBridge(appKeyHex) {
   if (!window.tesseraDesktop || !window.tesseraDesktop.isDesktop) return
   const saved = getSaved()
-  if (!saved.appKey || !saved.appId) return
+  const appId = saved.appId
+  const appKey = appKeyHex || saved.appKey
+  if (!appKey || !appId) return
   try {
-    const result = await window.tesseraDesktop.siaConnect(saved.appId, saved.appKey)
+    const result = await window.tesseraDesktop.siaConnect(appId, appKey)
     if (!result.ok) console.warn('Native bridge connect failed:', result.error)
   } catch (e) {
     console.warn('Native bridge unavailable:', e.message)

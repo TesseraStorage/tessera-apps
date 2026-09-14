@@ -3,6 +3,12 @@
 // Desktop: delegates to native NAPI SDK via IPC.
 // Web: uses proxy relay endpoints (POST /__sia__/upload etc.)
 //      because WebTransport can't reach siamux hosts from the browser.
+//
+// PREFIX (2026-09-14, "tessera-web-v1"): relayCreds()/relayConnect() read
+// the app-id/app-key localStorage pair through an injectable prefix so a
+// second app (Tessera Web, 'tesseraweb') can call these same functions
+// without ever reading Drop's tessera.aid/tessera.akey. Set once via
+// setCredsPrefix() at app startup; defaults to 'tessera' (Drop, unchanged).
 
 import { PinnedObject } from './sdk.js'
 import { proxyOrigin } from './utils.js'
@@ -13,20 +19,35 @@ function isDesktop() {
   return !!(window.tesseraDesktop && window.tesseraDesktop.isDesktop)
 }
 
+let _credsPrefix = 'tessera'
+export function setCredsPrefix(prefix) { _credsPrefix = prefix }
+
 function relayUrl(path) {
   return proxyOrigin() + '/__sia__/' + path
 }
 
 function relayCreds() {
-  const appId = localStorage.getItem('tessera.aid') || ''
-  const appKey = localStorage.getItem('tessera.akey') || ''
+  const appId = localStorage.getItem(_credsPrefix + '.aid') || ''
+  const appKey = localStorage.getItem(_credsPrefix + '.akey') || ''
   if (!appId || !appKey) return ''
   return 'appId=' + encodeURIComponent(appId) + '&appKey=' + encodeURIComponent(appKey)
 }
 
 async function relayFetch(method, path, body) {
   const creds = relayCreds()
-  if (!creds) throw new Error('Not connected — no credentials saved')
+  // FIX (2026-09-14, discovered while building Tessera Web): this used to
+  // throw a message containing the substring "Not connected", which every
+  // call site below re-throws instead of falling back to the WASM SDK
+  // (see the catch blocks). That collided with the ALWAYS-EXPECTED case
+  // of no plaintext appKey being saved at all -- which is now the NORMAL
+  // state for any latched Drop account (tessera-drop-local-latch removed
+  // plaintext tessera.akey once a vault exists) and for any account using
+  // a non-'tessera' creds prefix (Tessera Web). Both cases must fall
+  // through to WASM every time, not re-throw. Renamed so it no longer
+  // matches the 'Not connected' guard; a genuine relay-reported
+  // not-connected error (from the JSON response body, not this check)
+  // still uses that exact phrase and is unaffected.
+  if (!creds) throw new Error('No relay credentials saved for this prefix')
 
   const url = relayUrl(path) + (path.includes('?') ? '&' : '?') + creds
   const opts = { method }
@@ -41,8 +62,8 @@ async function relayFetch(method, path, body) {
 }
 
 async function relayConnect() {
-  const appId = localStorage.getItem('tessera.aid') || ''
-  const appKey = localStorage.getItem('tessera.akey') || ''
+  const appId = localStorage.getItem(_credsPrefix + '.aid') || ''
+  const appKey = localStorage.getItem(_credsPrefix + '.akey') || ''
   if (!appId || !appKey) return false
 
   const resp = await fetch(relayUrl('connect'), {

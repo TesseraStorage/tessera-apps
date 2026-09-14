@@ -5,6 +5,7 @@
   "main": "src/index.js",
   "exports": {
     ".": "./src/index.js",
+    "./web-ui": "./src/web-ui.js",
     "./style.css": "./src/style.css"
   },
   "files": [

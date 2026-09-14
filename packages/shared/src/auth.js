@@ -1,4 +1,11 @@
 // @tessera/shared — authentication
+//
+// PREFIX (2026-09-14, "tessera-web-v1"): every exported function takes an
+// optional `prefix` (default 'tessera', Drop's exact original key names,
+// unchanged) so a second app (Tessera Web, prefix 'tesseraweb') can call
+// these same functions against its own localStorage keys without ever
+// touching tessera.aid/tessera.akey. Calling with no prefix argument
+// reproduces Drop's pre-2026-09-14 behavior byte-for-byte.
 
 import {
   initSia,
@@ -10,29 +17,77 @@ import {
   registerSdk,
 } from './sdk.js'
 import { randomAppId, fromHex, toHex } from './utils.js'
+import { hasWrappedVault, clearVault, wrapAppKey } from './vault.js'
 
 // ── local-storage keys ──────────────────────────────────
-const LS = {
-  appId: 'tessera.aid',
-  appKey: 'tessera.akey',
+function lsKeys(prefix) {
+  return {
+    appId: prefix + '.aid',
+    appKey: prefix + '.akey',
+  }
 }
 
 // ── credential helpers ──────────────────────────────────
 
-export function getSaved() {
+export function getSaved(prefix = 'tessera') {
+  const LS = lsKeys(prefix)
   return {
     appId: localStorage.getItem(LS.appId) || '',
     appKey: localStorage.getItem(LS.appKey) || '',
   }
 }
 
-function persist(partial) {
+// LATCH (2026-09-14, "drop local latch"): once a wrapped vault exists for
+// this browser/prefix, the plaintext appKey must not be written back to
+// localStorage by anything -- persist() silently drops appKey whenever a
+// vault is present. appId stays plaintext either way (never a secret).
+// Callers that need the appKey to survive a latch (e.g. immediately after
+// wrapping it) go through vault.js directly, not through this function.
+function persist(partial, prefix) {
+  const LS = lsKeys(prefix)
   if (partial.appId !== undefined) localStorage.setItem(LS.appId, partial.appId)
-  if (partial.appKey !== undefined) localStorage.setItem(LS.appKey, partial.appKey)
+  if (partial.appKey !== undefined) {
+    if (hasWrappedVault(prefix)) {
+      // Latch is on: the wrapped vault is the only place appKey may live.
+      // Make sure a stale plaintext copy isn't sitting next to it either.
+      localStorage.removeItem(LS.appKey)
+    } else {
+      localStorage.setItem(LS.appKey, partial.appKey)
+    }
+  }
 }
 
-export function clearCredentials() {
+// clearCredentials() is the destructive "forget this browser" path --
+// clears the plaintext appId/appKey (if any) AND the wrapped vault (if
+// any). Never called on a wrong-password Unlock attempt -- only from an
+// explicit user action (existing Log-out-that-forgets / any future
+// "forget this browser" control).
+export function clearCredentials(prefix = 'tessera') {
+  const LS = lsKeys(prefix)
   Object.values(LS).forEach(k => localStorage.removeItem(k))
+  clearVault(prefix)
+}
+
+/**
+ * Set the unlock password for THIS browser's already-attached account.
+ * Wraps the CURRENT plaintext <prefix>.akey under the password, then --
+ * only after that succeeds -- deletes the plaintext copy. Used both by
+ * the new-attach "Set password" screen and by the migration path for
+ * browsers that already had a plaintext appKey from before the latch
+ * existed. Does not touch appId, does not touch tessera.penc/psalt
+ * (Drop's separate, optional phrase backup -- Tessera Web never writes a
+ * phrase backup at all, per its own law: "12 words on paper rebuild the
+ * silo. We do not keep them."), does not Register, does not mint a new
+ * App ID -- purely a local re-wrap of what is already saved.
+ */
+export async function setUnlockPassword(password, prefix = 'tessera') {
+  const LS = lsKeys(prefix)
+  const saved = getSaved(prefix)
+  if (!saved.appKey) throw new Error('No local app key to protect.')
+  await wrapAppKey(saved.appKey, password, prefix)
+  // Only remove the plaintext copy once the wrap above has actually
+  // succeeded -- never leave the account unreachable.
+  localStorage.removeItem(LS.appKey)
 }
 
 // ── login flow ──────────────────────────────────────────
@@ -44,13 +99,13 @@ export function clearCredentials() {
  * must show `approvalUrl` to the user so they can open it and approve.
  * After that, call waitForApprovalAndRegister().
  */
-export async function beginConnection() {
+export async function beginConnection(prefix = 'tessera') {
   await initSia()
 
-  let { appId } = getSaved()
+  let { appId } = getSaved(prefix)
   if (!appId) {
     appId = randomAppId()
-    persist({ appId })
+    persist({ appId }, prefix)
   }
 
   const idxUrl = getIndexerUrl()
@@ -85,11 +140,11 @@ export async function waitForApproval(builder, appId, onStatus) {
  * Complete registration after the user saves their phrase.
  * Returns the connected SDK instance.
  */
-export async function completeRegistration(builder, phrase) {
+export async function completeRegistration(builder, phrase, prefix = 'tessera') {
   const sdk = await builder.register(phrase)
   const appKeyHex = toHex(sdk.appKey().export())
-  const { appId } = getSaved()
-  persist({ appId, appKey: appKeyHex })
+  const { appId } = getSaved(prefix)
+  persist({ appId, appKey: appKeyHex }, prefix)
   registerSdk(sdk)
   return sdk
 }
@@ -98,21 +153,30 @@ export async function completeRegistration(builder, phrase) {
  * Try to reconnect using saved credentials.
  * Returns SDK or null.
  */
-export async function tryReconnect() {
-  await initSia()
-
-  const saved = getSaved()
+export async function tryReconnect(prefix = 'tessera') {
+  const saved = getSaved(prefix)
   if (!saved.appKey || !saved.appId) return null
+  return reconnectWithAppKey(saved.appId, saved.appKey)
+}
 
+/**
+ * Reconnect using an explicit appId + appKey hex pair, bypassing
+ * localStorage entirely. Used by the Unlock screen: the appKey comes
+ * from vault.unwrapAppKey(password), never from a plaintext read.
+ * Returns SDK or null (never throws -- same "reconnect failed, let the
+ * caller decide what to show" contract as tryReconnect()).
+ */
+export async function reconnectWithAppKey(appId, appKeyHex) {
+  await initSia()
   try {
     const idxUrl = getIndexerUrl()
     const builder = new Builder(idxUrl, {
-      appId: saved.appId,
+      appId,
       name: 'Tessera',
       description: 'Tessera storage client',
       serviceUrl: idxUrl,
     })
-    const key = new AppKey(fromHex(saved.appKey))
+    const key = new AppKey(fromHex(appKeyHex))
     const sdk = await builder.connected(key)
     if (sdk) registerSdk(sdk)
     return sdk || null
@@ -136,16 +200,16 @@ export async function tryReconnect() {
  * When needsApproval is true, the caller must show the approval URL
  * and then call completeRecovery().
  */
-export async function beginRecovery(phrase, onStatus) {
+export async function beginRecovery(phrase, onStatus, prefix = 'tessera') {
   await initSia()
 
   // Validate the phrase first — throws if invalid
   validateRecoveryPhrase(phrase)
 
-  let { appId } = getSaved()
+  let { appId } = getSaved(prefix)
   if (!appId) {
     appId = randomAppId()
-    persist({ appId })
+    persist({ appId }, prefix)
   }
 
   const idxUrl = getIndexerUrl()
@@ -161,7 +225,7 @@ export async function beginRecovery(phrase, onStatus) {
     if (onStatus) onStatus('Validating recovery phrase\u2026')
     const sdk = await builder.register(phrase)
     const appKeyHex = toHex(sdk.appKey().export())
-    persist({ appId, appKey: appKeyHex })
+    persist({ appId, appKey: appKeyHex }, prefix)
     registerSdk(sdk)
     if (onStatus) onStatus('Account recovered!')
     return { sdk, needsApproval: false }
@@ -189,11 +253,11 @@ export async function beginRecovery(phrase, onStatus) {
  * Complete recovery after the user has approved.
  * Returns the connected SDK instance.
  */
-export async function completeRecovery(builder, phrase) {
+export async function completeRecovery(builder, phrase, prefix = 'tessera') {
   const sdk = await builder.register(phrase)
   const appKeyHex = toHex(sdk.appKey().export())
-  const { appId } = getSaved()
-  persist({ appId, appKey: appKeyHex })
+  const { appId } = getSaved(prefix)
+  persist({ appId, appKey: appKeyHex }, prefix)
   registerSdk(sdk)
   return sdk
 }

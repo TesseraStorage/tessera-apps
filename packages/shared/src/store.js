@@ -8,7 +8,7 @@
 const listeners = new Map()    // key → Set<function>
 let state = {
   // App lifecycle
-  screen: 'loading',           // loading | connect | phrase | main
+  screen: 'loading',           // loading | connect | phrase | setPassword | unlock | main
 
   // Connection
   sdk: null,
