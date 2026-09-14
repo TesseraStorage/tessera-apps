@@ -236,7 +236,34 @@ export async function uploadFile(sdk, file, onProgress) {
   obj.updateMetadata(meta)
   tick('uploading', 5)
   const stream = file ? file.stream() : new ReadableStream({ start(c) { c.enqueue(new Uint8Array(0)); c.close() } })
-  const uploadPromise = sdk.upload(obj, stream, { dataShards: 10, parityShards: 20 })
+
+  // FIX (2026-09-14, "tessera-web-progress"): "Bar follows shards and pin.
+  // No fake timer." The stock SDK's real progress signal is the
+  // onShardUploaded option callback (confirmed present in the wasm
+  // binary's own export table alongside dataShards/parityShards/
+  // maxBufferedSlabs -- this is the SDK's own name, not invented here).
+  // Denominator is dataShards + parityShards = 10 + 20 = 30 unless the
+  // SDK's own event ever reports otherwise (defensive fallback below).
+  // 5-90% is real shard-landed progress; 90-100% is the pin phase below.
+  const dataShards = 10
+  const parityShards = 20
+  let expectedShards = dataShards + parityShards
+  let shardsLanded = 0
+  const onShardUploaded = (ev) => {
+    // ev shape per the wasm binary's own field names: hostKey, shardSize,
+    // shardIndex, slabIndex, elapsedMs. Use slabIndex-aware count only if
+    // the SDK ever reports more than one slab; for a single-slab upload
+    // (everything under ~40 MiB, per uploadPacked's own doc comment)
+    // shardIndex 0..(expectedShards-1) covers the whole file.
+    shardsLanded += 1
+    if (ev && typeof ev.expectedShards === 'number' && ev.expectedShards > 0) {
+      expectedShards = ev.expectedShards
+    }
+    const pct = 5 + Math.min(85, Math.round((shardsLanded / expectedShards) * 85))
+    tick('uploading (' + shardsLanded + '/' + expectedShards + ' shards)', pct)
+  }
+
+  const uploadPromise = sdk.upload(obj, stream, { dataShards, parityShards, onShardUploaded })
   const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Upload timed out after 5 minutes')), 300000))
   obj = await Promise.race([uploadPromise, timeoutPromise])
   tick('pinning', 90)
