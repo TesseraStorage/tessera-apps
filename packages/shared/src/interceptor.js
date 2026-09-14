@@ -1,22 +1,37 @@
 // Fetch interceptor + WebTransport→WebSocket bridge for Tessera.
 //
-// Indexer requests (index.dithr.dev) go through the CORS proxy on :3099.
-// WebTransport connections to sia hosts are tunnelled through a WebSocket
-// relay that speaks raw siamux TCP to the host.
+// Indexer requests (index.dithr.dev) go through the CORS proxy on :3099
+// by default. WebTransport connections to sia hosts are tunnelled through
+// a WebSocket relay that speaks raw siamux TCP to the host.
 //
 // In the Electron desktop app the relay is a local server started by main.js.
 // In the web app the relay is the proxy's /__tunnel__ WebSocket endpoint.
+//
+// MODE (2026-09-14, "tessera-web-column-back-invite"): installFetchInterceptor
+// now takes an optional `mode` -- 'proxy' (default, Drop's exact original
+// behavior, unchanged) rewrites indexer URLs through proxyOrigin()+'/__proxy__'.
+// 'direct' skips that rewrite entirely and lets the request go straight to
+// index.dithr.dev. Tessera Web uses 'direct' because (a) tessera-proxy.service
+// stays dead per law, so '/__proxy__' 502s, and (b) the real indexer's
+// app-facing routes (/auth/connect, /auth/connect/:id/status,
+// /auth/connect/:id/register, /account, /objects, /sharing, /slabs) are all
+// CORS-enabled (Access-Control-Allow-Origin: *, confirmed live via curl) and
+// every wasm SDK request is self-signed (sc/ss/sv query params), so no Indexd
+// edit is needed to reach them same-origin-free. Drop is unaffected -- it
+// never passes a mode argument, so installFetchInterceptor(undefined) is
+// byte-identical to before this change.
 
 import { proxyOrigin } from './utils.js'
 
 const INDEXER_HOST = 'index.dithr.dev'
 
 // ── Fetch interceptor for indexer requests ───────────────
-// Always uses the proxy on port 3099.
 
-export function installFetchInterceptor() {
+export function installFetchInterceptor(mode = 'proxy') {
   if (window.___tfi___) return
   window.___tfi___ = true
+
+  if (mode === 'direct') return  // let indexer requests go straight through; CORS is open
 
   const _R = window.Request
 

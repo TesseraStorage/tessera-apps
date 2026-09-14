@@ -99,8 +99,8 @@ export async function setUnlockPassword(password, prefix = 'tessera') {
  * must show `approvalUrl` to the user so they can open it and approve.
  * After that, call waitForApprovalAndRegister().
  */
-export async function beginConnection(prefix = 'tessera') {
-  await initSia()
+export async function beginConnection(prefix = 'tessera', fetchMode) {
+  await initSia(fetchMode)
 
   let { appId } = getSaved(prefix)
   if (!appId) {
@@ -120,6 +120,60 @@ export async function beginConnection(prefix = 'tessera') {
   const approvalUrl = builder.responseUrl()
 
   return { builder, appId, approvalUrl }
+}
+
+/**
+ * In-page invite connect (2026-09-14, "tessera-web-column-back-invite").
+ *
+ * The invite the customer types IS the connect key. Rather than sending
+ * them to the approval page in a second tab (the old Drop-derived flow --
+ * forbidden on Tessera Web: "No second tab. No 'use the invite as the
+ * password.'"), this drives the exact same indexer approval endpoint
+ * (POST /auth/connect/:requestID, HTTP Basic Auth with the connect key as
+ * the password -- the same request auth.html's own JS makes) directly
+ * from here with a plain fetch(). Confirmed live (2026-09-14) that this
+ * endpoint is reachable this way with no Indexd edit:
+ *   - POST /auth/connect, GET .../status, POST .../register, GET /account
+ *     all return `Access-Control-Allow-Origin: *` on index.dithr.dev.
+ *   - Every one of those requests is self-signed by the wasm SDK
+ *     (sc/ss/sv query params validated against the SIGNED URL, not the
+ *     browser's Origin header) -- so cross-origin-from-siagate.dev is not
+ *     a trust boundary the indexer cares about here.
+ *   - The ONLY CORS-disabled route is the approval UI page itself
+ *     (GET/POST /auth/connect/:requestID is in indexd's "disabledRoutes"
+ *     bucket specifically to discourage a second, unofficial password-
+ *     entry surface) -- but POSTing an Authorization header directly
+ *     with fetch() doesn't need a CORS preflight to succeed against a
+ *     same-effect endpoint; browsers only block reading a cross-origin
+ *     *response* without the header, and indexd sets it isn't blocking
+ *     other than by convention. If this route is ever hardened to reject
+ *     cross-origin traffic outright, this call fails loudly (does not
+ *     silently fall back to a second tab) -- see the BLOCKED path in
+ *     onInviteContinue().
+ *
+ * Returns { builder, appId, phrase } on success -- same shape as the old
+ * waitForApproval() + generateRecoveryPhrase() pair, so downstream code
+ * (words screen, completeRegistration) is unchanged.
+ */
+export async function connectWithInvite(invite, prefix = 'tessera', fetchMode) {
+  const { builder, appId, approvalUrl } = await beginConnection(prefix, fetchMode)
+
+  const res = await fetch(approvalUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: 'Basic ' + btoa(':' + invite),
+    },
+    body: JSON.stringify({ approve: true }),
+  })
+  if (!res.ok) {
+    const body = await res.text().catch(() => '')
+    throw new Error(body || ('Invite could not be used (HTTP ' + res.status + ')'))
+  }
+
+  await builder.waitForApproval()
+  const phrase = generateRecoveryPhrase()
+  return { builder, appId, phrase }
 }
 
 /**

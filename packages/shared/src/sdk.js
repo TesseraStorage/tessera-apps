@@ -7,10 +7,10 @@ import {
 import { installFetchInterceptor, installWebTransportShim, registerSdk } from './interceptor.js'
 
 let _ready = false
-export async function initSia() {
+export async function initSia(fetchMode) {
   if (_ready) return
   installWebTransportShim()    // must install BEFORE initWasm — WebTransport is called during WASM init
-  installFetchInterceptor()
+  installFetchInterceptor(fetchMode)
   await initWasm()
   _ready = true
 }
