@@ -263,7 +263,22 @@ export async function uploadFile(sdk, file, onProgress) {
     tick('uploading (' + shardsLanded + '/' + expectedShards + ' shards)', pct)
   }
 
-  const uploadPromise = sdk.upload(obj, stream, { dataShards, parityShards, onShardUploaded })
+  const uploadOptions = { dataShards, parityShards, onShardUploaded }
+  // FIX (2026-09-14, "tessera-web-inflight"): "Faster shard writes."
+  // maxInflight is the stock SDK's own documented upload option (see
+  // node_modules/@siafoundation/sia-storage/README.md's own Uploading
+  // example: `{ maxInflight: 10 }`) -- not invented here. Gated on
+  // window.___wtpoly___ exactly like the tunnel-preflight gate above:
+  // false only for Tessera Web's native-WebTransport path (initSia('idx')
+  // skipped the shim), true for Drop's default shimmed/tunnel path. Per
+  // packet law ("default maxInflight only when the Web prefix path
+  // runs"), Drop's call site through this same shared function is
+  // unchanged -- it still gets plain { dataShards, parityShards,
+  // onShardUploaded } with no maxInflight key at all, identical to
+  // before this task.
+  if (!window.___wtpoly___) uploadOptions.maxInflight = 10
+
+  const uploadPromise = sdk.upload(obj, stream, uploadOptions)
   const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Upload timed out after 5 minutes')), 300000))
   obj = await Promise.race([uploadPromise, timeoutPromise])
   tick('pinning', 90)
