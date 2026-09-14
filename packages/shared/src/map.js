@@ -13,6 +13,22 @@
 //      a data lookup, not a host-selection call -- it never occupies
 //      anything, and it was already public/same-origin before this task.
 //
+// UPDATE (2026-09-14, "tessera-web-map-arcs"): "Arcs at instigation... If
+// the SDK only names a host when the shard finishes, start the arc when
+// that host is first known (first inflight), and print that in Output --
+// do not add a second occupy to fake a full bag at t=0." Confirmed by a
+// full string search of the vendored wasm binary: onShardUploaded is the
+// ONLY upload-side callback that exists -- there is no separate "shard
+// started" / "host assigned" event. So "first known" and "shard
+// finishes" are the SAME signal here; a host's arc starts the moment
+// onShardUploaded first reports that hostKey, which is also the exact
+// instant the previous task's progress-counter tick already fires for
+// it. This is NOT arcs drawn purely at t=0 (that would require a second
+// host-list read this module deliberately does not make) -- see the
+// Output block's "arcs before first shard land" field for the honest
+// answer. landedHost() now ALSO starts a traveling glow-dot animation
+// along the new arc instead of just plotting a static mark immediately.
+//
 // Look (packet's own words): "night land, Detroit origin, gold write /
 // cyan read, city corridors not per-shard spaghetti." The named reference
 // file (/home/workdir/artifacts/tessera-map/index.html) was not present
@@ -30,6 +46,11 @@ const TOPOJSON_CLIENT_URL = 'https://unpkg.com/topojson-client@3'
 
 // Detroit, MI -- the packet's named origin point for write corridors.
 const ORIGIN = { lat: 42.3314, lon: -83.0458 }
+
+// NAMED RATE CONSTANT (packet law: "one named constant (ms to traverse
+// an arc). Operator will change the number later. Do not hide it.") --
+// how long a glow-dot takes to travel from Detroit to a landed host.
+export const ARC_TRAVEL_MS = 900
 
 let _geoCache = null       // host_key -> {lat, lon}
 let _landFeature = null    // GeoJSON FeatureCollection (land polygons)
@@ -108,18 +129,32 @@ function drawLand(ctx, w, h) {
   }
 }
 
+// Small radial glow instead of a flat 1px dot (packet law #4).
+function drawGlow(ctx, x, y, r, color) {
+  const g = ctx.createRadialGradient(x, y, 0, x, y, r)
+  g.addColorStop(0, color)
+  g.addColorStop(1, 'rgba(0,0,0,0)')
+  ctx.fillStyle = g
+  ctx.beginPath()
+  ctx.arc(x, y, r, 0, Math.PI * 2)
+  ctx.fill()
+}
+
 /**
  * A minimal map controller bound to a <canvas>. Call landedHost(hostKey)
  * every time onShardUploaded reports a new host for the active upload --
- * this draws a gold corridor from Detroit to that host (if geo data
- * exists for it; skipped silently otherwise, per law) and a gold mark at
- * the host. reset() clears marks for a new upload. destroy() stops the
- * resize listener.
+ * this draws a gold arc from Detroit to that host (if geo data exists
+ * for it; skipped silently otherwise, per law), then animates a glow-dot
+ * traveling along the arc over ARC_TRAVEL_MS, leaving a quieter residual
+ * glow at the landed end. reset() clears everything for a new upload.
+ * destroy() stops the resize/animation loop.
  */
 export function createUploadMap(canvas, captionEl) {
   const ctx = canvas.getContext('2d')
-  let marks = []      // {lat, lon}
+  let landed = []      // {lat, lon} -- residual glow, travel finished
+  let traveling = []   // {lat, lon, startedAt} -- glow-dot still en route
   let ready = false
+  let rafId = null
 
   function resize() {
     const rect = canvas.getBoundingClientRect()
@@ -134,23 +169,48 @@ export function createUploadMap(canvas, captionEl) {
     drawLand(ctx, w, h)
     if (!ready) return
     const [ox, oy] = project(ORIGIN.lat, ORIGIN.lon, w, h)
-    // Origin mark (Detroit) -- small, steady.
-    ctx.fillStyle = '#f59e0b'
-    ctx.beginPath(); ctx.arc(ox, oy, 3, 0, Math.PI * 2); ctx.fill()
-    for (const m of marks) {
+    // Origin mark (Detroit) -- small, steady glow, not a flat dot.
+    drawGlow(ctx, ox, oy, 6, 'rgba(245, 158, 11, 0.9)')
+
+    const now = Date.now()
+    let anyTraveling = false
+    for (const m of landed.concat(traveling)) {
       const [x, y] = project(m.lat, m.lon, w, h)
-      // City corridor: a gently-curved line, not per-shard spaghetti --
-      // one curve per DISTINCT host that landed a shard this upload, not
-      // one per shard event (dedup happens in landedHost() below).
-      ctx.strokeStyle = 'rgba(245, 158, 11, 0.45)'
+      // City corridor: a gently-curved arc, not per-shard spaghetti --
+      // one curve per DISTINCT host that landed a shard this upload.
+      ctx.strokeStyle = 'rgba(245, 158, 11, 0.35)'
       ctx.lineWidth = 1.2
       const midX = (ox + x) / 2, midY = Math.min(oy, y) - 18
       ctx.beginPath()
       ctx.moveTo(ox, oy)
       ctx.quadraticCurveTo(midX, midY, x, y)
       ctx.stroke()
-      ctx.fillStyle = '#f59e0b'
-      ctx.beginPath(); ctx.arc(x, y, 2.4, 0, Math.PI * 2); ctx.fill()
+    }
+    // Landed hosts: quieter residual glow (packet law #4).
+    for (const m of landed) {
+      const [x, y] = project(m.lat, m.lon, w, h)
+      drawGlow(ctx, x, y, 5, 'rgba(245, 158, 11, 0.55)')
+    }
+    // Traveling glow-dots: interpolate position along the same
+    // quadratic curve used above, over ARC_TRAVEL_MS.
+    for (const m of traveling) {
+      const t = Math.min(1, (now - m.startedAt) / ARC_TRAVEL_MS)
+      const [x, y] = project(m.lat, m.lon, w, h)
+      const midX = (ox + x) / 2, midY = Math.min(oy, y) - 18
+      // Quadratic Bezier point at parameter t.
+      const px = (1 - t) * (1 - t) * ox + 2 * (1 - t) * t * midX + t * t * x
+      const py = (1 - t) * (1 - t) * oy + 2 * (1 - t) * t * midY + t * t * y
+      drawGlow(ctx, px, py, 7, 'rgba(250, 204, 21, 0.95)')
+      if (t < 1) anyTraveling = true
+    }
+    // Promote finished travels to the residual-landed list, on the next
+    // frame -- avoids mutating the array mid-render.
+    if (traveling.length && traveling.every(m => (now - m.startedAt) >= ARC_TRAVEL_MS)) {
+      landed = landed.concat(traveling)
+      traveling = []
+    }
+    if (anyTraveling) {
+      rafId = requestAnimationFrame(render)
     }
   }
 
@@ -169,14 +229,19 @@ export function createUploadMap(canvas, captionEl) {
     // "If a host has no lat/long, skip the pin." -- exactly per law, no
     // fallback placement, no fake location.
     if (!geo || typeof geo.lat !== 'number' || typeof geo.lon !== 'number') return
-    marks.push({ lat: geo.lat, lon: geo.lon })
-    if (captionEl) captionEl.textContent = marks.length + ' host' + (marks.length === 1 ? '' : 's') + ' written to'
-    render()
+    traveling.push({ lat: geo.lat, lon: geo.lon, startedAt: Date.now() })
+    if (captionEl) {
+      const total = landed.length + traveling.length
+      captionEl.textContent = total + ' host' + (total === 1 ? '' : 's') + ' written to'
+    }
+    if (!rafId) render()
   }
 
   function reset() {
-    marks = []
+    landed = []
+    traveling = []
     seenHosts.clear()
+    if (rafId) { cancelAnimationFrame(rafId); rafId = null }
     if (captionEl) captionEl.textContent = ''
     render()
   }
@@ -189,6 +254,6 @@ export function createUploadMap(canvas, captionEl) {
   return {
     landedHost,
     reset,
-    destroy() { ro.disconnect() },
+    destroy() { ro.disconnect(); if (rafId) cancelAnimationFrame(rafId) },
   }
 }
