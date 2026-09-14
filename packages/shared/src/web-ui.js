@@ -815,6 +815,30 @@ async function doUpload(file) {
   patchState({ status: '', progress: { stage: 'Preparing\u2026', percent: 0, elapsed: 0 } })
   try {
     await waitForReady(sdk)
+    // FIX (2026-09-14, "tessera-web-map-30"): "Arcs exist when Add
+    // starts, not when the shard lands... At Add start, take the host
+    // list the SDK is about to use. One fetch if the write needs it
+    // anyway; share it." This is the packet's own explicitly-permitted
+    // exception to the zero-hosts()-calls rule from the two prior map
+    // tasks ("At most one host-list fetch per active upload, shared
+    // with the write. No polling loop.") -- exactly ONE sdk.hosts()
+    // call per upload, right here, before sdk.upload() starts. Its
+    // result is NOT passed into uploadFile()/sdk.upload() as a forced
+    // host set -- the SDK's own UploadOptions has no such parameter
+    // (confirmed via sia_storage_wasm.d.ts: dataShards/parityShards/
+    // maxBufferedSlabs/startOffset/onShardUploaded only) -- so this is
+    // "shared" in the sense of drawing the SAME live host pool the
+    // write is about to pick from, not literally the same objects. If
+    // this fetch fails for any reason, the upload still proceeds
+    // unaffected -- the map simply has no Add-start preview that run.
+    try {
+      const hosts = await sdk.hosts({ limit: 60 })
+      if (mapController && hosts) {
+        mapController.showCandidates(
+          hosts.filter(h => h.goodForUpload).map(h => h.publicKey)
+        )
+      }
+    } catch (e) { console.warn('[tessera-web] map candidate hosts() failed:', e.message) }
     await uploadFile(sdk, file, ({ stage, percent, elapsed, hostKey }) => {
       // Real target only -- setProgressTarget's own ease-out never passes
       // this value (see EASE_MS comment above). The 'done' tick still
@@ -826,6 +850,11 @@ async function doUpload(file) {
     stopEase()
     renderProgressBar(100)
     patchState({ progress: null })
+    // "Do not clear the landed points when the bar hits 100%." --
+    // completeWrite() starts the arc fade-out; it does NOT clear
+    // landed/destination or origin glows. Only the NEXT upload's
+    // reset() clears them.
+    if (mapController) mapController.completeWrite()
     showToast('\u2705 ' + file.name + ' added')
     await refreshFiles()
   } catch (e) {
