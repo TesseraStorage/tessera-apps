@@ -566,16 +566,26 @@ input:focus { border-color: var(--cyan); }
 #filesLayout .column-screen {
   transition: max-width .35s ease, margin .35s ease;
   flex-shrink: 0;
+  position: relative;  /* positioning context for .btn-show-map, top-right corner */
 }
 #filesLayout .column-screen.files-narrow {
   max-width: 260px;
   margin: 60px 0 14px 24px;
 }
-.btn-show-map, .btn-hide-map {
+/* SHOW MAP (2026-09-14, "tessera-web-map-tune"): "Link top-right of the
+   files/drop pane, above and to the right of the Tessera logo. Same
+   pair as Hide map." Absolute top-right corner of #filesScreen, same
+   positioning pattern as .btn-hide-map on the map pane -- the two
+   controls now visually mirror each other on their respective panes. */
+.btn-show-map {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 5;
   font-size: 12px;
 }
-.btn-show-map {
-  margin-top: 10px;
+.btn-hide-map {
+  font-size: 12px;
 }
 /* MAP-ARCS (2026-09-14, "tessera-web-map-arcs"): "Map pane is the
    majority of the Files row. Files / drop column stays usable but

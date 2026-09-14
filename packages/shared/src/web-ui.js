@@ -173,6 +173,13 @@ const SKELETON = /*html*/`
   <div id="filesLayout" class="files-layout">
     <section id="filesScreen" class="panel column-screen hidden">
       <h2>Tessera</h2>
+      <!-- SHOW MAP (2026-09-14, "tessera-web-map-tune"): "Link top-right
+           of the files/drop pane, above and to the right of the Tessera
+           logo." Moved here (was previously a full-width button below
+           'Remove from this browser') and repositioned via CSS to
+           absolute top-right, matching #btnHideMap's own corner
+           placement on the map pane -- "same pair as Hide map." -->
+      <button id="btnShowMap" class="btn btn-ghost btn-show-map hidden">Show map</button>
       <div id="dropzone" class="dropzone">
         <div class="dz-icon">\u{1F4C1}</div>
         <div class="dz-text">Add a file</div>
@@ -196,7 +203,6 @@ const SKELETON = /*html*/`
       <p style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border)">
         <button id="btnRemoveBrowser" class="btn btn-ghost">Remove from this browser</button>
       </p>
-      <button id="btnShowMap" class="btn btn-ghost btn-show-map hidden">Show map</button>
     </section>
 
     <aside id="mapPane" class="map-pane hidden">

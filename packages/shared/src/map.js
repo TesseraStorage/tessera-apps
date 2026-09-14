@@ -1,5 +1,38 @@
 // @tessera/shared — Tessera Web upload map
 //
+// GEOGRAPHY FINDING (2026-09-14, "tessera-web-map-tune") -- OBSERVED,
+// NOT FIXED HERE, PER LAW ("Geography question is observe + cite. Do
+// not retune primary. Do not fake pins in empty oceans."):
+//
+// The Americas/Australia gap is NOT a map-code bug (not a geo.json
+// miss, not a hostKey-normalize miss, not a projection clip). Root
+// cause is upstream, in what a real customer's GET /hosts call actually
+// returns:
+//   - The full writable_pairs pool (indexd's "good for write" set) DOES
+//     have real geographic spread: 293 hosts have geo.json entries, and
+//     72 of those (24.6%) are in the Americas/AU bucket (lon < -30 or
+//     lat < -10) -- queried directly against fleet.writable_pairs
+//     JOIN host_geo.
+//   - BUT Tessera Web's app key has no client_roles row, so hostfilter
+//     (dataplane/hostfilter/main.go) treats it as an unknown customer.
+//     Customers are served via serveWindowThrough with the Push list
+//     from /var/lib/tessera/el-grande-recipe-log.jsonl (pushKeysFromRecipeLog),
+//     NOT a random/geographic sample of writable_pairs -- it's the exact
+//     order a human operator manually pushed hosts in on the El Grande
+//     page, sliced to that recipe's own offer_n.
+//   - Read the LIVE last line of that recipe log directly: offer_n=33,
+//     primary_host_keys has 54 entries. Of the 33 actually served
+//     (push_keys[:33]), 31 have geo.json entries and ALL 31 land in
+//     Southeast Asia or Europe (Malaysia, Singapore, Thailand, China,
+//     Lithuania, South Korea, Taiwan, Germany, Slovakia, Netherlands,
+//     Estonia, UK, Spain, Finland, Bulgaria, Moldova, Romania, Ukraine,
+//     Russia, France -- exhaustively checked every one of the 33).
+//     ZERO Americas, ZERO Australia, in this specific served window.
+//   - This is the current recipe log's own push order, not a mechanism
+//     in this app or in map.js -- the "bag" (per this packet's own
+//     phrasing) is Europe/Asia for THIS window. Printed as the finding,
+//     per law; primary/El Grande's recipe was NOT retuned to fix it.
+//
 // PACKET LAW (2026-09-14, "tessera-web-map-progress"): "hosts() occupies.
 // Do not call hosts() / GET /hosts to feed the map... use what the
 // active upload already knows." Held strictly for two prior tasks (zero
@@ -51,8 +84,8 @@ let ORIGIN = { lat: 25.2, lon: 55.3 }  // Dubai, UAE -- default per this task's 
 
 // NAMED RATE/COUNT CONSTANTS (packet law: "Operator will turn these
 // later. Keep them exported."):
-export const ARC_TRAVEL_MS = 2400   // ms for one glow-dot to traverse an arc (was 900, now slower per this task)
-export const DOTS_PER_ARC = 4       // simultaneous glow-dots per active arc, staggered
+export const ARC_TRAVEL_MS = 4800   // ms for one glow-dot to traverse an arc (2026-09-14 "tessera-web-map-tune": half speed, was 2400)
+export const DOTS_PER_ARC = 2       // simultaneous glow-dots per active arc, staggered (2026-09-14 "tessera-web-map-tune": halved, was 4)
 
 let _geoCache = null       // host_key -> {lat, lon}
 let _landFeature = null    // GeoJSON FeatureCollection (land polygons)
@@ -146,10 +179,31 @@ function drawLand(ctx, w, h) {
     const polys = geom.type === 'Polygon' ? [geom.coordinates] : geom.coordinates
     for (const poly of polys) {
       for (const ring of poly) {
+        // STRAY LINE FIX (2026-09-14, "tessera-web-map-tune"): "Thin
+        // horizontal line ~3/4 down the map... Cite the draw call."
+        // Root cause: this equirectangular projection has NO antimeridian
+        // wrap handling -- when a ring's consecutive points cross from
+        // lon=+180 to lon=-180 (as Antarctica's ring does, since it
+        // spans nearly the full width of the map), ctx.lineTo() draws a
+        // straight chord STRAIGHT ACROSS the canvas connecting those two
+        // x-positions, instead of two separate edges at the left and
+        // right borders. That chord renders as a long, nearly-flat
+        // horizontal stroke at Antarctica's latitude (~63-85S, which is
+        // ~85-98% down a 480px-tall map -- "~3/4 down" is the visible
+        // part of that same line before it exits toward the bottom
+        // edge). Fixed by starting a NEW subpath (moveTo instead of
+        // lineTo) whenever the raw longitude jumps by more than 180
+        // degrees between consecutive ring points -- night land itself
+        // (topojson source, dark fill/stroke colors) is unchanged.
+        let started = false
+        let prevLon = null
         ctx.beginPath()
-        ring.forEach(([lon, lat], i) => {
+        ring.forEach(([lon, lat]) => {
           const [x, y] = project(lat, lon, w, h)
-          if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y)
+          const crossedAntimeridian = prevLon !== null && Math.abs(lon - prevLon) > 180
+          if (!started || crossedAntimeridian) { ctx.moveTo(x, y); started = true }
+          else { ctx.lineTo(x, y) }
+          prevLon = lon
         })
         ctx.closePath()
         ctx.fill()
