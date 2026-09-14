@@ -75,15 +75,17 @@ const SKELETON = /*html*/`
   </header>
 
   <!-- WELCOME -->
-  <section id="welcomeScreen" class="panel">
-    <h2>Tessera</h2>
-    <p>Welcome to your private cloud</p>
-    <p style="margin-top:14px">
-      <button id="btnCreate" class="btn btn-outline btn-lg">I&rsquo;m new</button>
-    </p>
-    <p style="margin-top:8px">
-      <button id="btnHaveWords" class="btn btn-outline btn-lg">I already have an account</button>
-    </p>
+  <section id="welcomeScreen" class="panel welcome-panel">
+    <span class="welcome-brand">Tessera</span>
+    <div class="welcome-center">
+      <p>Welcome to your private cloud</p>
+      <p style="margin-top:14px">
+        <button id="btnCreate" class="btn btn-outline btn-lg">I&rsquo;m new</button>
+      </p>
+      <p style="margin-top:8px">
+        <button id="btnHaveWords" class="btn btn-outline btn-lg">I already have an account</button>
+      </p>
+    </div>
   </section>
 
   <!-- CREATE: INVITE -->
