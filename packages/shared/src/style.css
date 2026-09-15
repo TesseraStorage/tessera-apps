@@ -330,6 +330,52 @@ input:focus { border-color: var(--cyan); }
   font-style: italic;
 }
 
+/* ── breadcrumb + files toolbar (2026-09-15, "tessera-web-folders-v1")
+   "Breadcrumb at the top of the list: Files > Photos > Italy. Each
+   segment is a tap." "Control: New folder next to Add. Secondary
+   button." ──────────────────────────────────────────────────────── */
+.breadcrumb {
+  font-size: 13px;
+  color: var(--ink2);
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.breadcrumb-seg {
+  cursor: pointer;
+}
+.breadcrumb-seg:hover {
+  color: var(--ink);
+  text-decoration: underline;
+}
+.breadcrumb-seg:last-child {
+  color: var(--ink);
+  cursor: default;
+  font-weight: 600;
+}
+.breadcrumb-seg:last-child:hover {
+  text-decoration: none;
+}
+.breadcrumb-sep {
+  color: var(--ink3);
+}
+.files-toolbar {
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.files-toolbar .dropzone {
+  flex: 1;
+  margin-bottom: 0;
+}
+.btn-new-folder {
+  flex-shrink: 0;
+  align-self: center;
+}
+
 /* ── drag & drop zone ─────────────────────────────────── */
 .dropzone {
   border: 2px dashed var(--border2);
@@ -392,6 +438,24 @@ input:focus { border-color: var(--cyan); }
   background: var(--surface2);
   border-color: var(--border2);
 }
+/* FOLDER ROWS (2026-09-15, "tessera-web-folders-v1"): "Folder rows sit
+   above file rows in the current place." Same .file-row look family
+   (no new icon font, no card soup) -- just an added .folder-icon and
+   a small ghost delete button that only this row type carries. */
+.folder-row .file-info { cursor: pointer; }
+.folder-icon {
+  font-size: 18px;
+  flex-shrink: 0;
+  width: 24px;
+  text-align: center;
+}
+.btn-folder-delete {
+  flex-shrink: 0;
+  padding: 4px 8px;
+  font-size: 14px;
+  opacity: .5;
+}
+.btn-folder-delete:hover { opacity: 1; }
 
 .file-row .file-icon {
   font-size: 20px;
@@ -407,6 +471,7 @@ input:focus { border-color: var(--cyan); }
   flex-direction: column;
   gap: 2px;
 }
+
 .file-row .file-name {
   font-size: 14px;
   font-weight: 500;

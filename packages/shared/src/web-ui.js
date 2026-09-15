@@ -27,6 +27,8 @@ import {
   listFiles, computeTotals, uploadFile, downloadToDisk,
   deleteFile, createShareURL, getAccount, waitForReady, initRelay,
   setCredsPrefix,
+  buildPath, folderMarkerName, validateFolderName, computeFolderView,
+  isNonEmptyFolder, findFolderMarkerId, createFolderMarker,
 } from './files.js'
 import { createUploadMap } from './map.js'
 import {
@@ -55,6 +57,7 @@ function cacheRefs() {
     'unlockScreen', 'unlockPassword', 'btnUnlock', 'unlockStatus', 'btnForgotPassword',
     'filesScreen', 'dropzone', 'fileInput', 'fileList', 'fileActions',
     'btnDownload', 'btnShare', 'btnDelete', 'btnRemoveBrowser',
+    'btnNewFolder', 'breadcrumb',
     'filesLayout', 'btnShowMap', 'mapPane', 'btnHideMap', 'mapCanvas',
     'statusText', 'progressWrap', 'progressFill', 'progressLabel',
     'shareModal', 'shareLink', 'btnCopyLink', 'btnCloseModal',
@@ -181,10 +184,20 @@ const SKELETON = /*html*/`
            absolute top-right, matching #btnHideMap's own corner
            placement on the map pane -- "same pair as Hide map." -->
       <button id="btnShowMap" class="btn btn-ghost btn-show-map hidden">Show map</button>
-      <div id="dropzone" class="dropzone">
-        <div class="dz-icon">\u{1F4C1}</div>
-        <div class="dz-text">Add a file</div>
-        <div class="dz-hint">or click to browse</div>
+      <!-- BREADCRUMB (2026-09-15, "tessera-web-folders-v1"): "Files >
+           Photos > Italy. Files is root. Each segment is a tap." One
+           span per segment, built by renderBreadcrumb() -- never a
+           second in-page Back, only forward navigation by tapping an
+           ancestor segment (Browser Back is the real history API,
+           wired separately below). -->
+      <div id="breadcrumb" class="breadcrumb"></div>
+      <div class="files-toolbar">
+        <div id="dropzone" class="dropzone">
+          <div class="dz-icon">\u{1F4C1}</div>
+          <div class="dz-text">Add a file</div>
+          <div class="dz-hint">or click to browse</div>
+        </div>
+        <button id="btnNewFolder" class="btn btn-outline btn-new-folder">New folder</button>
       </div>
       <input type="file" id="fileInput" hidden>
 
@@ -262,6 +275,8 @@ export async function mountApp(container) {
   r.btnRemoveBrowser.addEventListener('click', onRemoveBrowser)
   r.btnHideMap.addEventListener('click', hideMap)
   r.btnShowMap.addEventListener('click', showMap)
+  r.btnNewFolder.addEventListener('click', onNewFolder)
+  r.breadcrumb.addEventListener('click', onBreadcrumbClick)
 
   r.dropzone.addEventListener('click', () => r.fileInput.click())
   r.fileInput.addEventListener('change', onFilePicked)
@@ -287,6 +302,21 @@ export async function mountApp(container) {
   // "Remove from this browser" button, never from navigation).
   window.addEventListener('popstate', (e) => {
     const screen = (e.state && e.state.screen) || (hasWrappedVault(PREFIX) ? 'unlock' : 'welcome')
+    // FOLDERS (2026-09-15, "tessera-web-folders-v1"): "Browser Back
+    // leaves the folder (history API, same as onboard). Do not invent
+    // a second in-page Back that fights the chrome." e.state.path is
+    // only ever set for screen === 'files' (see gotoFolder() below) --
+    // any other screen's popstate is completely unaffected by this
+    // addition (path defaults to '', same as before folders existed).
+    const path = (screen === 'files' && e.state && typeof e.state.path === 'string') ? e.state.path : ''
+    if (screen === 'files') {
+      patchState({ currentPath: path, selectedIdx: -1 })
+      // Explicit calls for the same no-op-when-unchanged reason as
+      // enterFiles()'s own comment above -- e.g. Back from "Photos" to
+      // "Files" when currentPath is already '' some other way.
+      renderBreadcrumb()
+      renderFileList()
+    }
     setScreen(screen)
   })
 
@@ -302,6 +332,7 @@ export async function mountApp(container) {
     r.btnDelete.disabled = v || !sf
   })
   subscribe('files', () => { renderFileList(); updateTotals() })
+  subscribe('currentPath', () => { renderFileList(); renderBreadcrumb() })
   subscribe('selectedIdx', () => {
     renderFileList()
     const sf = selectedFile()
@@ -350,6 +381,19 @@ function goto(screen) {
 function replaceScreen(screen) {
   setScreen(screen)
   history.replaceState({ screen }, '', '#' + screen)
+}
+
+// FOLDERS (2026-09-15, "tessera-web-folders-v1"): "Hash may be #files /
+// #files/Photos / #files/Photos/Italy." gotoFolder() ALWAYS pushes a
+// real history entry (entering a folder, or returning to root via a
+// breadcrumb tap, are each individually reachable via Back -- same
+// "real history step" rule goto() already uses for onboard screens).
+// The screen itself never changes (always 'files') -- only currentPath
+// and the URL hash move.
+function gotoFolder(path) {
+  patchState({ currentPath: path, selectedIdx: -1 })
+  const hash = path ? '#files/' + path : '#files'
+  history.pushState({ screen: 'files', path }, '', hash)
 }
 
 // ── screens ──────────────────────────────────────────────
@@ -633,6 +677,17 @@ function onForgotPassword() {
 async function enterFiles() {
   // replaceScreen, not goto (packet law: "After Ready lands on Files,
   // replaceState so Back does not unwind create or clear tesseraweb.*").
+  // FOLDERS (2026-09-15, "tessera-web-folders-v1"): always lands at
+  // root on a fresh entry into Files (Unlock, Ready, or first boot) --
+  // currentPath is reset here, not carried over from any prior session
+  // state, so unlocking never silently re-opens whatever folder was
+  // open when the browser was last locked.
+  patchState({ currentPath: '' })
+  renderBreadcrumb()  // explicit call: patchState() above is a no-op when
+                       // currentPath is already '' (the store's own default),
+                       // so the 'currentPath' subscriber would never fire on
+                       // a fresh boot -- this guarantees the breadcrumb is
+                       // painted regardless.
   replaceScreen('files')
   const sdk = getState().sdk
 
@@ -677,32 +732,137 @@ function updateTotals() {
     : ''
 }
 
+// FOLDERS (2026-09-15, "tessera-web-folders-v1"): "Folder rows sit
+// above file rows in the current place. Click a folder -> enter it."
+// `files` in state stays the SDK's full flat list (folder-agnostic --
+// selectedIdx/selectedFile() in store.js are unchanged and still index
+// into that same full array); this function only changes what's
+// RENDERED, filtering + splitting via computeFolderView() for the
+// current currentPath. A visible file row still maps back to its real
+// index in the full `files` array (via id lookup) so selection/
+// Download/Share/Delete keep working exactly as before -- folders add
+// a filtering layer on top, not a second selection model.
 function renderFileList() {
-  const { files, selectedIdx } = getState()
+  const { files, selectedIdx, currentPath } = getState()
   r.fileList.innerHTML = ''
-  if (!files.length) {
-    // COPY (2026-09-15, "tessera-web-look-v1"): "Files empty: the one
-    // sentence above + Add already on the page. No fake sample rows."
-    // Exact string from the packet's own table: "No files yet." -- no
-    // second sentence, no icon needed (Add's own dropzone icon is
-    // already visible above this on the same screen).
+  const { folders, files: fileRows } = computeFolderView(files, currentPath)
+
+  if (!folders.length && !fileRows.length) {
+    // COPY (2026-09-15, "tessera-web-look-v1", extended 2026-09-15
+    // "tessera-web-folders-v1"): root empty copy stays "No files yet.";
+    // an empty folder gets its own exact string, "This folder is
+    // empty."
+    const emptyCopy = currentPath ? 'This folder is empty.' : 'No files yet.'
     r.fileList.innerHTML =
-      '<div class="empty-state"><div class="empty-title">No files yet.</div></div>'
+      '<div class="empty-state"><div class="empty-title">' + esc(emptyCopy) + '</div></div>'
     return
   }
-  for (let i = 0; i < files.length; i++) {
-    const f = files[i]
+
+  for (const folder of folders) {
     const row = document.createElement('div')
-    row.className = 'file-row' + (i === selectedIdx ? ' selected' : '')
+    row.className = 'file-row folder-row'
     row.innerHTML =
       '<div class="file-info">' +
-        '<span class="file-name">' + esc(f.name) + '</span>' +
+        '<span class="folder-icon">\u{1F4C1}</span>' +
+        '<span class="file-name">' + esc(folder.name) + '</span>' +
+      '</div>' +
+      '<button class="btn btn-ghost btn-folder-delete" title="Delete folder" data-path="' + esc(folder.path) + '">\u{1F5D1}\uFE0F</button>'
+    row.querySelector('.file-info').addEventListener('click', () => gotoFolder(folder.path))
+    // FOLDERS (2026-09-15, "tessera-web-folders-v1"): folder rows are
+    // never "selected" the way file rows are (clicking a folder row's
+    // own info area navigates INTO it, per "Click a folder -> enter
+    // it") -- so Delete needs its OWN small affordance directly on the
+    // row rather than sharing the file-selection + bottom Delete
+    // button flow. stopPropagation so this click never also bubbles
+    // into the row's own navigate-in handler above.
+    row.querySelector('.btn-folder-delete').addEventListener('click', (e) => {
+      e.stopPropagation()
+      onDeleteFolder(folder.path, folder.name)
+    })
+    r.fileList.appendChild(row)
+  }
+
+  for (const f of fileRows) {
+    const realIdx = files.findIndex(x => x.id === f.id)
+    const row = document.createElement('div')
+    row.className = 'file-row' + (realIdx === selectedIdx ? ' selected' : '')
+    row.innerHTML =
+      '<div class="file-info">' +
+        '<span class="file-name">' + esc(f.displayName) + '</span>' +
         '<span class="file-meta">' + esc(fmtDateTime(f.updatedAt)) + '</span>' +
       '</div>' +
       '<span class="file-size">' + esc(formatBytes(f.size)) + '</span>'
-    row.addEventListener('click', () => patchState({ selectedIdx: i }))
+    row.addEventListener('click', () => patchState({ selectedIdx: realIdx }))
     r.fileList.appendChild(row)
   }
+}
+
+// renderBreadcrumb(): "Files > Photos > Italy. Files is root. Each
+// segment is a tap." Root is always rendered as the literal word
+// "Files" (never blank), per the packet's own example.
+function renderBreadcrumb() {
+  const { currentPath } = getState()
+  const segments = currentPath ? currentPath.split('/') : []
+  let html = '<span class="breadcrumb-seg" data-path="">Files</span>'
+  let acc = ''
+  for (const seg of segments) {
+    acc = acc ? acc + '/' + seg : seg
+    html += '<span class="breadcrumb-sep">\u203a</span>' +
+      '<span class="breadcrumb-seg" data-path="' + esc(acc) + '">' + esc(seg) + '</span>'
+  }
+  r.breadcrumb.innerHTML = html
+}
+
+function onBreadcrumbClick(e) {
+  const seg = e.target.closest('.breadcrumb-seg')
+  if (!seg) return
+  const path = seg.dataset.path || ''
+  if (path === getState().currentPath) return  // tapping the current (last) segment is a no-op
+  gotoFolder(path)
+}
+
+// onNewFolder(): "Control: New folder next to Add... Prompt for a
+// name. Reject empty, /, ., ... Trim. Max 64 characters." Uses the
+// native prompt() (same UI family as onDelete's confirm() below --
+// look-v1 law: "no new icon font," no custom modal invented here).
+// "Creating Photos/Italy also ensures Photos/ exists" -- true by
+// construction: you can only reach the New-folder control for
+// "Photos/Italy" by having already navigated INTO Photos, which
+// itself required Photos/ to already exist (either as a marker or
+// because Photos already had files) -- so there is nothing extra to
+// ensure here beyond pinning the new segment's own marker.
+async function onNewFolder() {
+  const sdk = getState().sdk; if (!sdk) return
+  const raw = prompt('New folder name:')
+  if (raw === null) return  // cancelled
+  const { ok, error, name } = validateFolderName(raw)
+  if (!ok) { showToast(error); return }
+  const { currentPath, files } = getState()
+  const path = buildPath(currentPath, name)
+  // Refuse a duplicate folder name at this level outright (same
+  // "no (1)/(2)" law as files -- this packet's own law says "do not
+  // implement duplicate (1)/(2) in this packet," which cuts both ways:
+  // don't invent de-duplication suffixes for folders either).
+  const { folders: existingFolders } = computeFolderView(files, currentPath)
+  if (existingFolders.some(f => f.name === name)) {
+    showToast('A folder named "' + name + '" already exists here.')
+    return
+  }
+  setBusy(true)
+  try {
+    await createFolderMarker(sdk, path)
+    await refreshFiles()
+    showToast('\u{1F4C1} Folder created: ' + name)
+  } catch (e) {
+    // "If a zero-byte pin is refused, print BLOCKED with the error and
+    // still ship navigation + prefix-on-upload against folders that
+    // already have a file." -- this is the live per-click failure
+    // mode of that same case; the BLOCKED print itself belongs in this
+    // packet's own written Output/report, not the UI, so the customer
+    // just sees one quiet sentence like every other failure path here.
+    showToast('Could not create that folder. Try again.')
+    console.error(e)
+  } finally { setBusy(false) }
 }
 
 function onFilePicked() {
@@ -855,6 +1015,12 @@ async function doUpload(file) {
     // in place rather than deleted, since a future packet may restore
     // an Add-start preview through a genuinely shared signal; not
     // removing working code outside this packet's asked-for scope.
+    // FOLDERS (2026-09-15, "tessera-web-folders-v1"): "Add while inside
+    // a folder writes currentPath + file.name into metadata." The 4th
+    // arg is uploadFile()'s new optional metaName -- omitted (root)
+    // means the exact same call shape as before this packet.
+    const { currentPath } = getState()
+    const metaName = currentPath ? buildPath(currentPath, file.name) : undefined
     await uploadFile(sdk, file, ({ stage, percent, elapsed, hostKey }) => {
       // Real target only -- setProgressTarget's own ease-out never passes
       // this value (see EASE_MS comment above). The 'done' tick still
@@ -862,7 +1028,7 @@ async function doUpload(file) {
       // pinObject() has already returned -- never this eased path.
       setProgressTarget(percent)
       patchState({ progress: { stage, percent, elapsed, hostKey } })
-    })
+    }, metaName)
     stopEase()
     renderProgressBar(100)
     patchState({ progress: null })
@@ -941,6 +1107,42 @@ async function onDelete() {
   try {
     await deleteFile(sdk, sf.id)
     showToast('\u{1F5D1}\uFE0F Deleted: ' + sf.name)
+    await refreshFiles()
+    patchState({ status: '' })
+  } catch (e) {
+    patchState({ status: 'Delete failed: ' + (e.message || 'error') })
+    console.error(e)
+  } finally { setBusy(false) }
+}
+
+// onDeleteFolder(path, name): "Delete on an empty folder deletes its
+// marker only. Delete on a folder that has files: refuse with one
+// sentence ('This folder has files.'). Do not mass-delete. Do not
+// recurse." isNonEmptyFolder() itself DOES recurse (read-only) to
+// answer that question correctly for nested content -- see its own
+// comment in files.js -- but this function never deletes more than
+// the single marker object either way.
+async function onDeleteFolder(path, name) {
+  const sdk = getState().sdk; if (!sdk) return
+  const { files } = getState()
+  if (isNonEmptyFolder(files, path)) {
+    showToast('This folder has files.')
+    return
+  }
+  const markerId = findFolderMarkerId(files, path)
+  if (!markerId) {
+    // Should not happen (a folder row only exists because SOMETHING
+    // under this path exists, and isNonEmptyFolder() above already
+    // confirmed it isn't a real file) -- but never silently no-op a
+    // Delete click.
+    showToast('Could not find that folder\u2019s marker.')
+    return
+  }
+  if (!confirm('Delete "' + name + '"?\n\nThis cannot be undone.')) return
+  setBusy(true); patchState({ status: 'Deleting\u2026' })
+  try {
+    await deleteFile(sdk, markerId)
+    showToast('\u{1F5D1}\uFE0F Deleted: ' + name)
     await refreshFiles()
     patchState({ status: '' })
   } catch (e) {

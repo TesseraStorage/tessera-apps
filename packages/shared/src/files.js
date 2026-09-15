@@ -14,6 +14,120 @@ import { PinnedObject } from './sdk.js'
 import { proxyOrigin } from './utils.js'
 import { checkTunnelReachable } from './interceptor.js'
 
+// FOLDERS (2026-09-15, "tessera-web-folders-v1"): "The SDK has no
+// directories. A folder is a prefix on the object's existing metadata
+// name." Forward slashes only; display name is the last segment; root
+// is "". This constant is the marker object's own mime -- pinned so an
+// otherwise-empty folder survives reload ("Empty folders persist").
+// Never shown as a file row, never downloadable/shareable.
+export const FOLDER_MARKER_MIME = 'application/x-tessera-folder'
+
+// buildPath(dir, basename): the one place that joins a directory and a
+// leaf name into a full metadata `name` string. dir === '' (root) means
+// no prefix at all -- existing flat uploads (Drop, or any pre-folders
+// Tessera Web object) are untouched by this function; it is only ever
+// called with a non-empty dir when the caller is actually inside a
+// folder.
+export function buildPath(dir, basename) {
+  return dir ? dir + '/' + basename : basename
+}
+
+// folderMarkerName(path): the exact metadata `name` a folder's marker
+// object is pinned under -- always path + '/' (packet's own example:
+// "Photos/"). `path` here is a full folder path with NO trailing
+// slash (e.g. "Photos" or "Photos/Italy").
+export function folderMarkerName(path) {
+  return path + '/'
+}
+
+// validateFolderName(raw): "Reject empty, /, ., .. . Trim. Max 64
+// characters." Applied to a SINGLE new segment (what "New folder"
+// prompts for) -- a slash anywhere in the typed name is rejected
+// outright, not just the exact strings "/" -- New folder always
+// creates ONE segment inside the current directory; nesting happens by
+// navigating in and creating another folder, not by typing a path.
+export function validateFolderName(raw) {
+  const name = (raw || '').trim()
+  if (!name) return { ok: false, error: 'Please enter a folder name.' }
+  if (name === '.' || name === '..') return { ok: false, error: 'That name is not allowed.' }
+  if (name.includes('/')) return { ok: false, error: 'Folder names cannot contain "/".' }
+  if (name.length > 64) return { ok: false, error: 'Folder names are limited to 64 characters.' }
+  return { ok: true, name }
+}
+
+// computeFolderView(files, currentPath): splits the SDK's flat object
+// list into the folders and files visible AT this one directory level
+// -- "folder rows sit above file rows in the current place." `files`
+// is listFiles()'s own flat array (every object, full-path `name`,
+// unfiltered). `currentPath` is '' at root or a full path with no
+// trailing slash (e.g. "Photos/Italy").
+//
+// A folder is "empty" (for display / delete purposes at THIS level)
+// only in the recursive sense used by isNonEmptyFolder() below -- see
+// that function's own comment for why markers don't count as "files".
+export function computeFolderView(files, currentPath) {
+  const prefix = currentPath ? currentPath + '/' : ''
+  const folderNames = new Set()
+  const fileRows = []
+  for (const f of files) {
+    if (prefix && !f.name.startsWith(prefix)) continue
+    if (!prefix && f.name.includes('/') === false) {
+      // Root, no prefix to strip -- a root-level file with no slash at
+      // all in its name. Falls through to the fileRows push below.
+    }
+    const rel = prefix ? f.name.slice(prefix.length) : f.name
+    if (rel === '') continue  // this directory's OWN marker -- never a row
+    const slashIdx = rel.indexOf('/')
+    if (slashIdx === -1) {
+      // A direct child with no further path segment. This directory's
+      // own marker (mime === FOLDER_MARKER_MIME) can only ever produce
+      // rel === '' (handled above), so anything reaching here with no
+      // slash is a genuine file -- but guard defensively anyway in
+      // case of a malformed/legacy object.
+      if (f.mime === FOLDER_MARKER_MIME) continue
+      fileRows.push({ ...f, displayName: rel })
+    } else {
+      // Something inside a subfolder named rel.slice(0, slashIdx).
+      // Its own marker (rel === subfolderName + '/', i.e. the slash is
+      // the LAST character) only confirms existence; anything with
+      // real content after that slash is just recorded as existing --
+      // isNonEmptyFolder() (not this function) decides "has files" for
+      // the Delete-refusal rule, since that check must also look
+      // BELOW this one level (nested subfolders).
+      folderNames.add(rel.slice(0, slashIdx))
+    }
+  }
+  const folders = Array.from(folderNames).sort().map(name => ({
+    name,
+    path: buildPath(currentPath, name),
+  }))
+  return { folders, files: fileRows }
+}
+
+// isNonEmptyFolder(files, path): "Delete on a folder that has files:
+// refuse... Do not recurse [into deleting]." This check itself DOES
+// recurse (read-only) into every depth below `path` -- a file two
+// levels down still means "this folder has files," matching the
+// proof's own framing ("Delete Photos while it still has a file is
+// refused" -- the file could be directly in Photos or in Photos/Italy).
+// Folder MARKER objects (mime === FOLDER_MARKER_MIME) do not count as
+// "files" here -- an entirely-empty nested subfolder (marker only, no
+// real content anywhere under it) does not by itself make an ancestor
+// folder "have files".
+export function isNonEmptyFolder(files, path) {
+  const prefix = path + '/'
+  return files.some(f => f.name.startsWith(prefix) && f.mime !== FOLDER_MARKER_MIME)
+}
+
+// findFolderMarkerId(files, path): the marker object's own id, for the
+// "empty folder: delete its marker only" path. Exact match only --
+// path + '/' -- never a prefix match.
+export function findFolderMarkerId(files, path) {
+  const markerName = folderMarkerName(path)
+  const hit = files.find(f => f.name === markerName)
+  return hit ? hit.id : null
+}
+
 // ── helpers ──────────────────────────────────────────────
 
 function isDesktop() {
@@ -101,16 +215,28 @@ export async function listFiles(sdk) {
     for (const ev of events) {
       if (ev.deleted) { byId.delete(ev.id); continue }
       let name = ev.id.slice(0, 12) + '\u2026'
+      let mime = ''
       let size = 0
       const obj = ev.object
       if (obj) {
         size = obj.size()
         const meta = obj.metadata()
         if (meta && meta.length) {
-          try { const m = JSON.parse(new TextDecoder().decode(meta)); if (m.name) name = m.name } catch (_) {}
+          try {
+            const m = JSON.parse(new TextDecoder().decode(meta))
+            if (m.name) name = m.name
+            // FOLDERS (2026-09-15, "tessera-web-folders-v1"): mime is
+            // read through untouched here -- computeFolderView()/
+            // isNonEmptyFolder() need it to recognize a folder marker
+            // object (FOLDER_MARKER_MIME) and exclude it from the file
+            // rows / "has files" check. Existing callers that only
+            // ever used f.name/f.size are unaffected by this extra
+            // field on the returned object.
+            if (m.mime) mime = m.mime
+          } catch (_) {}
         }
       }
-      byId.set(ev.id, { id: ev.id, name, size, updatedAt: ev.updatedAt })
+      byId.set(ev.id, { id: ev.id, name, mime, size, updatedAt: ev.updatedAt })
     }
     const last = events[events.length - 1]
     const next = { id: last.id, after: last.updatedAt }
@@ -130,7 +256,21 @@ export function computeTotals(files) {
 
 // ── upload ──────────────────────────────────────────────
 
-export async function uploadFile(sdk, file, onProgress) {
+// FOLDERS (2026-09-15, "tessera-web-folders-v1"): "Add while inside a
+// folder writes currentPath + file.name into metadata, then the usual
+// 10+20 + pin." New optional `metaName` parameter -- when provided,
+// this exact string is what gets pinned into metadata.name (full path,
+// e.g. "Photos/vacation.jpg"), while `file.name` (the browser File
+// object's own leaf name, e.g. "vacation.jpg") is still what's sent to
+// the relay's own `name=` query param and read for its MIME-sniffing
+// extension -- the relay path is DEAD for Tessera Web regardless (no
+// relay creds ever saved under the 'tesseraweb' prefix, confirmed by
+// this file's own PREFIX comment), so `metaName` only actually takes
+// effect on the WASM fallback below, which is the only path Web ever
+// reaches. Every existing caller (Drop's ui.js, desktop) omits this
+// argument entirely -- defaults to `file.name`, byte-identical to
+// before this packet.
+export async function uploadFile(sdk, file, onProgress, metaName) {
   if (isDesktop()) {
     const start = Date.now()
     const tick = (s, p) => { if (onProgress) onProgress({ stage: s, percent: p, elapsed: Date.now() - start }) }
@@ -229,7 +369,7 @@ export async function uploadFile(sdk, file, onProgress) {
   }
 
   const meta = new TextEncoder().encode(JSON.stringify({
-    name: file ? file.name : 'upload',
+    name: metaName || (file ? file.name : 'upload'),
     mime: file ? (file.type || 'application/octet-stream') : 'application/octet-stream',
   }))
   let obj = new PinnedObject()
@@ -293,6 +433,49 @@ export async function uploadFile(sdk, file, onProgress) {
   tick('pinning', 90)
   await sdk.pinObject(obj)
   tick('done', 100)
+  return obj
+}
+
+// ── folders ─────────────────────────────────────────────
+//
+// "Pin one marker object per folder... Smallest upload the SDK will
+// pin (empty/tiny blob). Never shown as a file row. Never download /
+// share / open as a file." Reuses uploadFile()'s own WASM SDK path
+// (which already supports a zero-byte stream for the desktop dropzone
+// case -- see `file ? file.stream() : new ReadableStream(...)` above)
+// rather than duplicating the upload/pin call. Deliberately does NOT
+// go through the relay-first branch above at all -- markers are tiny
+// and infrequent, and Tessera Web never has relay creds anyway (this
+// file's own PREFIX comment), so there is no real cost to always
+// using the direct WASM path here, and it keeps this function simple
+// (no progress ticks needed for a folder marker).
+export async function createFolderMarker(sdk, path) {
+  // GATE: same native-WebTransport tunnel preflight uploadFile() itself
+  // runs, so a folder create fails the same clean way an Add would if
+  // Tessera Web's own tunnel check ever applied (it doesn't today --
+  // window.___wtpoly___ is false on Web's native path, so this is a
+  // no-op in practice, kept only so this function's own behavior
+  // matches uploadFile()'s exactly if that ever changes).
+  if (window.___wtpoly___) {
+    const tunnelOk = await checkTunnelReachable()
+    if (!tunnelOk) {
+      throw new Error('File storage is temporarily unavailable. Please try again in a few minutes.')
+    }
+  }
+  const meta = new TextEncoder().encode(JSON.stringify({
+    name: folderMarkerName(path),
+    mime: FOLDER_MARKER_MIME,
+  }))
+  let obj = new PinnedObject()
+  obj.updateMetadata(meta)
+  // "Smallest upload the SDK will pin (empty/tiny blob)." -- a
+  // zero-byte stream, same construction the WASM fallback in
+  // uploadFile() already uses for the desktop no-file dropzone case.
+  const stream = new ReadableStream({ start(c) { c.enqueue(new Uint8Array(0)); c.close() } })
+  const uploadOptions = { dataShards: 10, parityShards: 20 }
+  if (!window.___wtpoly___) uploadOptions.maxInflight = 10
+  obj = await sdk.upload(obj, stream, uploadOptions)
+  await sdk.pinObject(obj)
   return obj
 }
 

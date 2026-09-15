@@ -23,6 +23,11 @@ let state = {
   files: [],
   selectedIdx: -1,
   totals: { count: 0, totalBytes: 0 },
+  // FOLDERS (2026-09-15, "tessera-web-folders-v1"): '' = root. A full
+  // path with no trailing slash otherwise (e.g. "Photos/Italy"). Only
+  // ever read/written by web-ui.js -- Drop's ui.js never touches this
+  // key, so it has zero effect on Drop's own flat file list.
+  currentPath: '',
 
   // Busy / status
   busy: false,
