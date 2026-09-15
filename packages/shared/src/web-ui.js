@@ -72,14 +72,14 @@ const SKELETON = /*html*/`
     <span class="logo">Tessera</span>
     <span id="readyDot" class="dot off" title="Account status"></span>
     <span id="storageSummary" class="storage-summary"></span>
-    <button id="btnLock" class="btn btn-ghost btn-logout">Lock</button>
+    <button id="btnLock" class="btn btn-ghost btn-logout">Lock this browser</button>
   </header>
 
   <!-- WELCOME -->
   <section id="welcomeScreen" class="panel welcome-panel">
     <span class="welcome-brand">Tessera</span>
     <div class="welcome-center">
-      <p>Welcome to your private cloud</p>
+      <p>Your files. This browser.</p>
       <p style="margin-top:14px">
         <button id="btnCreate" class="btn btn-outline btn-lg">I&rsquo;m new</button>
       </p>
@@ -91,7 +91,7 @@ const SKELETON = /*html*/`
 
   <!-- CREATE: INVITE -->
   <section id="inviteScreen" class="panel column-screen hidden">
-    <h2>Enter the invite you were given.</h2>
+    <h2>Invite</h2>
     <input type="text" id="inviteInput" placeholder="Invite" autocomplete="off" style="margin-top:14px">
     <p style="margin-top:14px">
       <button id="btnInviteContinue" class="btn btn-primary btn-lg">Continue</button>
@@ -104,8 +104,8 @@ const SKELETON = /*html*/`
 
   <!-- CREATE: REQUEST STUB (named, not designed) -->
   <section id="requestStubScreen" class="panel column-screen hidden">
-    <h2>Request an invite</h2>
-    <p>This is not live yet. Invites still come from us.</p>
+    <h2>Need an invite?</h2>
+    <p>Ask the person who sent you here.</p>
     <p style="margin-top:14px">
       <button id="btnRequestBack" class="btn btn-outline btn-lg">Back</button>
     </p>
@@ -114,7 +114,7 @@ const SKELETON = /*html*/`
   <!-- CREATE: WORDS -->
   <section id="wordsScreen" class="panel column-screen hidden">
     <h2>Save these words</h2>
-    <p>They are the only way back. We do not keep them.</p>
+    <p>Write these 12 words on paper. They rebuild this account on a new device.</p>
     <pre id="wordsText" class="phrase-box"></pre>
     <p style="margin-top:14px">
       <button id="btnWordsSaved" class="btn btn-primary btn-lg">I saved them</button>
@@ -125,7 +125,7 @@ const SKELETON = /*html*/`
   <!-- CREATE: PASSWORD (also used by I-have-my-words -> Set a password) -->
   <section id="setPasswordScreen" class="panel column-screen hidden">
     <h2>Set a password</h2>
-    <p>Opens Tessera in this browser only.</p>
+    <p>Password for this browser. Never stored.</p>
     <div style="display:flex;flex-direction:column;gap:8px;margin:14px 0">
       <input type="password" id="newPassword" placeholder="Password" autocomplete="new-password">
       <input type="password" id="newPasswordConfirm" placeholder="Confirm password" autocomplete="new-password">
@@ -139,7 +139,7 @@ const SKELETON = /*html*/`
   <!-- READY WAIT -->
   <section id="readyWaitScreen" class="panel column-screen hidden">
     <h2>Tessera</h2>
-    <p>Setting up your account.</p>
+    <p>Setting up this browser&hellip;</p>
     <p id="readyWaitStatus" class="status-text"></p>
   </section>
 
@@ -159,7 +159,7 @@ const SKELETON = /*html*/`
   <!-- UNLOCK -->
   <section id="unlockScreen" class="panel column-screen hidden">
     <h2>Unlock</h2>
-    <input type="password" id="unlockPassword" placeholder="Password" autocomplete="current-password" style="margin-top:14px">
+    <input type="password" id="unlockPassword" placeholder="Password for this browser." autocomplete="current-password" style="margin-top:14px">
     <p style="margin-top:14px">
       <button id="btnUnlock" class="btn btn-primary btn-lg">Unlock</button>
     </p>
@@ -168,6 +168,7 @@ const SKELETON = /*html*/`
     </p>
     <p id="unlockStatus" class="status-text"></p>
   </section>
+
 
   <!-- FILES + MAP -->
   <div id="filesLayout" class="files-layout">
@@ -216,7 +217,7 @@ const SKELETON = /*html*/`
   <div id="shareModal" class="modal-overlay hidden">
     <div class="modal-card">
       <h3>Share link</h3>
-      <p class="hint">Works in Tessera for 30 days. A normal browser tab is not the file.</p>
+      <p class="hint">The link is not the file sitting in this tab.</p>
       <input type="text" id="shareLink" readonly>
       <div class="modal-buttons">
         <button id="btnCopyLink" class="btn btn-primary">Copy link</button>
@@ -675,10 +676,13 @@ function renderFileList() {
   const { files, selectedIdx } = getState()
   r.fileList.innerHTML = ''
   if (!files.length) {
+    // COPY (2026-09-15, "tessera-web-look-v1"): "Files empty: the one
+    // sentence above + Add already on the page. No fake sample rows."
+    // Exact string from the packet's own table: "No files yet." -- no
+    // second sentence, no icon needed (Add's own dropzone icon is
+    // already visible above this on the same screen).
     r.fileList.innerHTML =
-      '<div class="empty-state"><div class="empty-icon">\u{1F4E6}</div>' +
-      '<div class="empty-title">No files yet</div>' +
-      '<div class="empty-sub">Add a file above to get started</div></div>'
+      '<div class="empty-state"><div class="empty-title">No files yet.</div></div>'
     return
   }
   for (let i = 0; i < files.length; i++) {
@@ -870,7 +874,13 @@ async function doUpload(file) {
     // count that will never arrive; the exact frozen percent stays
     // visible under the fail text until the next upload starts.
     stopEase()
-    patchState({ progress: null, status: 'Add failed: ' + (e.message || 'error') })
+    // COPY (2026-09-15, "tessera-web-look-v1"): "Add failed: one
+    // sentence + try again. No stack trace." Was 'Add failed: ' +
+    // e.message, which could surface a raw SDK/network error string
+    // (a de-facto stack trace to a non-technical reader). One quiet,
+    // fixed sentence now -- the real e is still logged to console
+    // below for debugging, just never shown in the UI.
+    patchState({ progress: null, status: 'Could not add this file. Try again.' })
     // FIX (2026-09-14, "tessera-web-occupy-fade"): "completeWrite() (or
     // equivalent) runs when uploadFile resolves OR REJECTS. Arcs fade.
     // A hung Add must not leave gold lines forever." Previously only
@@ -891,12 +901,29 @@ async function onDownload() {
   const sf = selectedFile(); if (!sf) return
   const sdk = getState().sdk; if (!sdk) return
   setBusy(true); patchState({ status: 'Downloading\u2026' })
+  // MAP INBOUND HOOK (2026-09-15, "tessera-web-look-v1"): shows the map
+  // and feeds it downloadToDisk's onShardDownloaded events, same
+  // pattern doUpload uses for onShardUploaded -- landedHost's second
+  // argument is the direction flag ('download'), defaulting to the
+  // existing 'upload'/gold behavior when omitted so doUpload's own
+  // call site (unchanged) keeps drawing gold outbound arcs exactly as
+  // before. No hosts() call added here -- this only listens to shard
+  // events the download was already making.
+  if (mapController) mapController.reset()
+  showMap()
   try {
-    await downloadToDisk(sdk, sf.id, sf.name)
+    await downloadToDisk(sdk, sf.id, sf.name, ({ hostKey, direction }) => {
+      if (mapController && hostKey) mapController.landedHost(hostKey, direction)
+    })
+    if (mapController) mapController.completeWrite()
     showToast('\u2B07\uFE0F Downloaded: ' + sf.name)
     patchState({ status: '' })
   } catch (e) {
-    patchState({ status: 'Download failed: ' + (e.message || 'error') })
+    if (mapController) mapController.completeWrite()
+    // COPY (2026-09-15, "tessera-web-look-v1"): same "no stack trace"
+    // treatment as Add failed -- one quiet sentence, real error only
+    // to console.
+    patchState({ status: 'Could not download this file. Try again.' })
     console.error(e)
   } finally { setBusy(false) }
 }

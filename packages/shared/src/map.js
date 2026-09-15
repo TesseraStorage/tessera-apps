@@ -234,6 +234,20 @@ function bezierPoint(t, ox, oy, midX, midY, x, y) {
 // fade out. Destination glow stays. Origin glow stays.").
 const ARC_FADE_MS = 1200
 
+// MAP COLOR (operator, 2026-09-15, "tessera-web-look-v1"): "Stationary
+// glows (origin + landed destination): white pinpoints with a tight
+// glow. Not yellow. Not gold discs." Outbound (write) stays gold;
+// inbound (download) is cyan, MAP2's own named family
+// (rgb(62,198,224) / #3EC6E0). "Fade does not turn the glow yellow" --
+// the stationary-glow color below is always this white, completely
+// independent of the ARC_FADE_MS fade factor, which only ever touches
+// the moving arc-line alpha, never these fixed colors.
+const GLOW_WHITE = 'rgba(243, 246, 250, 0.95)'  // #F3F6FA core, per law
+const STROKE_GOLD = 'rgba(245, 158, 11, '   // outbound arcs -- append alpha + ')'
+const DOT_GOLD = 'rgba(250, 204, 21, 0.95)'     // outbound traveling dots
+const STROKE_CYAN = 'rgba(62, 198, 224, '       // inbound arcs -- append alpha + ')'
+const DOT_CYAN = 'rgba(62, 198, 224, 0.95)'     // inbound traveling dots -- MAP2 #3EC6E0 family
+
 /**
  * A minimal map controller bound to a <canvas>.
  *
@@ -280,8 +294,10 @@ export function createUploadMap(canvas, captionEl) {
     if (!ready) return
     const [ox, oy] = project(ORIGIN.lat, ORIGIN.lon, w, h)
     // Origin mark -- small, steady glow. Stays through completion
-    // (packet law #4: "Origin glow stays").
-    drawGlow(ctx, ox, oy, 6, 'rgba(245, 158, 11, 0.9)')
+    // (packet law #4: "Origin glow stays"). COLOR (operator,
+    // 2026-09-15): white, not gold -- stationary glows are always
+    // white regardless of which direction (upload/download) is active.
+    drawGlow(ctx, ox, oy, 6, GLOW_WHITE)
 
     const now = Date.now()
 
@@ -302,41 +318,57 @@ export function createUploadMap(canvas, captionEl) {
     // Arcs (curved lines) for every landed + traveling shard trip --
     // "one corridor per shard trip, not one per unique host": duplicate
     // hosts draw a duplicate arc on the same path, which is allowed.
+    // COLOR (operator, 2026-09-15): gold outbound (write), cyan inbound
+    // (download) -- each trip carries its own `dir` ('upload' by
+    // default for every existing call site, 'download' when
+    // web-ui.js's onDownload passes it through). Grouped by stroke
+    // color per frame so this stays a single beginPath/stroke per
+    // color instead of one per trip.
     if (fade > 0) {
-      ctx.strokeStyle = 'rgba(245, 158, 11, ' + (0.35 * fade) + ')'
       ctx.lineWidth = 1.2
-      for (const m of landed.concat(traveling)) {
-        const [x, y] = project(m.lat, m.lon, w, h)
-        const midX = (ox + x) / 2, midY = Math.min(oy, y) - 18
+      for (const dir of ['upload', 'download']) {
+        const stroke = dir === 'download' ? STROKE_CYAN : STROKE_GOLD
+        ctx.strokeStyle = stroke + (0.35 * fade) + ')'
+        let any = false
         ctx.beginPath()
-        ctx.moveTo(ox, oy)
-        ctx.quadraticCurveTo(midX, midY, x, y)
-        ctx.stroke()
+        for (const m of landed.concat(traveling)) {
+          if ((m.dir || 'upload') !== dir) continue
+          const [x, y] = project(m.lat, m.lon, w, h)
+          const midX = (ox + x) / 2, midY = Math.min(oy, y) - 18
+          ctx.moveTo(ox, oy)
+          ctx.quadraticCurveTo(midX, midY, x, y)
+          any = true
+        }
+        if (any) ctx.stroke()
       }
     }
 
     // Landed destinations: quieter residual glow -- stays after
     // completion regardless of arc fade (packet law #4: "Destination
-    // glow stays").
+    // glow stays"). COLOR (operator, 2026-09-15): white, same as
+    // origin -- "fade does not turn the glow yellow" holds trivially
+    // since this was never yellow/gold to begin with anymore.
     for (const m of landed) {
       const [x, y] = project(m.lat, m.lon, w, h)
-      drawGlow(ctx, x, y, 5, 'rgba(245, 158, 11, 0.55)')
+      drawGlow(ctx, x, y, 5, GLOW_WHITE)
     }
 
     // Traveling glow-dots: DOTS_PER_ARC dots per arc, staggered evenly
     // across ARC_TRAVEL_MS so several are visible on the same corridor
-    // at once (packet law #3).
+    // at once (packet law #3). Dot color follows the trip's own
+    // direction -- gold outbound, cyan inbound (operator, 2026-09-15).
     let anyTraveling = false
     for (const m of traveling) {
       const [x, y] = project(m.lat, m.lon, w, h)
       const midX = (ox + x) / 2, midY = Math.min(oy, y) - 18
+      const dotColor = (m.dir === 'download') ? DOT_CYAN : DOT_GOLD
       for (let i = 0; i < DOTS_PER_ARC; i++) {
         const stagger = (i / DOTS_PER_ARC) * ARC_TRAVEL_MS
         const dotElapsed = (now - m.startedAt - stagger)
         if (dotElapsed < 0) continue  // this dot hasn't started its lap yet
         const t = (dotElapsed % ARC_TRAVEL_MS) / ARC_TRAVEL_MS
         const [px, py] = bezierPoint(t, ox, oy, midX, midY, x, y)
-        drawGlow(ctx, px, py, 7, 'rgba(250, 204, 21, 0.95)')
+        drawGlow(ctx, px, py, 7, dotColor)
       }
       // A trip's dots keep looping (packet law #3 doesn't say "stop
       // after one lap" -- "several dots on the same arc at once" reads
@@ -376,7 +408,7 @@ export function createUploadMap(canvas, captionEl) {
     render()
   }
 
-  function landedHost(hostKey) {
+  function landedHost(hostKey, dir) {
     if (!hostKey) return
     const geo = geoLookup(hostKey)
     // "If a host has no lat/long, skip the pin." -- no fallback
@@ -385,10 +417,11 @@ export function createUploadMap(canvas, captionEl) {
     // One entry per SHARD TRIP (packet law #1) -- no seenHosts dedup.
     // A host reused across multiple shards gets multiple trips drawn on
     // the same path, which the packet explicitly allows.
-    traveling.push({ lat: geo.lat, lon: geo.lon, startedAt: Date.now() })
+    traveling.push({ lat: geo.lat, lon: geo.lon, startedAt: Date.now(), dir: dir || 'upload' })
     if (captionEl) {
       const total = landed.length + traveling.length
-      captionEl.textContent = total + ' shard trip' + (total === 1 ? '' : 's') + ' written'
+      const verb = (dir === 'download') ? 'read' : 'written'
+      captionEl.textContent = total + ' shard trip' + (total === 1 ? '' : 's') + ' ' + verb
     }
     if (!rafId) render()
   }

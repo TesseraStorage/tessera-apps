@@ -265,7 +265,11 @@ export async function uploadFile(sdk, file, onProgress) {
     // it on the upload map -- this is the exact same live callback field
     // already used for the shard counter above, not a second signal or
     // an extra hosts() call.
-    tick('uploading (' + shardsLanded + '/' + expectedShards + ' shards)', pct, ev && ev.hostKey)
+    // COPY (2026-09-15, "tessera-web-look-v1"): "Progress: N/30 -- do not
+    // say 'shards' next to the number. Quiet status: uploading (N/30)
+    // then pinning -- no 'shards'." Was 'uploading (N/M shards)' --
+    // matches the packet's own copy table exactly now.
+    tick('uploading (' + shardsLanded + '/' + expectedShards + ')', pct, ev && ev.hostKey)
   }
 
   const uploadOptions = { dataShards, parityShards, onShardUploaded }
@@ -298,7 +302,7 @@ export async function getObject(sdk, objectId) {
   return sdk.object(objectId)
 }
 
-export async function downloadToDisk(sdk, objOrId, filename) {
+export async function downloadToDisk(sdk, objOrId, filename, onProgress) {
   if (isDesktop()) {
     const objectId = typeof objOrId === 'string' ? objOrId : objOrId.id()
     const result = await window.tesseraDesktop.siaDownload(objectId)
@@ -329,7 +333,25 @@ export async function downloadToDisk(sdk, objOrId, filename) {
   // WASM SDK fallback
   const obj = typeof objOrId === 'string' ? await getObject(sdk, objOrId) : objOrId
   if (!obj) throw new Error('Object not found')
-  const stream = sdk.download(obj)
+  // MAP INBOUND HOOK (2026-09-15, "tessera-web-look-v1"): "If download
+  // does not yet call the map, hook onShardDownloaded the same way
+  // write hooks onShardUploaded, with a direction flag. No second
+  // hosts(). No new occupy." onShardDownloaded is the SDK's own
+  // documented DownloadOptions field (confirmed in
+  // node_modules/@siafoundation/sia-storage/wasm/sia_storage_wasm.d.ts
+  // -- not invented here, same discovery shape as onShardUploaded's
+  // own confirmation). This makes ZERO extra network calls of its own:
+  // it observes shards the download was already fetching, exactly like
+  // onShardUploaded observes shards the upload was already sending.
+  // The relay-fetch path above (the WASM fallback's sibling, used when
+  // this account has a __sia__ relay connection) has no equivalent
+  // per-shard signal to hook -- it returns a single opaque Blob, so
+  // downloads via that path have no inbound map trip; only the WASM
+  // fallback path below can light up cyan arcs this packet.
+  const downloadOptions = onProgress
+    ? { onShardDownloaded: (ev) => onProgress({ hostKey: ev && ev.hostKey, direction: 'download' }) }
+    : undefined
+  const stream = sdk.download(obj, downloadOptions)
   const blob = await new Response(stream).blob()
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')

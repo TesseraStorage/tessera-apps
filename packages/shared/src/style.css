@@ -368,14 +368,14 @@ input:focus { border-color: var(--cyan); }
   max-height: 55vh;
   overflow-y: auto;
 }
-.file-list:empty::after {
-  content: 'No files yet — drop one above';
-  display: block;
-  text-align: center;
-  color: var(--ink3);
-  font-size: 13px;
-  padding: 40px 0;
-}
+/* COPY (2026-09-15, "tessera-web-look-v1"): the ":empty::after" rule that
+   lived here never actually fired -- renderFileList() (web-ui.js) always
+   inserts a real .empty-state child when files.length is 0, so
+   .file-list is never truly :empty in practice. Removed as dead CSS
+   carrying leftover lab copy ("drop one above" -- on the packet's own
+   kill list). The real empty-state string lives in web-ui.js's
+   .empty-title now: exactly "No files yet." per this packet's copy
+   table, no second sentence. */
 
 .file-row {
   display: flex;
@@ -554,6 +554,16 @@ input:focus { border-color: var(--cyan); }
    default; on Add it gains .files-narrow (pushed left, narrower) while
    .map-pane slides in from the right. Both live inside #filesLayout, a
    plain flex row -- no new grid system, no second app shell. ────── */
+/* ── files layout + upload map (2026-09-14, "tessera-web-map-progress",
+   revised 2026-09-15 "tessera-web-look-v1" per operator's map-pane law)
+   Files column stays the SAME onboard .column-screen width (420px)
+   whether the map is open or closed -- it never narrows to "feed" the
+   map. The map is a fixed-size (720x360, equirectangular 2:1) sibling
+   box that slides in from the right across a visible 24px gutter, not
+   a flex child that eats the list's own width. #filesLayout may
+   overflow horizontally on a narrow window (the page scrolls) rather
+   than squashing the map to fit -- only .map-pane itself clips its own
+   canvas during the width-grow slide. ────────────────────────────── */
 #filesLayout {
   display: flex;
   align-items: flex-start;
@@ -561,16 +571,18 @@ input:focus { border-color: var(--cyan); }
   gap: 0;
   max-width: 100%;
   position: relative;
-  overflow: hidden;
 }
 #filesLayout .column-screen {
-  transition: max-width .35s ease, margin .35s ease;
+  /* Deliberately NO max-width/margin override here anymore -- the
+     files column keeps its normal .column-screen width (420px,
+     margin: 60px auto 14px) at all times. "Files column width does
+     not shrink to feed the map... the list does not jump to a new
+     width" whether .files-narrow is present or not. The class is kept
+     as a state hook (web-ui.js still toggles it) but carries no width
+     rule of its own -- see the (removed) old .files-narrow block this
+     replaces. */
   flex-shrink: 0;
   position: relative;  /* positioning context for .btn-show-map, top-right corner */
-}
-#filesLayout .column-screen.files-narrow {
-  max-width: 260px;
-  margin: 60px 0 14px 24px;
 }
 /* SHOW MAP (2026-09-14, "tessera-web-map-tune"): "Link top-right of the
    files/drop pane, above and to the right of the Tessera logo. Same
@@ -585,19 +597,30 @@ input:focus { border-color: var(--cyan); }
   font-size: 12px;
 }
 .btn-hide-map {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 5;
+  background: rgba(16, 23, 31, 0.85);
   font-size: 12px;
 }
-/* MAP-ARCS (2026-09-14, "tessera-web-map-arcs"): "Map pane is the
-   majority of the Files row. Files / drop column stays usable but
-   clearly secondary." Files column above drops to 260px (was 300px);
-   map pane below grows from a fixed 480px to a flex-majority share of
-   the row (65vw, capped so it never crowds out a usable files column
-   on narrow viewports) -- map is now clearly the larger of the two. */
+/* MAP PANE LAW (operator, 2026-09-15, "tessera-web-look-v1"):
+   "The map is a picture of the world next to the files, not a flex
+   child that eats the list." Fixed 720x360 box (equirectangular 2:1 --
+   the canvas's own prior native size already used min-height:480 at a
+   65vw-driven width that varied by viewport; no single sane frozen
+   pixel pair existed to reuse, so this ships the packet's own named
+   fallback size exactly: 720x360, not a third size). Top margin 60px
+   matches the files column's own .column-screen top margin exactly --
+   "top edge of the map box matches the top edge of the files pane."
+   24px LEFT MARGIN is the visible gutter between the two panes (law
+   #1: "leave a visible gutter (~24px)") -- present only while the map
+   is not .hidden, so no gutter-shaped gap is reserved when hidden. */
 .map-pane {
   width: 0;
-  max-width: 65vw;
-  flex-grow: 3;
-  margin: 60px 24px 14px 0;
+  height: 360px;
+  flex: 0 0 auto;
+  margin: 60px 0 14px 0;
   position: relative;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -605,26 +628,32 @@ input:focus { border-color: var(--cyan); }
   overflow: hidden;
   opacity: 0;
   transform: translateX(24px);
-  transition: opacity .35s ease, transform .35s ease, width .35s ease;
-  min-height: 480px;
+  /* SLIDE (operator law #6): "Show and Hide both animate 400ms, same
+     easing both ways." Was .35s -- now .4s uniformly, ease-in-out both
+     directions (no separate show/hide timing curve). Width is part of
+     this same slide-open motion (0 -> 720px), not a "scale with the
+     files pane" violation -- law #2 is about the box's FINAL size
+     never depending on viewport/sibling width (no more 65vw), not
+     about banning a width transition during the reveal itself. */
+  transition: width .4s ease-in-out, opacity .4s ease-in-out,
+              transform .4s ease-in-out, margin-left .4s ease-in-out;
 }
 .map-pane:not(.hidden) {
-  width: 65vw;
+  width: 720px;
+  margin-left: 24px;
   opacity: 1;
   transform: translateX(0);
 }
 .map-canvas {
-  width: 100%;
-  height: 100%;
-  min-height: 480px;
+  /* FIXED SIZE (operator law #2/#3): exact 720x360 pixels, never a
+     percentage of .map-pane's own animating width -- so the canvas
+     never stretches/squashes mid-slide or reflows the world's aspect
+     ratio. ResizeObserver in map.js still fires on this fixed box (a
+     harmless no-op once settled at 720x360), it just never receives a
+     variable size to chase anymore. */
+  width: 720px;
+  height: 360px;
   display: block;
-}
-.btn-hide-map {
-  position: absolute;
-  top: 10px;
-  right: 10px;
-  z-index: 5;
-  background: rgba(16, 23, 31, 0.85);
 }
 .map-caption {
   position: absolute;
@@ -634,6 +663,7 @@ input:focus { border-color: var(--cyan); }
   color: var(--ink2);
   z-index: 5;
 }
+
 
 /* ── scrollbar ────────────────────────────────────────── */
 .file-list::-webkit-scrollbar { width: 6px; }
