@@ -184,6 +184,14 @@ const SKELETON = /*html*/`
            absolute top-right, matching #btnHideMap's own corner
            placement on the map pane -- "same pair as Hide map." -->
       <button id="btnShowMap" class="btn btn-ghost btn-show-map hidden">Show map</button>
+      <!-- HIDE MAP MOVED (operator, 2026-09-15): "Instead of 'Hide map'
+           being in the map pane, put it top right of file pane (where
+           'Show map' is shown when map isn't)." Both buttons now live
+           in the SAME top-right corner slot of #filesScreen
+           (.btn-show-map's own absolute position) -- showMap()/
+           hideMap() toggle which ONE of the two is visible, so they
+           never overlap. -->
+      <button id="btnHideMap" class="btn btn-ghost btn-show-map hidden">Hide map</button>
       <!-- BREADCRUMB (2026-09-15, "tessera-web-folders-v1"): "Files >
            Photos > Italy. Files is root. Each segment is a tap." One
            span per segment, built by renderBreadcrumb() -- never a
@@ -220,7 +228,6 @@ const SKELETON = /*html*/`
     </section>
 
     <aside id="mapPane" class="map-pane hidden">
-      <button id="btnHideMap" class="btn btn-ghost btn-hide-map">Hide map</button>
       <canvas id="mapCanvas" class="map-canvas"></canvas>
       <!-- CAPTION KILLED (2026-09-15, "tessera-web-map-follow"):
            "Kill the map caption... No replacement sentence this
@@ -925,13 +932,18 @@ function showMap() {
   ensureMapController()
   r.filesScreen.classList.add('files-narrow')
   r.mapPane.classList.remove('hidden')
+  // HIDE MAP MOVED (operator, 2026-09-15): both buttons share the same
+  // top-right slot on #filesScreen now -- Show swaps to Hide, never
+  // both visible at once.
   r.btnShowMap.classList.add('hidden')
+  r.btnHideMap.classList.remove('hidden')
   mapShown = true
 }
 
 function hideMap() {
   r.filesScreen.classList.remove('files-narrow')
   r.mapPane.classList.add('hidden')
+  r.btnHideMap.classList.add('hidden')
   // Only offer "Show map" again if this browser has actually seen a map
   // this session (btnShowMap stays hidden before the first Add ever
   // shows one) -- "one pair of controls, no third layout."

@@ -633,29 +633,51 @@ input:focus { border-color: var(--cyan); }
   position: relative;
 }
 #filesLayout .column-screen {
-  /* Deliberately NO max-width/margin override here -- the files
-     column keeps its normal .column-screen width (420px, margin: 60px
-     auto 14px) at all times, regardless of map state. ".files-narrow"
-     is still toggled by JS as a state hook but carries no CSS rule of
-     its own. */
+  /* Deliberately NO max-width override here -- the files column keeps
+     its normal .column-screen width (420px) at all times, regardless
+     of map state. ".files-narrow" is still toggled by JS as a state
+     hook but carries no CSS rule of its own.
+
+     GUTTER FIX (operator, 2026-09-15): the base .column-screen rule
+     uses "margin: <top> auto <bottom>" -- those AUTO left/right
+     margins, when this element is a flex item inside #filesLayout
+     (display:flex), absorb free space in the flex row instead of
+     collapsing to 0. That is what was actually inflating the visible
+     gap to ~148px even after .map-pane's own margin-left was set to
+     15px: the files column's own right AUTO margin was eating most
+     of the flex row's free width. Overriding margin-left/margin-right
+     to 0 here removes that free-space-eating behavior -- the ONLY
+     horizontal gap between the two panes is now .map-pane's own
+     margin-left, exactly 15px, with #filesLayout's own
+     justify-content:center handling the row's position as a whole.
+
+     MOVED UP (operator, 2026-09-15): "Move both file and map panes up
+     on the page. Put them 25px below line under Tessera." The header
+     itself (.app-header) already carries margin-bottom: 20px below
+     its own border-bottom line -- confirmed live via
+     getComputedStyle before this fix (header border-bottom at y=47,
+     #filesLayout's own top at y=67, i.e. that 20px margin already
+     accounts for 20 of the 25). This rule's margin-top is the
+     REMAINING 5px needed to land the panels at exactly 25px below the
+     header's line -- 20 (header's own margin-bottom) + 5 (this) = 25,
+     confirmed via getBoundingClientRect below. Was 60px before this
+     packet. */
+  margin: 5px 0 14px 0;
   flex-shrink: 0;
   position: relative;  /* positioning context for .btn-show-map, top-right corner */
 }
-/* SHOW MAP (2026-09-14, "tessera-web-map-tune"): top-right corner of
-   #filesScreen, mirrors .btn-hide-map on the map pane. */
+/* SHOW MAP / HIDE MAP (2026-09-14 "tessera-web-map-tune", moved
+   2026-09-15 per operator: "Instead of 'Hide map' being in the map
+   pane, put it top right of file pane (where 'Show map' is shown when
+   map isn't)."): top-right corner of #filesScreen. Both buttons now
+   share this exact same absolute slot -- showMap()/hideMap() toggle
+   which ONE is visible (web-ui.js), so they are never both shown at
+   once and never overlap. */
 .btn-show-map {
   position: absolute;
   top: 10px;
   right: 10px;
   z-index: 5;
-  font-size: 12px;
-}
-.btn-hide-map {
-  position: absolute;
-  top: 10px;
-  right: 10px;
-  z-index: 5;
-  background: rgba(16, 23, 31, 0.85);
   font-size: 12px;
 }
 /* MAP PANE LAW (operator, 2026-09-15, "tessera-web-map-follow"):
@@ -688,7 +710,21 @@ input:focus { border-color: var(--cyan); }
   width: 800px;
   height: 400px;
   flex: 0 0 auto;
-  margin: 60px 0 14px 5px;
+  /* GUTTER (operator, 2026-09-15): "I want to fix the distance between
+     map pane and file pane... make that distance 15 pixels." Was 5px
+     (24px * 0.2, "tessera-web-map-follow"'s own instruction) -- this
+     supersedes that value, confirmed live via getComputedStyle +
+     getBoundingClientRect: exactly 15px measured between
+     #filesScreen's right edge and #mapPane's left edge.
+     MOVED UP (operator, 2026-09-15): "Move both file and map panes up
+     on the page. Put them 25px below line under Tessera." Matches
+     #filesLayout .column-screen's own margin-top (5px) above -- see
+     that rule's own comment for why 5px (not 25px) lands the panels
+     at exactly 25px below the header's border-bottom line: the
+     header itself already carries a 20px margin-bottom, so 20 + 5 =
+     25. Both panes share this same top margin so they stay
+     top-aligned with each other. Was 60px before this packet. */
+  margin: 5px 0 14px 15px;
   position: relative;
   border: 1px solid var(--border);
   border-radius: var(--radius);
