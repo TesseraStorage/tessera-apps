@@ -55,7 +55,7 @@ function cacheRefs() {
     'unlockScreen', 'unlockPassword', 'btnUnlock', 'unlockStatus', 'btnForgotPassword',
     'filesScreen', 'dropzone', 'fileInput', 'fileList', 'fileActions',
     'btnDownload', 'btnShare', 'btnDelete', 'btnRemoveBrowser',
-    'filesLayout', 'btnShowMap', 'mapPane', 'btnHideMap', 'mapCanvas', 'mapCaption',
+    'filesLayout', 'btnShowMap', 'mapPane', 'btnHideMap', 'mapCanvas',
     'statusText', 'progressWrap', 'progressFill', 'progressLabel',
     'shareModal', 'shareLink', 'btnCopyLink', 'btnCloseModal',
     'toast',
@@ -209,7 +209,12 @@ const SKELETON = /*html*/`
     <aside id="mapPane" class="map-pane hidden">
       <button id="btnHideMap" class="btn btn-ghost btn-hide-map">Hide map</button>
       <canvas id="mapCanvas" class="map-canvas"></canvas>
-      <div id="mapCaption" class="map-caption"></div>
+      <!-- CAPTION KILLED (2026-09-15, "tessera-web-map-follow"):
+           "Kill the map caption... No replacement sentence this
+           packet. Progress stays on the files pane as N/30." The
+           #mapCaption element itself is removed, not just left empty
+           -- there is no lower-left text node on the map pane at all
+           anymore. -->
     </aside>
   </div>
 
@@ -752,7 +757,7 @@ let mapController = null
 let mapShown = false
 
 function ensureMapController() {
-  if (!mapController) mapController = createUploadMap(r.mapCanvas, r.mapCaption)
+  if (!mapController) mapController = createUploadMap(r.mapCanvas)
   return mapController
 }
 

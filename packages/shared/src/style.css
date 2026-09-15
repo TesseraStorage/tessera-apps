@@ -549,21 +549,16 @@ input:focus { border-color: var(--cyan); }
 /* ── hidden ───────────────────────────────────────────── */
 .hidden { display: none !important; }
 
-/* ── files layout + upload map (2026-09-14, "tessera-web-map-progress")
-   Files column stays the existing .column-screen centered box by
-   default; on Add it gains .files-narrow (pushed left, narrower) while
-   .map-pane slides in from the right. Both live inside #filesLayout, a
-   plain flex row -- no new grid system, no second app shell. ────── */
 /* ── files layout + upload map (2026-09-14, "tessera-web-map-progress",
-   revised 2026-09-15 "tessera-web-look-v1" per operator's map-pane law)
+   revised 2026-09-15 "tessera-web-look-v1", revised again 2026-09-15
+   "tessera-web-map-follow" per operator's follow-up notes)
    Files column stays the SAME onboard .column-screen width (420px)
    whether the map is open or closed -- it never narrows to "feed" the
-   map. The map is a fixed-size (720x360, equirectangular 2:1) sibling
-   box that slides in from the right across a visible 24px gutter, not
-   a flex child that eats the list's own width. #filesLayout may
+   map. The map is a fixed-size (800x400, equirectangular 2:1) sibling
+   box that slides in from the RIGHT PAGE EDGE across a visible 5px
+   gutter (law #1: "cut it by 80%... 24 * 0.2"). #filesLayout may
    overflow horizontally on a narrow window (the page scrolls) rather
-   than squashing the map to fit -- only .map-pane itself clips its own
-   canvas during the width-grow slide. ────────────────────────────── */
+   than squashing the map to fit. ────────────────────────────── */
 #filesLayout {
   display: flex;
   align-items: flex-start;
@@ -573,22 +568,16 @@ input:focus { border-color: var(--cyan); }
   position: relative;
 }
 #filesLayout .column-screen {
-  /* Deliberately NO max-width/margin override here anymore -- the
-     files column keeps its normal .column-screen width (420px,
-     margin: 60px auto 14px) at all times. "Files column width does
-     not shrink to feed the map... the list does not jump to a new
-     width" whether .files-narrow is present or not. The class is kept
-     as a state hook (web-ui.js still toggles it) but carries no width
-     rule of its own -- see the (removed) old .files-narrow block this
-     replaces. */
+  /* Deliberately NO max-width/margin override here -- the files
+     column keeps its normal .column-screen width (420px, margin: 60px
+     auto 14px) at all times, regardless of map state. ".files-narrow"
+     is still toggled by JS as a state hook but carries no CSS rule of
+     its own. */
   flex-shrink: 0;
   position: relative;  /* positioning context for .btn-show-map, top-right corner */
 }
-/* SHOW MAP (2026-09-14, "tessera-web-map-tune"): "Link top-right of the
-   files/drop pane, above and to the right of the Tessera logo. Same
-   pair as Hide map." Absolute top-right corner of #filesScreen, same
-   positioning pattern as .btn-hide-map on the map pane -- the two
-   controls now visually mirror each other on their respective panes. */
+/* SHOW MAP (2026-09-14, "tessera-web-map-tune"): top-right corner of
+   #filesScreen, mirrors .btn-hide-map on the map pane. */
 .btn-show-map {
   position: absolute;
   top: 10px;
@@ -604,65 +593,71 @@ input:focus { border-color: var(--cyan); }
   background: rgba(16, 23, 31, 0.85);
   font-size: 12px;
 }
-/* MAP PANE LAW (operator, 2026-09-15, "tessera-web-look-v1"):
-   "The map is a picture of the world next to the files, not a flex
-   child that eats the list." Fixed 720x360 box (equirectangular 2:1 --
-   the canvas's own prior native size already used min-height:480 at a
-   65vw-driven width that varied by viewport; no single sane frozen
-   pixel pair existed to reuse, so this ships the packet's own named
-   fallback size exactly: 720x360, not a third size). Top margin 60px
-   matches the files column's own .column-screen top margin exactly --
-   "top edge of the map box matches the top edge of the files pane."
-   24px LEFT MARGIN is the visible gutter between the two panes (law
-   #1: "leave a visible gutter (~24px)") -- present only while the map
-   is not .hidden, so no gutter-shaped gap is reserved when hidden. */
+/* MAP PANE LAW (operator, 2026-09-15, "tessera-web-map-follow"):
+   "Width/opacity tricks that start from display:none or from a
+   0-width box will snap. That is the bug." -- look-v1's .map-pane
+   went from width:0 to width:720px WHILE ALSO relying on the global
+   ".hidden { display: none !important }" rule to actually hide it
+   between uploads. A CSS transition cannot animate across a
+   display:none boundary at all -- the browser never paints an
+   in-between frame, so toggling .hidden (removing display:none) and
+   the width/opacity change landed in the SAME paint, reading as a
+   snap. FIX: .map-pane is now ALWAYS width:800px/height:400px and
+   ALWAYS part of the normal flex flow (never display:none, never
+   width:0) -- ".map-pane.hidden" below overrides the global .hidden
+   rule's display:none specifically for this element (same
+   !important, higher specificity: .map-pane.hidden beats .hidden),
+   so the node never leaves the render tree ("keep the node in the
+   document while it moves" -- law #2). The ONLY thing Show/Hide
+   toggles now is a `transform: translateX(...)` value: hidden ->
+   translateX(100vw) (unconditionally past the right edge of any
+   viewport, regardless of where the box's natural slot sits),
+   shown -> translateX(0) (its natural slot, immediately right of the
+   files column across the 5px gutter). Because the box's WIDTH/MARGIN
+   never change, #filesLayout's total flex-row width is now also
+   CONSTANT across hidden/shown -- the files column's own position
+   does not shift AT ALL when the map opens or closes, which is a
+   stronger guarantee than look-v1's (unchanged width, but the row's
+   total content width used to change when .map-pane grew from 0). */
 .map-pane {
-  width: 0;
-  height: 360px;
+  width: 800px;
+  height: 400px;
   flex: 0 0 auto;
-  margin: 60px 0 14px 0;
+  margin: 60px 0 14px 5px;
   position: relative;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--bg);
   overflow: hidden;
+  transform: translateX(100vw);
   opacity: 0;
-  transform: translateX(24px);
-  /* SLIDE (operator law #6): "Show and Hide both animate 400ms, same
-     easing both ways." Was .35s -- now .4s uniformly, ease-in-out both
-     directions (no separate show/hide timing curve). Width is part of
-     this same slide-open motion (0 -> 720px), not a "scale with the
-     files pane" violation -- law #2 is about the box's FINAL size
-     never depending on viewport/sibling width (no more 65vw), not
-     about banning a width transition during the reveal itself. */
-  transition: width .4s ease-in-out, opacity .4s ease-in-out,
-              transform .4s ease-in-out, margin-left .4s ease-in-out;
+  pointer-events: none;
+  transition: transform .4s ease-in-out, opacity .4s ease-in-out;
+}
+.map-pane.hidden {
+  /* Overrides the global ".hidden { display: none !important }" for
+     THIS element only (same !important, higher specificity) -- see
+     the block comment above. The pane must stay laid out/rendered at
+     all times so its transform can actually animate on click. */
+  display: block !important;
 }
 .map-pane:not(.hidden) {
-  width: 720px;
-  margin-left: 24px;
-  opacity: 1;
   transform: translateX(0);
+  opacity: 1;
+  pointer-events: auto;
 }
 .map-canvas {
-  /* FIXED SIZE (operator law #2/#3): exact 720x360 pixels, never a
-     percentage of .map-pane's own animating width -- so the canvas
-     never stretches/squashes mid-slide or reflows the world's aspect
-     ratio. ResizeObserver in map.js still fires on this fixed box (a
-     harmless no-op once settled at 720x360), it just never receives a
-     variable size to chase anymore. */
-  width: 720px;
-  height: 360px;
+  /* FIXED SIZE: exact 800x400 pixels, never a percentage of anything
+     that could change -- the canvas element itself never
+     stretches/squashes, on open, close, or mid-slide. */
+  width: 800px;
+  height: 400px;
   display: block;
 }
-.map-caption {
-  position: absolute;
-  bottom: 10px;
-  left: 12px;
-  font-size: 12px;
-  color: var(--ink2);
-  z-index: 5;
-}
+/* .map-caption removed (2026-09-15, "tessera-web-map-follow" law #3:
+   "Kill the map caption... No replacement sentence this packet.") --
+   the #mapCaption element no longer exists in the DOM at all. */
+
 
 
 /* ── scrollbar ────────────────────────────────────────── */

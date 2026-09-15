@@ -83,9 +83,18 @@ const TOPOJSON_CLIENT_URL = 'https://unpkg.com/topojson-client@3'
 let ORIGIN = { lat: 25.2, lon: 55.3 }  // Dubai, UAE -- default per this task's law
 
 // NAMED RATE/COUNT CONSTANTS (packet law: "Operator will turn these
-// later. Keep them exported."):
+// later. Keep them exported." Re-affirmed 2026-09-15 "tessera-web-
+// map-follow": "Do not invent traveling-dot color variants, speed, or
+// frequency knobs. Leave ARC_TRAVEL_MS and DOTS_PER_ARC exported.")
 export const ARC_TRAVEL_MS = 4800   // ms for one glow-dot to traverse an arc (2026-09-14 "tessera-web-map-tune": half speed, was 2400)
 export const DOTS_PER_ARC = 2       // simultaneous glow-dots per active arc, staggered (2026-09-14 "tessera-web-map-tune": halved, was 4)
+
+// PER-SHARD FADE (2026-09-15, "tessera-web-map-follow" law #4): "Finish
+// of that shard: that line fades out (~800-1200ms alpha)." Not a knob
+// this packet names as exported/tunable (unlike ARC_TRAVEL_MS/
+// DOTS_PER_ARC) -- kept as a plain internal constant, midpoint of the
+// packet's own named range.
+const SHARD_FADE_MS = 1000
 
 let _geoCache = null       // host_key -> {lat, lon}
 let _landFeature = null    // GeoJSON FeatureCollection (land polygons)
@@ -187,14 +196,9 @@ function drawLand(ctx, w, h) {
         // spans nearly the full width of the map), ctx.lineTo() draws a
         // straight chord STRAIGHT ACROSS the canvas connecting those two
         // x-positions, instead of two separate edges at the left and
-        // right borders. That chord renders as a long, nearly-flat
-        // horizontal stroke at Antarctica's latitude (~63-85S, which is
-        // ~85-98% down a 480px-tall map -- "~3/4 down" is the visible
-        // part of that same line before it exits toward the bottom
-        // edge). Fixed by starting a NEW subpath (moveTo instead of
-        // lineTo) whenever the raw longitude jumps by more than 180
-        // degrees between consecutive ring points -- night land itself
-        // (topojson source, dark fill/stroke colors) is unchanged.
+        // right borders. Fixed by starting a NEW subpath (moveTo instead
+        // of lineTo) whenever the raw longitude jumps by more than 180
+        // degrees between consecutive ring points.
         let started = false
         let prevLon = null
         ctx.beginPath()
@@ -213,7 +217,7 @@ function drawLand(ctx, w, h) {
   }
 }
 
-// Small radial glow instead of a flat 1px dot.
+// Small radial glow.
 function drawGlow(ctx, x, y, r, color) {
   const g = ctx.createRadialGradient(x, y, 0, x, y, r)
   g.addColorStop(0, color)
@@ -230,55 +234,82 @@ function bezierPoint(t, ox, oy, midX, midY, x, y) {
   return [px, py]
 }
 
-// Arc fade-out timing after the write completes (packet law #4: "Arcs
-// fade out. Destination glow stays. Origin glow stays.").
-const ARC_FADE_MS = 1200
-
-// MAP COLOR (operator, 2026-09-15, "tessera-web-look-v1"): "Stationary
-// glows (origin + landed destination): white pinpoints with a tight
-// glow. Not yellow. Not gold discs." Outbound (write) stays gold;
-// inbound (download) is cyan, MAP2's own named family
-// (rgb(62,198,224) / #3EC6E0). "Fade does not turn the glow yellow" --
-// the stationary-glow color below is always this white, completely
-// independent of the ARC_FADE_MS fade factor, which only ever touches
-// the moving arc-line alpha, never these fixed colors.
-const GLOW_WHITE = 'rgba(243, 246, 250, 0.95)'  // #F3F6FA core, per law
+// MAP COLOR (operator, 2026-09-15, "tessera-web-look-v1", brightened
+// 2026-09-15 "tessera-web-map-follow" law #5/#6):
+// "Stationary pinpoints: brighter, slightly smaller." "Lines must look
+// precise: brighter and sharper... thinner stroke, no soft smear, no
+// wide glow on the line itself."
+const GLOW_WHITE = 'rgba(255, 255, 255, 1)'  // brighter than look-v1's 0.95-alpha #F3F6FA -- still the white family, just punchier
+const PIN_RADIUS = 4   // was 6 (origin) / 5 (landed) in look-v1 -- "slightly smaller core"
 const STROKE_GOLD = 'rgba(245, 158, 11, '   // outbound arcs -- append alpha + ')'
-const DOT_GOLD = 'rgba(250, 204, 21, 0.95)'     // outbound traveling dots
+const DOT_GOLD = 'rgba(250, 204, 21, 0.95)'     // outbound traveling dots -- unchanged, law #6 only raises LINE alpha, dots "may stay the current gold/cyan"
 const STROKE_CYAN = 'rgba(62, 198, 224, '       // inbound arcs -- append alpha + ')'
-const DOT_CYAN = 'rgba(62, 198, 224, 0.95)'     // inbound traveling dots -- MAP2 #3EC6E0 family
+const DOT_CYAN = 'rgba(62, 198, 224, 0.95)'     // inbound traveling dots -- MAP2 #3EC6E0 family, unchanged
+// SHARPER LINES (law #6): was 0.35 alpha / 1.2px width with a soft glow
+// look from the wide radial-gradient dots sharing the same visual
+// space as the stroke. Raised alpha, thinned the stroke itself -- the
+// stroke has never used drawGlow() (that's only for pins/dots), so
+// "no wide glow on the line" just means: don't widen lineWidth, don't
+// lower alpha. 0.75 alpha / 0.8px reads as a crisp, bright thread.
+const LINE_ALPHA = 0.75
+const LINE_WIDTH = 0.8
+
+// PIN DISPERSION (2026-09-15, "tessera-web-map-follow" law #5): "Many
+// shards land on one host. Stacked pins look like one. Disperse them."
+// Sunflower seed arrangement on a 25px-radius disk around the
+// projected host pixel -- deterministic per (hostKey, shard index on
+// that host), so a given shard's pin never wanders frame to frame.
+// Formula is the packet's own, verbatim:
+//   theta = i * PI * (3 - sqrt(5))
+//   r = 25 * sqrt((i + 0.5) / n)
+// "The center of gravity of that cloud is the exact host pixel. Mean
+// offset is zero." -- true of the sunflower spiral by construction
+// (points spread symmetrically around the origin as n grows), not
+// something this code has to separately enforce.
+const PIN_DISPERSE_RADIUS = 25
+function sunflowerOffset(i, n) {
+  if (n <= 1) return [0, 0]  // single shard on this host: no offset, sits exactly on the host pixel
+  const theta = i * Math.PI * (3 - Math.sqrt(5))
+  const r = PIN_DISPERSE_RADIUS * Math.sqrt((i + 0.5) / n)
+  return [r * Math.cos(theta), r * Math.sin(theta)]
+}
 
 /**
  * A minimal map controller bound to a <canvas>.
  *
- * showCandidates(hostKeys): called ONCE at Add start (packet law: "Arcs
- * exist when Add starts, not when the shard lands"), with the single
- * host-list fetch's results -- draws QUIET, un-lit candidate pins (real
- * hosts from the real pool, not fake cities) for up to 30 of them that
- * have geo data. These are NOT gold write-arcs yet -- they mark "the
- * write might use one of these," never claiming certainty about which
- * ones will actually be picked.
+ * showCandidates(hostKeys): called ONCE at Add start, with the single
+ * host-list fetch's results -- draws QUIET, un-lit candidate pins for
+ * up to 30 of them that have geo data.
  *
- * landedHost(hostKey): called every time onShardUploaded reports a shard
- * landing -- ONE call per SHARD TRIP, not deduped per host (packet law:
- * "10+20 -> 30 shard trips... if the same host takes two shards, two
- * trips on that path is allowed"). Promotes/replaces that host's
- * candidate pin (if any) with a real gold arc + DOTS_PER_ARC traveling
- * glow-dots over ARC_TRAVEL_MS.
+ * shardLanded(hostKey, dir): called once per SDK shard-progress event
+ * (2026-09-15, "tessera-web-map-follow" law #4 -- "a line is one
+ * shard," never "the object"). onShardUploaded/onShardDownloaded are
+ * the SDK's ONLY hooks that name a hostKey (confirmed again this
+ * packet by re-grepping sia_storage_wasm.d.ts for onShardUploading/
+ * onShardStarted/equivalent -- neither exists; UploadOptions/
+ * DownloadOptions/PackedUploadOptions expose only onShardUploaded/
+ * onShardDownloaded). Since start and finish are the SAME SDK event
+ * here, this draws the trip, lets its DOTS_PER_ARC dots run, and
+ * starts that SAME trip's own SHARD_FADE_MS fade-out immediately --
+ * never waiting for pinObject or the other 29 shards. `landedHost` is
+ * kept as an alias below for any external caller still using the old
+ * name.
  *
- * completeWrite(): called once the whole upload finishes -- starts the
- * arc fade-out. Landed/destination glows and the origin glow are NOT
- * cleared here (packet law #4) -- only reset() (called at the START of
- * the NEXT upload) clears them.
+ * completeWrite(): called once the whole object finishes (success or
+ * fail). Per-shard trips that are already fading keep fading on their
+ * own clocks -- this does NOT snap-remove them or force an object-
+ * level fade; it only exists so a caller can signal "no more shards
+ * are coming" (used to stop the RAF loop once nothing is left
+ * animating). Pins (dispersed, per-shard) are never cleared here.
  */
 export function createUploadMap(canvas, captionEl) {
   const ctx = canvas.getContext('2d')
   let candidates = []   // {lat, lon} -- quiet, un-lit, shown at Add start
-  let landed = []       // {lat, lon, fadeAt} -- residual glow; fadeAt set once completeWrite() fires
-  let traveling = []    // {lat, lon, startedAt} -- one entry per shard trip, DOTS_PER_ARC dots each
+  let pins = []          // {lat, lon, hostKey, dxPin, dyPin} -- one per LANDED shard, dispersed, never cleared by completeWrite/fade
+  let trips = []         // {lat, lon, hostKey, dir, startedAt, fadeAt} -- one per shard trip; fadeAt set immediately (SHARD_FADE_MS), removed once fully faded
+  const hostShardCounts = new Map()  // hostKey -> count of shards landed there so far, for the sunflower index/n
   let ready = false
   let rafId = null
-  let completedAt = null
 
   function resize() {
     const rect = canvas.getBoundingClientRect()
@@ -287,98 +318,108 @@ export function createUploadMap(canvas, captionEl) {
     render()
   }
 
+  // Recompute every pin's dispersed offset for a host whenever a NEW
+  // shard lands there -- "n grows as shards land; recompute that
+  // host's cloud" (law #5). Stable per (hostKey, index): the i-th
+  // shard on a host always gets sunflowerOffset(i, n), so existing
+  // pins' angles never change, only the shared `n` denominator grows,
+  // which the packet's own formula already accounts for (nothing
+  // "wanders" -- r depends on i and n together, deterministically).
+  function recomputeHostCloud(hostKey) {
+    const n = hostShardCounts.get(hostKey) || 0
+    let i = 0
+    for (const p of pins) {
+      if (p.hostKey !== hostKey) continue
+      const [dx, dy] = sunflowerOffset(i, n)
+      p.dxPin = dx; p.dyPin = dy
+      i++
+    }
+  }
+
   function render() {
     const w = canvas.width, h = canvas.height
     if (!w || !h) return
     drawLand(ctx, w, h)
     if (!ready) return
     const [ox, oy] = project(ORIGIN.lat, ORIGIN.lon, w, h)
-    // Origin mark -- small, steady glow. Stays through completion
-    // (packet law #4: "Origin glow stays"). COLOR (operator,
-    // 2026-09-15): white, not gold -- stationary glows are always
-    // white regardless of which direction (upload/download) is active.
-    drawGlow(ctx, ox, oy, 6, GLOW_WHITE)
+    // Origin mark -- small, steady glow. White family, brighter/
+    // smaller than look-v1 (law #5).
+    drawGlow(ctx, ox, oy, PIN_RADIUS, GLOW_WHITE)
 
     const now = Date.now()
-
-    // Arc fade factor: 1.0 (full) before completeWrite(), easing to 0
-    // over ARC_FADE_MS after it. Destination/origin glows never use
-    // this factor -- only the curved arc lines do.
-    let fade = 1
-    if (completedAt !== null) {
-      fade = Math.max(0, 1 - (now - completedAt) / ARC_FADE_MS)
-    }
 
     // Quiet candidate pins (Add-start preview, real hosts, un-lit).
     for (const c of candidates) {
       const [x, y] = project(c.lat, c.lon, w, h)
-      drawGlow(ctx, x, y, 3, 'rgba(148, 163, 184, 0.35)')  // --ink2-ish, deliberately dim/neutral, not gold
+      drawGlow(ctx, x, y, 3, 'rgba(148, 163, 184, 0.35)')  // deliberately dim/neutral, not gold
     }
 
-    // Arcs (curved lines) for every landed + traveling shard trip --
-    // "one corridor per shard trip, not one per unique host": duplicate
-    // hosts draw a duplicate arc on the same path, which is allowed.
-    // COLOR (operator, 2026-09-15): gold outbound (write), cyan inbound
-    // (download) -- each trip carries its own `dir` ('upload' by
-    // default for every existing call site, 'download' when
-    // web-ui.js's onDownload passes it through). Grouped by stroke
-    // color per frame so this stays a single beginPath/stroke per
-    // color instead of one per trip.
-    if (fade > 0) {
-      ctx.lineWidth = 1.2
-      for (const dir of ['upload', 'download']) {
-        const stroke = dir === 'download' ? STROKE_CYAN : STROKE_GOLD
-        ctx.strokeStyle = stroke + (0.35 * fade) + ')'
-        let any = false
+    // Arcs (curved lines) -- one per still-fading shard TRIP, not per
+    // host and not per object (law #4). Each trip fades on its OWN
+    // clock, independent of every other trip -- "a finished shard's
+    // line fades while others still run." SHARPER (law #6): higher
+    // alpha, thinner stroke than look-v1.
+    ctx.lineWidth = LINE_WIDTH
+    for (const dir of ['upload', 'download']) {
+      const stroke = dir === 'download' ? STROKE_CYAN : STROKE_GOLD
+      let any = false
+      for (const t of trips) {
+        if (t.dir !== dir) continue
+        const fade = Math.max(0, 1 - (now - t.fadeAt) / SHARD_FADE_MS)
+        if (fade <= 0) continue
+        if (!any) { ctx.beginPath(); any = true }
+        ctx.strokeStyle = stroke + (LINE_ALPHA * fade) + ')'
+        const [x, y] = project(t.lat, t.lon, w, h)
+        const midX = (ox + x) / 2, midY = Math.min(oy, y) - 18
+        ctx.moveTo(ox, oy)
+        ctx.quadraticCurveTo(midX, midY, x, y)
+        // Per-trip alpha means per-trip stroke() -- can't batch this
+        // into one beginPath/stroke like look-v1 did (that assumed a
+        // single shared fade for the whole direction); a handful of
+        // simultaneous in-flight trips is cheap either way.
+        ctx.stroke()
         ctx.beginPath()
-        for (const m of landed.concat(traveling)) {
-          if ((m.dir || 'upload') !== dir) continue
-          const [x, y] = project(m.lat, m.lon, w, h)
-          const midX = (ox + x) / 2, midY = Math.min(oy, y) - 18
-          ctx.moveTo(ox, oy)
-          ctx.quadraticCurveTo(midX, midY, x, y)
-          any = true
-        }
-        if (any) ctx.stroke()
       }
     }
 
-    // Landed destinations: quieter residual glow -- stays after
-    // completion regardless of arc fade (packet law #4: "Destination
-    // glow stays"). COLOR (operator, 2026-09-15): white, same as
-    // origin -- "fade does not turn the glow yellow" holds trivially
-    // since this was never yellow/gold to begin with anymore.
-    for (const m of landed) {
-      const [x, y] = project(m.lat, m.lon, w, h)
-      drawGlow(ctx, x, y, 5, GLOW_WHITE)
+    // Landed pin dots: one per LANDED SHARD, dispersed around its host
+    // pixel on a 25px sunflower disk (law #5) -- never stacked, never
+    // cleared by fade or completeWrite. White family, brighter/
+    // smaller than look-v1.
+    for (const p of pins) {
+      const [hx, hy] = project(p.lat, p.lon, w, h)
+      drawGlow(ctx, hx + p.dxPin, hy + p.dyPin, PIN_RADIUS, GLOW_WHITE)
     }
 
-    // Traveling glow-dots: DOTS_PER_ARC dots per arc, staggered evenly
-    // across ARC_TRAVEL_MS so several are visible on the same corridor
-    // at once (packet law #3). Dot color follows the trip's own
-    // direction -- gold outbound, cyan inbound (operator, 2026-09-15).
-    let anyTraveling = false
-    for (const m of traveling) {
-      const [x, y] = project(m.lat, m.lon, w, h)
+    // Traveling glow-dots: DOTS_PER_ARC dots per still-fading trip,
+    // staggered evenly across ARC_TRAVEL_MS. Removed entirely once
+    // that trip's OWN fade reaches 0 (below, in the cull step) --
+    // dots never outlive their own line.
+    let anyAnimating = false
+    for (const t of trips) {
+      const fade = Math.max(0, 1 - (now - t.fadeAt) / SHARD_FADE_MS)
+      if (fade <= 0) continue
+      anyAnimating = true
+      const [x, y] = project(t.lat, t.lon, w, h)
       const midX = (ox + x) / 2, midY = Math.min(oy, y) - 18
-      const dotColor = (m.dir === 'download') ? DOT_CYAN : DOT_GOLD
+      const dotColor = (t.dir === 'download') ? DOT_CYAN : DOT_GOLD
       for (let i = 0; i < DOTS_PER_ARC; i++) {
         const stagger = (i / DOTS_PER_ARC) * ARC_TRAVEL_MS
-        const dotElapsed = (now - m.startedAt - stagger)
-        if (dotElapsed < 0) continue  // this dot hasn't started its lap yet
-        const t = (dotElapsed % ARC_TRAVEL_MS) / ARC_TRAVEL_MS
-        const [px, py] = bezierPoint(t, ox, oy, midX, midY, x, y)
+        const dotElapsed = (now - t.startedAt - stagger)
+        if (dotElapsed < 0) continue
+        const tt = (dotElapsed % ARC_TRAVEL_MS) / ARC_TRAVEL_MS
+        const [px, py] = bezierPoint(tt, ox, oy, midX, midY, x, y)
         drawGlow(ctx, px, py, 7, dotColor)
       }
-      // A trip's dots keep looping (packet law #3 doesn't say "stop
-      // after one lap" -- "several dots on the same arc at once" reads
-      // as a continuous effect while the trip is active) until
-      // completeWrite() starts the fade; anyTraveling stays true the
-      // whole time a trip is un-faded so the RAF loop keeps running.
-      if (completedAt === null || fade > 0) anyTraveling = true
     }
 
-    if (anyTraveling || (completedAt !== null && fade > 0)) {
+    // Cull fully-faded trips so the array doesn't grow unbounded
+    // across a long-running upload/download.
+    if (trips.length) {
+      trips = trips.filter(t => (now - t.fadeAt) < SHARD_FADE_MS)
+    }
+
+    if (anyAnimating) {
       rafId = requestAnimationFrame(render)
     } else {
       rafId = null
@@ -395,9 +436,6 @@ export function createUploadMap(canvas, captionEl) {
   // Add-start candidate preview (packet law: "At Add start, take the
   // host list the SDK is about to use. One fetch if the write needs it
   // anyway; share it. Draw up to 30 destinations that have lat/long.")
-  // Called from web-ui.js with the result of its OWN single sdk.hosts()
-  // call -- this function does no fetching itself, just plots what it's
-  // given.
   function showCandidates(hostKeys) {
     candidates = []
     for (const key of hostKeys || []) {
@@ -408,40 +446,47 @@ export function createUploadMap(canvas, captionEl) {
     render()
   }
 
-  function landedHost(hostKey, dir) {
+  // shardLanded: the per-shard entry point (2026-09-15, "tessera-web-
+  // map-follow"). Draws one trip (arc + DOTS_PER_ARC traveling dots)
+  // that starts fading immediately on its own SHARD_FADE_MS clock, and
+  // adds one dispersed pin at this host's next sunflower index.
+  function shardLanded(hostKey, dir) {
     if (!hostKey) return
     const geo = geoLookup(hostKey)
-    // "If a host has no lat/long, skip the pin." -- no fallback
-    // placement, no fake location.
+    // "Skip hosts with no lat/long. Do not invent pins. Do not call
+    // hosts() to fill gaps." -- no fallback placement.
     if (!geo) return
-    // One entry per SHARD TRIP (packet law #1) -- no seenHosts dedup.
-    // A host reused across multiple shards gets multiple trips drawn on
-    // the same path, which the packet explicitly allows.
-    traveling.push({ lat: geo.lat, lon: geo.lon, startedAt: Date.now(), dir: dir || 'upload' })
-    if (captionEl) {
-      const total = landed.length + traveling.length
-      const verb = (dir === 'download') ? 'read' : 'written'
-      captionEl.textContent = total + ' shard trip' + (total === 1 ? '' : 's') + ' ' + verb
-    }
+    const now = Date.now()
+    trips.push({ lat: geo.lat, lon: geo.lon, hostKey, dir: dir || 'upload', startedAt: now, fadeAt: now })
+
+    // Dispersed pin (law #5): index is this host's shard count BEFORE
+    // incrementing (0-based), n is the count AFTER.
+    const i = hostShardCounts.get(hostKey) || 0
+    hostShardCounts.set(hostKey, i + 1)
+    pins.push({ lat: geo.lat, lon: geo.lon, hostKey, dxPin: 0, dyPin: 0 })
+    recomputeHostCloud(hostKey)
+
     if (!rafId) render()
   }
+  // Back-compat alias -- some call sites still say "landedHost".
+  const landedHost = shardLanded
 
+  // completeWrite(): the object has finished (or failed). Per-shard
+  // trips already fade themselves on their own clocks (law #4: "do
+  // not wait for pinObject or the other 29 shards" -- so there is
+  // nothing left to fade "for the object" here). This function is
+  // kept only so callers can signal the object boundary; it does not
+  // touch trips or pins at all -- no snap-remove, no forced fade.
   function completeWrite() {
-    // Move every still-traveling trip to landed (their glow-dots stop
-    // looping; the arc itself starts fading) and record the fade start.
-    landed = landed.concat(traveling)
-    traveling = []
-    completedAt = Date.now()
     if (!rafId) render()
   }
 
   function reset() {
     candidates = []
-    landed = []
-    traveling = []
-    completedAt = null
+    pins = []
+    trips = []
+    hostShardCounts.clear()
     if (rafId) { cancelAnimationFrame(rafId); rafId = null }
-    if (captionEl) captionEl.textContent = ''
     render()
   }
 
@@ -452,6 +497,7 @@ export function createUploadMap(canvas, captionEl) {
 
   return {
     showCandidates,
+    shardLanded,
     landedHost,
     completeWrite,
     reset,
