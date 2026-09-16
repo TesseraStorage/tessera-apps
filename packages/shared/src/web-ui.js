@@ -1433,6 +1433,47 @@ function stopEase() {
   if (_easeTimer) { clearInterval(_easeTimer); _easeTimer = null }
 }
 
+// ── encoding… activity dots (2026-09-16, "tessera-web-encoding-word",
+// revised same day per operator instruction to move onto the progress
+// row and animate) ──────────────────────────────────────────────────
+//
+// LAW: "'encoding...' messaging, move it to the same line as the
+// progress bar. When first write commences, progress bar replaces
+// it." -- the FIRST REAL onShardUploaded/onShardDownloaded tick IS
+// that trigger (doUpload's own callback below already distinguishes
+// the one-time 'encoding…' tick from every subsequent real tick; no
+// new trigger needed, matching the packet's own "if a different
+// trigger already exists, use that" instruction). So: 'encoding…' now
+// renders INSIDE r.progressLabel (same DOM node/same line the real
+// stage text uses), with r.progressWrap unhidden early (not gated on
+// a real tick) so the row is visibly present as soon as encoding
+// starts. The first real tick calls stopEncodingAnim() then
+// immediately overwrites r.progressLabel via the existing
+// patchState({progress:...}) path -- a genuine replace, not a layered
+// hide/show.
+//
+// "One period, then two, then three, then 0, then 1 etc etc." -- a
+// 4-step repeating cycle (1,2,3,0 dots), not a monotonic count, so it
+// visibly loops as long as encoding is the active stage.
+let _encodingTimer = null
+let _encodingDots = 1
+const ENCODING_STEP_MS = 450
+
+function startEncodingAnim() {
+  stopEncodingAnim()
+  _encodingDots = 1
+  const paint = () => {
+    r.progressLabel.textContent = 'encoding' + '.'.repeat(_encodingDots)
+    _encodingDots = (_encodingDots + 1) % 4  // 1,2,3,0,1,2,3,0... per "one period, then two, then three, then 0, then 1 etc"
+  }
+  paint()
+  _encodingTimer = setInterval(paint, ENCODING_STEP_MS)
+}
+
+function stopEncodingAnim() {
+  if (_encodingTimer) { clearInterval(_encodingTimer); _encodingTimer = null }
+}
+
 function setProgressTarget(pct) {
   stopEase()
   _easeFrom = parseFloat(r.progressFill.style.width) || 0
@@ -1564,32 +1605,32 @@ async function doUpload(file, destPathOverride) {
     const finalBasename = resolveCollisionName(siblingNames, file.name)
     const metaName = destPath ? buildPath(destPath, finalBasename) : (finalBasename !== file.name ? finalBasename : undefined)
     await uploadFile(sdk, file, ({ stage, percent, elapsed, hostKey, transferMs }) => {
-      // ENCODING WORD (2026-09-16, "tessera-web-encoding-word",
-      // supersedes "tessera-web-encode-hold"'s "never emitted" era):
-      // files.js now emits exactly one 'encoding...' tick, right
-      // before calling sdk.upload() (see that file's own comment for
-      // the exact moment and rationale). Routed to `status` ONLY,
-      // never to `progress` -- patchState({ progress: ... }) is
-      // exactly what unhides r.progressWrap below (see that
-      // subscriber's own "fires on ANY truthy progress value"
-      // comment), so if this tick took the same path as every real
-      // onShardUploaded tick, the bar would appear one tick early, at
-      // 0%, before any shard has shipped -- the exact bug encode-hold
-      // fixed. Every OTHER tick (all real onShardUploaded/pinning/
-      // done events) is completely unaffected by this branch and
-      // still flows to `progress` exactly as before.
+      // ENCODING WORD (2026-09-16, "tessera-web-encoding-word", MOVED
+      // + ANIMATED same day per operator instruction): "'encoding...'
+      // messaging, move it to the same line as the progress bar. When
+      // first write commences, progress bar replaces it." files.js
+      // still emits exactly one 'encoding…' tick, right before calling
+      // sdk.upload() -- that tick IS the existing trigger this packet
+      // asks to reuse ("if a different trigger already exists, use
+      // that"), so no new signal was added. What changed: this used to
+      // route to `status` (a separate DOM node/line below the bar,
+      // r.statusText) -- now it unhides r.progressWrap early and
+      // starts the animated-dots paint loop directly into
+      // r.progressLabel, the SAME node/line every real progress tick
+      // already writes to below. The first real tick (the `else`
+      // branch) stops the animation and immediately overwrites that
+      // same textContent via the normal patchState({progress:...})
+      // path -- a genuine replace on the same line, not a hide/show of
+      // two different rows.
       if (stage === 'encoding\u2026') {
-        patchState({ status: stage })
+        r.progressWrap.classList.remove('hidden')
+        startEncodingAnim()
         return
       }
       // First real tick past the branch above IS the first shard
-      // shipping -- clear the lingering 'encoding...' status here so
-      // it doesn't sit next to the now-visible bar. Matches the
-      // packet's own copy table: "First shard shipping: bar appears.
-      // Status uploading (N/30)." r.statusText and r.progressLabel
-      // are two different DOM nodes (see the 'progress' subscriber
-      // below for progressLabel's own text), so this does not fight
-      // with that subscriber's write.
+      // shipping -- stop the encoding animation now that a real
+      // progress tick is about to overwrite the same label text.
+      stopEncodingAnim()
       if (getState().status) patchState({ status: '' })
       // Real target only -- setProgressTarget's own ease-out never passes
       // this value (see EASE_MS comment above). The 'done' tick still
@@ -1599,12 +1640,14 @@ async function doUpload(file, destPathOverride) {
       patchState({ progress: { stage, percent, elapsed, hostKey, transferMs } })
     }, metaName)
     stopEase()
+    // Safety net (2026-09-16): if uploadFile resolved without ever
+    // firing a real progress tick (e.g. a 0-shard/trivial object), the
+    // encoding animation would otherwise keep running forever with
+    // nothing left to overwrite it -- stop it explicitly here too.
+    stopEncodingAnim()
     renderProgressBar(100)
     patchState({ progress: null })
     // "Do not clear the landed points when the bar hits 100%." --
-    // completeWrite() starts the arc fade-out; it does NOT clear
-    // landed/destination or origin glows. Only the NEXT upload's
-    // reset() clears them.
     if (mapController) mapController.completeWrite()
     showToast('\u2705 ' + file.name + ' added')
     await refreshFiles()
@@ -1614,6 +1657,11 @@ async function doUpload(file, destPathOverride) {
     // count that will never arrive; the exact frozen percent stays
     // visible under the fail text until the next upload starts.
     stopEase()
+    // A throw before any real shard ever shipped (e.g. sdk.upload()
+    // itself throws, or waitForReady's 10s cap trips) means the
+    // encoding animation could still be running -- stop it so it
+    // doesn't keep animating underneath/behind the fail text.
+    stopEncodingAnim()
     // COPY (2026-09-15, "tessera-web-look-v1"): "Add failed: one
     // sentence + try again. No stack trace." Was 'Add failed: ' +
     // e.message, which could surface a raw SDK/network error string
