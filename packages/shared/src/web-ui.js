@@ -64,7 +64,7 @@ function cacheRefs() {
     'unlockScreen', 'unlockPassword', 'btnUnlock', 'unlockStatus', 'btnForgotPassword',
     'filesScreen', 'dropzone', 'fileInput', 'fileList', 'fileActions',
     'btnDownload', 'btnShare', 'btnDelete',
-    'btnMove', 'btnRename',
+    'btnMove', 'btnRename', 'btnCancelSelection',
     'btnNewFolder', 'breadcrumb', 'newFolderInline', 'newFolderInput',
     'btnNewFolderConfirm', 'btnNewFolderCancel',
     'filesLayout', 'btnShowMap', 'mapPane', 'btnHideMap', 'mapCanvas',
@@ -253,6 +253,7 @@ const SKELETON = /*html*/`
         <button id="btnMove" class="btn" disabled>Move</button>
         <button id="btnRename" class="btn" disabled>Rename</button>
         <button id="btnDelete" class="btn btn-danger" disabled>Delete</button>
+        <button id="btnCancelSelection" class="btn btn-ghost">Cancel</button>
       </div>
       <p id="statusText" class="status-text"></p>
     </section>
@@ -360,6 +361,32 @@ export async function mountApp(container) {
   r.btnShare.addEventListener('click', onShare)
   r.btnCloseModal.addEventListener('click', closeShareModal)
   r.btnCopyLink.addEventListener('click', onCopyLink)
+
+  // CANCEL SELECTION (2026-09-16, per operator instruction: "the file
+  // options menu doesn't have a cancel button... clicking anywhere
+  // else on the screen should also mean cancel"). Deselecting is
+  // already exactly what popstate/gotoFolder/refreshFiles do elsewhere
+  // in this file (patchState({ selectedIdx: -1 })) -- reused verbatim,
+  // no new selection-clearing mechanism invented.
+  r.btnCancelSelection.addEventListener('click', () => patchState({ selectedIdx: -1 }))
+  // Click-anywhere-else-cancels: a capturing document click listener,
+  // not a click-outside library -- if the click landed inside a file
+  // row (which already owns its own select-this-row click handler) or
+  // inside the actions bar itself (Download/Share/Move/Rename/Delete/
+  // Cancel all have their own handlers that must run first, unbothered
+  // by this), do nothing. Any other click on the page, while a row is
+  // selected, deselects. Modals (Share/Move/Rename text input) are
+  // portal-like overlays layered OVER this same document, so a click
+  // on a modal's own content must NOT also cancel the file selection
+  // underneath it -- excluded explicitly via .closest() checks below,
+  // same reasoning as the file-row/actions-bar exclusions.
+  document.addEventListener('click', (e) => {
+    if (getState().selectedIdx === -1) return
+    if (e.target.closest('.file-row')) return
+    if (e.target.closest('#fileActions')) return
+    if (e.target.closest('.modal-overlay')) return
+    patchState({ selectedIdx: -1 })
+  })
 
   r.dropzone.addEventListener('dragover', e => { e.preventDefault(); r.dropzone.classList.add('dragover') })
   r.dropzone.addEventListener('dragleave', () => r.dropzone.classList.remove('dragover'))
