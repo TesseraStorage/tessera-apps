@@ -245,7 +245,8 @@ function drawLand(ctx, w, h) {
   }
 }
 
-// Small radial glow.
+// Small radial glow. Still used as-is for traveling dots (2026-09-16
+// "sharper fixed dots" packet: "Traveling dots, no change").
 function drawGlow(ctx, x, y, r, color) {
   const g = ctx.createRadialGradient(x, y, 0, x, y, r)
   g.addColorStop(0, color)
@@ -254,6 +255,38 @@ function drawGlow(ctx, x, y, r, color) {
   ctx.beginPath()
   ctx.arc(x, y, r, 0, Math.PI * 2)
   ctx.fill()
+}
+
+// FIXED-DOT LOOK (2026-09-16, "sharper fixed dots"): "make them 2x2
+// pixels, as bright as the system enables, then a modest halo around
+// each." Used for the origin mark and landed-shard pins only -- the
+// old wide drawGlow() core (radius = PIN_RADIUS, soft radial falloff
+// from center) read as a blur with no crisp point. This keeps a halo
+// (still a radialGradient, just tighter/dimmer than before) but adds a
+// genuinely sharp core: a solid, non-antialiased-looking 2x2 device-
+// pixel square at full alpha (1), drawn with fillRect (not arc/fill,
+// which always antialiases a circle's edge at this size) so the core
+// itself reads as sharp rather than a blurred nub. Halo radius is
+// deliberately modest (6px) vs. the fixed dot's old PIN_RADIUS-based
+// glow -- "modest," not the previous wide wash.
+const FIXED_DOT_HALO_RADIUS = 6
+const FIXED_DOT_HALO_ALPHA = 0.45  // halo peak alpha; core is always 1 (opaque)
+
+function drawSharpDot(ctx, x, y, color) {
+  // Modest halo first (so the core paints on top, not underneath it).
+  const g = ctx.createRadialGradient(x, y, 0, x, y, FIXED_DOT_HALO_RADIUS)
+  g.addColorStop(0, color.replace(/, ?1\)$/, `, ${FIXED_DOT_HALO_ALPHA})`))
+  g.addColorStop(1, 'rgba(0,0,0,0)')
+  ctx.fillStyle = g
+  ctx.beginPath()
+  ctx.arc(x, y, FIXED_DOT_HALO_RADIUS, 0, Math.PI * 2)
+  ctx.fill()
+
+  // Sharp 2x2 core, full brightness -- device pixels, not CSS px, so
+  // it stays crisp under devicePixelRatio scaling the canvas already
+  // applies elsewhere in this file.
+  ctx.fillStyle = color
+  ctx.fillRect(Math.round(x) - 1, Math.round(y) - 1, 2, 2)
 }
 
 function bezierPoint(t, ox, oy, midX, midY, x, y) {
@@ -381,7 +414,7 @@ export function createUploadMap(canvas, captionEl, onLanded) {
     const [ox, oy] = project(ORIGIN.lat, ORIGIN.lon, w, h)
     // Origin mark -- small, steady glow. White family, brighter/
     // smaller than look-v1 (law #5).
-    drawGlow(ctx, ox, oy, PIN_RADIUS, GLOW_WHITE)
+    drawSharpDot(ctx, ox, oy, GLOW_WHITE)
 
     const now = Date.now()
 
@@ -436,7 +469,7 @@ export function createUploadMap(canvas, captionEl, onLanded) {
     // smaller than look-v1.
     for (const p of pins) {
       const [hx, hy] = project(p.lat, p.lon, w, h)
-      drawGlow(ctx, hx + p.dxPin, hy + p.dyPin, PIN_RADIUS, GLOW_WHITE)
+      drawSharpDot(ctx, hx + p.dxPin, hy + p.dyPin, GLOW_WHITE)
     }
 
     // Traveling glow-dots: DOTS_PER_ARC dots per still-visible trip,
