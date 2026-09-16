@@ -100,6 +100,64 @@ export function buildPath(dir, basename) {
   return dir ? dir + '/' + basename : basename
 }
 
+// ── map shard persistence (2026-09-16, "tessera-web-add-hang-map400") ──
+//
+// "The map must show where this silo's shards already are, not only
+// arcs during the live Add." Every landed shard that has lat/long
+// becomes a stored pinpoint record, persisted under this browser's
+// creds-prefix key (same pattern as VIRTUAL_FOLDERS_KEY_SUFFIX above --
+// tesseraweb.mapshards for Web, tessera.mapshards for Drop, never
+// cross-read). JSON array, oldest dropped first, hard-capped at
+// MAP_SHARDS_CAP records -- NOT 400 hosts, 400 shard records (the same
+// host can appear in many records, one per shard that landed there).
+const MAP_SHARDS_KEY_SUFFIX = '.mapshards'
+export const MAP_SHARDS_CAP = 400
+
+function mapShardsKey() {
+  return _credsPrefix + MAP_SHARDS_KEY_SUFFIX
+}
+
+// getMapShards(): the full list of {hostKey, lat, lon, dir, at} shard
+// records this browser has recorded landing, oldest first. Corrupt/
+// missing JSON reads back as an empty list -- a broken localStorage
+// value must never crash the Files/map screen.
+export function getMapShards() {
+  try {
+    const raw = localStorage.getItem(mapShardsKey())
+    const arr = raw ? JSON.parse(raw) : []
+    if (!Array.isArray(arr)) return []
+    return arr.filter(r => r && typeof r.lat === 'number' && typeof r.lon === 'number')
+  } catch (_) {
+    return []
+  }
+}
+
+// addMapShard(record): appends one landed-shard record and trims to
+// MAP_SHARDS_CAP, oldest dropped first ("Cap 400 shards... Browser
+// cache must not grow without bound"). Records with no lat/lon are
+// never stored -- "Skip records with no lat/long. Do not call hosts()
+// to fill geo" -- callers are expected to have already run the
+// hostKey through map.js's own geoLookup()/normalizeHostKey() and only
+// call this when a real {lat, lon} was found; this function itself
+// makes no network call and does no geo lookup, it only persists what
+// it's given.
+export function addMapShard(record) {
+  if (!record || typeof record.lat !== 'number' || typeof record.lon !== 'number') return
+  const shards = getMapShards()
+  shards.push({
+    hostKey: record.hostKey || null,
+    lat: record.lat,
+    lon: record.lon,
+    dir: record.dir || 'upload',
+    at: record.at || Date.now(),
+  })
+  // TRIM (cite): oldest dropped first, hard cap -- this is the only
+  // place the stored array can grow, and it never exceeds MAP_SHARDS_CAP
+  // entries after this line runs.
+  const trimmed = shards.length > MAP_SHARDS_CAP ? shards.slice(shards.length - MAP_SHARDS_CAP) : shards
+  localStorage.setItem(mapShardsKey(), JSON.stringify(trimmed))
+}
+
 // folderMarkerName(path): the metadata `name` a LEGACY folder marker
 // object (pinned by the original folders-v1 design, before this fix)
 // would have used -- always path + '/'. Still exported/used by
@@ -820,12 +878,36 @@ export async function getAccount(sdk) {
   return sdk.account()
 }
 
+// FIX (2026-09-16, "tessera-web-add-hang-map400"): "If waitForReady is
+// blocking again, fail visible inside the existing 10s cap -- do not
+// raise it." Root cause: the OLD loop's `Date.now() < deadline` check
+// only runs BETWEEN iterations -- if a single `await getAccount(sdk)`
+// call itself never resolves (sdk.account() hangs, confirmed
+// reproducible with a stub sdk whose account() returns a
+// never-resolving Promise: the whole call sat past 30s with zero
+// resolve/reject, proving the 10s cap doUpload() passes in was NOT
+// actually being enforced), the deadline is never reached because
+// nothing ever returns to check it -- this IS the exact "occupy 0"
+// hang the packet describes, just one layer earlier than the upload
+// call itself. Fixed by racing EACH getAccount() call against its own
+// per-attempt timeout (deadline - now, so the total wall-clock time
+// across all attempts still can't exceed timeoutMs) -- a stuck
+// account() call now fails that one attempt instead of hanging the
+// entire function forever, and the outer while loop's deadline check
+// (now reachable again) still governs the total budget. Verified live
+// against the same stub that hung forever before this fix.
 export async function waitForReady(sdk, timeoutMs = 300000) {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
-    const acct = await getAccount(sdk)
-    if (acct.ready) return acct
-    await new Promise(r => setTimeout(r, 5000))
+    const remaining = deadline - Date.now()
+    let timer = null
+    const acct = await Promise.race([
+      getAccount(sdk),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('account() timed out')), remaining) }),
+    ]).catch(() => null).finally(() => { if (timer) clearTimeout(timer) })
+    if (acct && acct.ready) return acct
+    if (Date.now() >= deadline) break
+    await new Promise(r => setTimeout(r, Math.min(5000, Math.max(0, deadline - Date.now()))))
   }
   throw new Error('Account not ready after ' + (timeoutMs / 1000) + 's')
 }

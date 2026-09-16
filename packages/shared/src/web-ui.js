@@ -32,6 +32,7 @@ import {
   getVirtualFolders, addVirtualFolder, removeVirtualFolder,
   computeAllFolderPaths, existingBasenamesInFolder, resolveCollisionName,
   validateRenameName, renameObjectPath,
+  getMapShards, addMapShard,
 } from './files.js'
 import { createUploadMap } from './map.js'
 import {
@@ -1183,7 +1184,21 @@ let mapController = null
 let mapShown = false
 
 function ensureMapController() {
-  if (!mapController) mapController = createUploadMap(r.mapCanvas)
+  // PERSIST HOOK (2026-09-16, "tessera-web-add-hang-map400"): every
+  // live landed shard with real geo also gets appended to
+  // localStorage via addMapShard (files.js's own cap/trim -- see that
+  // function's own comment for the 400-record limit). SEED (2026-09-16):
+  // "On Files + map open, paint the stored pins before any new Add. No
+  // network for that paint." -- seedPins() reads back what's already
+  // in localStorage and draws it with zero network calls; only runs
+  // ONCE, at controller creation (map is a stable module-level
+  // reference per this file's own existing comment above), never
+  // re-seeded on every showMap() so a session's own live landings are
+  // never double-counted against the persisted set.
+  if (!mapController) {
+    mapController = createUploadMap(r.mapCanvas, null, addMapShard)
+    mapController.seedPins(getMapShards())
+  }
   return mapController
 }
 
@@ -1254,7 +1269,14 @@ function setProgressTarget(pct) {
 async function doUpload(file, destPathOverride) {
   const sdk = getState().sdk; if (!sdk) return
   setBusy(true)
-  if (mapController) mapController.reset()
+  // RESEED (2026-09-16, "tessera-web-add-hang-map400"): reset() wipes
+  // ALL pins (live AND previously-seeded) so a fresh upload's own
+  // trips/pins start from a clean slate -- but "current data
+  // locations" must keep showing through a live Add, not just at
+  // first map-open. Re-paint the persisted set immediately after
+  // every reset, same zero-network seedPins() call ensureMapController
+  // used at creation.
+  if (mapController) { mapController.reset(); mapController.seedPins(getMapShards()) }
   showMap()
   stopEase()
   renderProgressBar(0)
@@ -1387,7 +1409,7 @@ async function onDownload() {
   // call site (unchanged) keeps drawing gold outbound arcs exactly as
   // before. No hosts() call added here -- this only listens to shard
   // events the download was already making.
-  if (mapController) mapController.reset()
+  if (mapController) { mapController.reset(); mapController.seedPins(getMapShards()) }
   showMap()
   try {
     await downloadToDisk(sdk, sf.id, sf.name, ({ hostKey, direction }) => {

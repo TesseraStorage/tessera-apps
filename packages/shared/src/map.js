@@ -146,6 +146,19 @@ function geoLookup(hostKey) {
   return null
 }
 
+// lookupGeo(hostKey): (2026-09-16, "tessera-web-add-hang-map400")
+// exported read-only wrapper so callers OUTSIDE this module (web-ui.js,
+// persisting a landed shard via files.js's addMapShard) can resolve
+// the exact same {lat, lon} this module would use for that hostKey --
+// without duplicating normalizeHostKey/_geoCache logic, and without a
+// second geo.json fetch (ensureAssets() is idempotent/cached; this
+// only reads the already-loaded _geoCache, no network). Returns null
+// exactly when shardLanded() would also skip the pin (no geo data) --
+// same "skip records with no lat/long" rule applies to persistence.
+export function lookupGeo(hostKey) {
+  return geoLookup(hostKey)
+}
+
 // Quiet, one-shot geolocation: only reads a position if the permission
 // is ALREADY granted (never triggers the browser's permission prompt
 // itself), and fails silently (Dubai stays as ORIGIN) on any denial,
@@ -302,7 +315,7 @@ function sunflowerOffset(i, n) {
  * are coming" (used to stop the RAF loop once nothing is left
  * animating). Pins (dispersed, per-shard) are never cleared here.
  */
-export function createUploadMap(canvas, captionEl) {
+export function createUploadMap(canvas, captionEl, onLanded) {
   const ctx = canvas.getContext('2d')
   let candidates = []   // {lat, lon} -- quiet, un-lit, shown at Add start
   let pins = []          // {lat, lon, hostKey, dxPin, dyPin} -- one per LANDED shard, dispersed, never cleared by completeWrite/fade
@@ -426,6 +439,34 @@ export function createUploadMap(canvas, captionEl) {
     }
   }
 
+  // seedPins(records): (2026-09-16, "tessera-web-add-hang-map400")
+  // "On Files + map open, paint the stored pins before any new Add. No
+  // network for that paint." records are ALREADY-RESOLVED {lat, lon,
+  // hostKey} shard records read back from localStorage (files.js's
+  // getMapShards()) -- this function does zero geo lookup and zero
+  // hosts() call, it only turns persisted records into the same `pins`
+  // shape shardLanded() already draws from, recomputing each host's
+  // sunflower dispersion exactly like a live landing would. Called
+  // once, at map-open time, BEFORE any live Add starts -- reset()
+  // (called at the start of every new Add) clears these same pins
+  // along with live ones, matching "no landed shard is treated
+  // specially" once painted.
+  function seedPins(records) {
+    for (const rec of records || []) {
+      if (!rec || typeof rec.lat !== 'number' || typeof rec.lon !== 'number') continue
+      const hostKey = rec.hostKey || null
+      const i = hostShardCounts.get(hostKey) || 0
+      hostShardCounts.set(hostKey, i + 1)
+      pins.push({ lat: rec.lat, lon: rec.lon, hostKey, dxPin: 0, dyPin: 0 })
+    }
+    // Recompute dispersion once per distinct host after all records are
+    // in, not per-record -- cheaper, and matches shardLanded()'s own
+    // per-host recompute semantics (only the affected host's cloud
+    // needs a new n).
+    for (const hostKey of hostShardCounts.keys()) recomputeHostCloud(hostKey)
+    render()
+  }
+
   async function init() {
     await ensureAssets()
     await trySetOriginFromGeolocation()
@@ -466,6 +507,21 @@ export function createUploadMap(canvas, captionEl) {
     pins.push({ lat: geo.lat, lon: geo.lon, hostKey, dxPin: 0, dyPin: 0 })
     recomputeHostCloud(hostKey)
 
+    // PERSIST (2026-09-16, "tessera-web-add-hang-map400"): "New
+    // landings append, then trim to 400." onLanded is this
+    // controller's optional 3rd constructor arg -- when the caller
+    // passed one (web-ui.js, wired straight to files.js's
+    // addMapShard), every live shard that gets a real pin drawn here
+    // ALSO gets persisted with the exact same resolved geo, same
+    // hostKey, same dir. No new lookup, no new network call -- reuses
+    // the `geo` this function already resolved above. Scoped to
+    // 'upload' dir only -- this packet's own law only names "During a
+    // live Add, lines still follow the write... New landings append."
+    // A download's shardLanded call still draws its cyan trip/pin live
+    // (unchanged), it just doesn't ALSO write a new persisted record --
+    // out of this packet's stated scope.
+    if (onLanded && (dir || 'upload') === 'upload') onLanded({ hostKey, lat: geo.lat, lon: geo.lon, dir: dir || 'upload', at: now })
+
     if (!rafId) render()
   }
   // Back-compat alias -- some call sites still say "landedHost".
@@ -501,6 +557,7 @@ export function createUploadMap(canvas, captionEl) {
     landedHost,
     completeWrite,
     reset,
+    seedPins,
     destroy() { ro.disconnect(); if (rafId) cancelAnimationFrame(rafId) },
   }
 }
