@@ -29,10 +29,12 @@ import {
   setCredsPrefix,
   buildPath, folderMarkerName, validateFolderName, computeFolderView,
   isNonEmptyFolder, findFolderMarkerId,
-  getVirtualFolders, addVirtualFolder, removeVirtualFolder,
+  getVirtualFolders, addVirtualFolder,
   computeAllFolderPaths, existingBasenamesInFolder, resolveCollisionName,
   validateRenameName, renameObjectPath,
   getMapShards, addMapShard,
+  filesUnderFolder, countFilesUnderFolder, renameFilePath,
+  validateFolderRenameName, renameVirtualFolderPrefix, removeVirtualFolderPrefix,
 } from './files.js'
 import { createUploadMap } from './map.js'
 import {
@@ -846,6 +848,7 @@ function renderFileList() {
         '<span class="folder-icon">\u{1F4C1}</span>' +
         '<span class="file-name">' + esc(folder.name) + '</span>' +
       '</div>' +
+      '<button class="btn btn-ghost btn-folder-rename" title="Rename folder" data-path="' + esc(folder.path) + '">\u270F\uFE0F</button>' +
       '<button class="btn btn-ghost btn-folder-delete" title="Delete folder" data-path="' + esc(folder.path) + '">\u{1F5D1}\uFE0F</button>'
     row.querySelector('.file-info').addEventListener('click', () => gotoFolder(folder.path))
     // FOLDERS (2026-09-15, "tessera-web-folders-v1"): folder rows are
@@ -855,6 +858,13 @@ function renderFileList() {
     // row rather than sharing the file-selection + bottom Delete
     // button flow. stopPropagation so this click never also bubbles
     // into the row's own navigate-in handler above.
+    // RENAME (Apple B, 2026-09-16): same own-affordance pattern as
+    // Delete, right next to it -- folder rows have no "selected" state
+    // to hang a shared bottom-bar Rename button off of.
+    row.querySelector('.btn-folder-rename').addEventListener('click', (e) => {
+      e.stopPropagation()
+      onRenameFolder(folder.path, folder.name)
+    })
     row.querySelector('.btn-folder-delete').addEventListener('click', (e) => {
       e.stopPropagation()
       onDeleteFolder(folder.path, folder.name)
@@ -1095,13 +1105,33 @@ function onRename() {
   _textInputTargetId = sf.id
 }
 
+// onRenameFolder(path, name): (Apple B, 2026-09-16) "In-page name
+// (reuse the Rename field from Apple A)." Same modal/field as file
+// Rename, a different mode value so onTextInputConfirm() below can
+// branch into the folder-rewrite path instead of the single-object
+// rename path. _textInputTargetPath carries the folder's OLD full
+// path (not an object id -- a folder has no id of its own).
+function onRenameFolder(path, name) {
+  r.textInputTitle.textContent = 'Rename folder'
+  r.btnTextInputConfirm.textContent = 'Rename'
+  r.textInputField.value = name
+  r.textInputError.textContent = ''
+  r.textInputModal.classList.remove('hidden')
+  r.textInputField.focus()
+  r.textInputField.select()
+  _textInputMode = 'renameFolder'
+  _textInputTargetPath = path
+}
+
 let _textInputMode = null
 let _textInputTargetId = null
+let _textInputTargetPath = null
 
 function closeTextInputModal() {
   r.textInputModal.classList.add('hidden')
   _textInputMode = null
   _textInputTargetId = null
+  _textInputTargetPath = null
 }
 
 // onTextInputConfirm(): shared confirm handler for the Rename modal.
@@ -1111,6 +1141,7 @@ function closeTextInputModal() {
 // the input field only ever edits the basename (validateRenameName
 // rejects any "/" outright, same as New folder's segment rule).
 async function onTextInputConfirm() {
+  if (_textInputMode === 'renameFolder') { await onRenameFolderConfirm(); return }
   if (_textInputMode !== 'rename' || !_textInputTargetId) { closeTextInputModal(); return }
   const raw = r.textInputField.value
   const { ok, error, name } = validateRenameName(raw)
@@ -1134,6 +1165,67 @@ async function onTextInputConfirm() {
     showToast('\u270F\uFE0F Renamed: ' + finalBasename)
   } catch (e) {
     patchState({ status: 'Could not rename this file. Try again.' })
+    console.error(e)
+  } finally { setBusy(false) }
+}
+
+// onRenameFolderConfirm(): (Apple B, 2026-09-16) "Rewrite metadata.name
+// on every object whose path is under the old prefix (Photos/... ->
+// Travel/...). Nested stays nested. Update tesseraweb.folders virtual
+// rows the same way. Metadata only. updateObjectMetadata per file. If
+// N files is large, still do them. One status sentence: 'Renaming...'.
+// No occupy."
+//
+// Collision check is against SIBLING FOLDERS at the same level (not
+// sibling files -- "Collision with a sibling folder: refuse... Do not
+// invent 'Photos (1)' for folders") -- computeFolderView() at the old
+// folder's OWN parent directory gives exactly that sibling set, with
+// the renaming folder's own current name excluded so it never
+// collides against itself.
+async function onRenameFolderConfirm() {
+  const oldPath = _textInputTargetPath
+  if (!oldPath) { closeTextInputModal(); return }
+  const raw = r.textInputField.value
+  const { files } = getState()
+  const slashIdx = oldPath.lastIndexOf('/')
+  const parentPath = slashIdx === -1 ? '' : oldPath.slice(0, slashIdx)
+  const oldName = slashIdx === -1 ? oldPath : oldPath.slice(slashIdx + 1)
+  const { folders: siblingFolders } = computeFolderView(files, parentPath, getVirtualFolders())
+  const siblingNames = siblingFolders.map(f => f.name).filter(n => n !== oldName)
+  const { ok, error, name } = validateFolderRenameName(raw, siblingNames)
+  if (!ok) { r.textInputError.textContent = error; return }
+  const newPath = buildPath(parentPath, name)
+  closeTextInputModal()
+  if (newPath === oldPath) return  // no-op rename
+  const sdk = getState().sdk; if (!sdk) return
+  const targets = filesUnderFolder(files, oldPath)
+  setBusy(true); patchState({ status: 'Renaming\u2026' })
+  try {
+    // "Rewrite metadata.name on every object... Metadata only.
+    // updateObjectMetadata per file." No sdk.upload(), no hosts() --
+    // renameObjectPath() (Apple A) already makes exactly the two
+    // calls the law names, reused verbatim per-file here.
+    for (const f of targets) {
+      const newFullName = renameFilePath(f.name, oldPath, newPath)
+      await renameObjectPath(sdk, f.id, newFullName)
+    }
+    // Virtual (still-empty) rows under this folder move the same way
+    // real objects do -- old path and any old/... children.
+    renameVirtualFolderPrefix(oldPath, newPath)
+    // If the browser is currently INSIDE the folder being renamed (or
+    // a descendant of it), follow the rename -- staying on a path
+    // string that no longer exists would silently show "This folder
+    // is empty." even though the content just moved.
+    const curPath = getState().currentPath
+    const followedPath = (curPath === oldPath || curPath.startsWith(oldPath + '/'))
+      ? newPath + curPath.slice(oldPath.length)
+      : curPath
+    await refreshFiles()
+    patchState({ status: '', currentPath: followedPath })
+    renderBreadcrumb()
+    showToast('\u270F\uFE0F Renamed: ' + name)
+  } catch (e) {
+    patchState({ status: 'Could not rename this folder. Try again.' })
     console.error(e)
   } finally { setBusy(false) }
 }
@@ -1444,45 +1536,80 @@ async function onDelete() {
   } finally { setBusy(false) }
 }
 
-// onDeleteFolder(path, name): "Delete on an empty folder deletes its
-// marker only. Delete on a folder that has files: refuse with one
-// sentence ('This folder has files.'). Do not mass-delete. Do not
-// recurse." isNonEmptyFolder() itself DOES recurse (read-only) to
-// answer that question correctly for nested content -- see its own
-// comment in files.js.
+// OLD BEHAVIOR (2026-09-15, "tessera-web-folder-create-fail" era,
+// REPLACED by Apple B 2026-09-16, see the function's own comment
+// below): "Delete on an empty folder deletes its marker only. Delete
+// on a folder that has files: refuse with one sentence ('This folder
+// has files.'). Do not mass-delete. Do not recurse." That refuse
+// string and the isNonEmptyFolder() guard it relied on are GONE from
+// the function itself -- kept only as historical context here so a
+// future reader can see what changed and why; isNonEmptyFolder() is
+// still exported from files.js (used nowhere in THIS packet) in case
+// a future packet wants a read-only "would this delete be large"
+// check without actually deleting.
+// onDeleteFolder(path, name): (Apple B, 2026-09-16) "Apple: a folder
+// is a place. Deleting it deletes what is inside, after a confirm
+// that names the damage." REPLACES the old "refuse if non-empty"
+// behavior entirely -- the old "This folder has files." string is
+// gone, not branched around; a non-empty folder is now a normal,
+// supported delete target.
 //
-// FOLDER-CREATE-FAIL FIX (2026-09-15): a folder created after this fix
-// has no marker object at all -- findFolderMarkerId() returns null for
-// those, and the correct action is removeVirtualFolder() (synchronous
-// localStorage, no SDK call). A LEGACY marker object (pinned by the
-// original folders-v1 design, before this fix, if any account already
-// has one) is still deleted via deleteFile() exactly as before -- both
-// paths are supported so neither an old nor a new empty folder is
-// stuck undeletable.
+// Confirm, exact idea: 'Delete "Photos" and N files?' -- N is
+// countFilesUnderFolder(), the SAME query filesUnderFolder() below
+// uses for the actual delete loop, so the number shown and the number
+// of objects touched can never drift apart. A virtual-only empty
+// folder (N===0) still confirms, with the packet's own N=0 wording:
+// 'Delete "Photos"?' (no "and 0 files").
 async function onDeleteFolder(path, name) {
   const { files } = getState()
-  if (isNonEmptyFolder(files, path)) {
-    showToast('This folder has files.')
-    return
-  }
-  const markerId = findFolderMarkerId(files, path)
-  if (!confirm('Delete "' + name + '"?\n\nThis cannot be undone.')) return
-  if (!markerId) {
-    // No legacy marker object -- this is a virtual (localStorage-only)
-    // folder, the normal case for anything created after this fix. No
-    // SDK call, nothing that can throw.
-    removeVirtualFolder(path)
-    renderFileList()
-    showToast('\u{1F5D1}\uFE0F Deleted: ' + name)
-    return
-  }
-  const sdk = getState().sdk; if (!sdk) return
+  const targets = filesUnderFolder(files, path)
+  const n = targets.length
+  const question = n > 0
+    ? 'Delete "' + name + '" and ' + n + (n === 1 ? ' file' : ' files') + '?\n\nThis cannot be undone.'
+    : 'Delete "' + name + '"?\n\nThis cannot be undone.'
+  if (!confirm(question)) return  // Cancel leaves everything -- no state touched above this line
+  const sdk = getState().sdk
+  if (n > 0 && !sdk) return  // real objects to delete but no sdk -- nothing safe to do
   setBusy(true); patchState({ status: 'Deleting\u2026' })
   try {
-    await deleteFile(sdk, markerId)
-    showToast('\u{1F5D1}\uFE0F Deleted: ' + name)
+    // "deleteObject each of those files" -- law explicitly allows
+    // this (it is a per-file deleteObject call, not a host-list
+    // fetch). deleteFile() is the existing single-object delete path
+    // (Web falls through relay-miss to sdk.deleteObject, same as
+    // every other op in this file) -- reused verbatim per file here,
+    // not a new deletion mechanism.
+    for (const f of targets) {
+      await deleteFile(sdk, f.id)
+    }
+    // "if a leftover marker object exists from the abandoned pin era,
+    // delete that too" -- a LEGACY marker's own metadata.name is
+    // EXACTLY path + '/' (folderMarkerName()), which filesUnderFolder()
+    // above does NOT match (it only matches path itself or path+'/...'
+    // with content after the slash) and explicitly excludes anyway via
+    // its own mime !== FOLDER_MARKER_MIME guard -- so it is never
+    // double-counted in N and never double-deleted by the loop above.
+    // findFolderMarkerId() still needs a real object list to search,
+    // so this must run BEFORE getVirtualFolders()/removeVirtualFolderPrefix
+    // change nothing here (markers are real objects, not virtual rows).
+    const markerId = findFolderMarkerId(files, path)
+    if (markerId) await deleteFile(sdk, markerId)
+    // "drop the virtual path and child virtual paths" -- clears this
+    // folder's own virtual row (if it was empty-only) AND any virtual
+    // subfolder that lived under it, so nothing orphans in
+    // tesseraweb.folders with an unreachable parent.
+    removeVirtualFolderPrefix(path)
+    // "Stay in the parent folder after." -- if the browser is
+    // currently inside the folder being deleted (or a descendant of
+    // it), back out to its parent; otherwise the current view is
+    // untouched (deleting a folder from a different, still-valid
+    // location must not navigate the browser away from where it was).
+    const curPath = getState().currentPath
+    const parentPath = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : ''
+    const landingPath = (curPath === path || curPath.startsWith(path + '/')) ? parentPath : curPath
     await refreshFiles()
-    patchState({ status: '' })
+    patchState({ status: '', currentPath: landingPath })
+    renderBreadcrumb()
+    showToast('\u{1F5D1}\uFE0F Deleted: ' + name)
   } catch (e) {
     patchState({ status: 'Delete failed: ' + (e.message || 'error') })
     console.error(e)

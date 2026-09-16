@@ -489,12 +489,14 @@ input:focus { border-color: var(--cyan); }
   width: 24px;
   text-align: center;
 }
+.btn-folder-rename,
 .btn-folder-delete {
   flex-shrink: 0;
   padding: 4px 8px;
   font-size: 14px;
   opacity: .5;
 }
+.btn-folder-rename:hover,
 .btn-folder-delete:hover { opacity: 1; }
 
 .file-row .file-icon {

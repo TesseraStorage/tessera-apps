@@ -96,6 +96,41 @@ export function removeVirtualFolder(path) {
   setVirtualFolders(paths)
 }
 
+// renameVirtualFolderPrefix(oldPath, newPath): (Apple B, 2026-09-16)
+// "Update tesseraweb.folders virtual rows the same way (old path and
+// any old/... children)." Rewrites every virtual-folder row whose
+// path is exactly oldPath OR nested under it (oldPath + '/...') to
+// the equivalent path under newPath -- same prefix-swap rule
+// renameFilePath() uses for real objects, kept here (not imported
+// from below, to avoid a forward reference) since virtual folders
+// have no `mime`/object shape to share logic with real files. No SDK
+// call -- purely a localStorage rewrite, same as every other virtual-
+// folder operation in this file.
+export function renameVirtualFolderPrefix(oldPath, newPath) {
+  const paths = getVirtualFolders()
+  const oldPrefix = oldPath + '/'
+  const rewritten = paths.map(p => {
+    if (p === oldPath) return newPath
+    if (p.startsWith(oldPrefix)) return newPath + p.slice(oldPath.length)
+    return p
+  })
+  setVirtualFolders(rewritten)
+}
+
+// removeVirtualFolderPrefix(path): (Apple B, 2026-09-16) "drop the
+// virtual path and child virtual paths" -- used by folder delete, as
+// opposed to removeVirtualFolder() above which only ever drops the
+// EXACT path (used by the old empty-folder-only delete). Delete must
+// also clear any virtual (still-empty) subfolder that lived under the
+// deleted folder, or those rows would silently orphan in
+// tesseraweb.folders forever with no way to reach them again (their
+// parent is gone).
+export function removeVirtualFolderPrefix(path) {
+  const prefix = path + '/'
+  const paths = getVirtualFolders().filter(p => p !== path && !p.startsWith(prefix))
+  setVirtualFolders(paths)
+}
+
 export function buildPath(dir, basename) {
   return dir ? dir + '/' + basename : basename
 }
@@ -271,6 +306,65 @@ export function findFolderMarkerId(files, path) {
   const markerName = folderMarkerName(path)
   const hit = files.find(f => f.name === markerName)
   return hit ? hit.id : null
+}
+
+// ── folder rename / delete (Apple B, 2026-09-16) ──────────
+//
+// "Apple: a folder is a place. Renaming it renames the place. Deleting
+// it deletes what is inside, after a confirm that names the damage."
+// This REPLACES the old "refuse if non-empty" delete behavior below
+// (onDeleteFolder in web-ui.js is rewritten to call these) -- the old
+// "This folder has files." refuse string is gone entirely, not
+// branched around.
+
+// filesUnderFolder(files, path): every REAL object (never a legacy
+// marker) whose path is path itself or nested under it --
+// path + '/...' at any depth. Used by BOTH rename (rewrite each) and
+// delete (delete each) so "N" in the delete confirm and the actual
+// set of objects touched are always the exact same list -- never
+// computed twice with different logic.
+export function filesUnderFolder(files, path) {
+  const prefix = path + '/'
+  return files.filter(f => f.mime !== FOLDER_MARKER_MIME &&
+    (f.name === path || f.name.startsWith(prefix)))
+}
+
+// countFilesUnderFolder(files, path): "N is the count of real objects
+// under that path, including nested." A thin wrapper so the confirm
+// dialog's own count and the delete loop's own list are provably the
+// same query, not two hand-synced numbers.
+export function countFilesUnderFolder(files, path) {
+  return filesUnderFolder(files, path).length
+}
+
+// renameFilePath(oldFullPath, oldPrefix, newPrefix): rewrites a single
+// file's own full path from under oldPrefix to under newPrefix --
+// "Photos/Italy/a.jpg" with oldPrefix "Photos", newPrefix "Travel"
+// becomes "Travel/Italy/a.jpg" (nested stays nested: only the leading
+// segment matching oldPrefix is swapped, everything after it is
+// preserved verbatim). oldFullPath === oldPrefix (the folder's own
+// exact path, only possible for a LEGACY marker object) maps directly
+// to newPrefix with no trailing content.
+export function renameFilePath(oldFullPath, oldPrefix, newPrefix) {
+  if (oldFullPath === oldPrefix) return newPrefix
+  return newPrefix + oldFullPath.slice(oldPrefix.length)
+}
+
+// validateFolderRenameName(raw, siblingFolderNames): folders reuse
+// validateFolderName's char rules (empty/slash/./../64-char) but ALSO
+// refuse a sibling folder collision -- "Collision with a sibling
+// folder: refuse with one sentence. Do not invent 'Photos (1)' for
+// folders this packet." siblingFolderNames is the set of OTHER
+// folder names at the same level (the renaming folder's own old name
+// is expected to already be excluded by the caller, same
+// excludeId-style convention as existingBasenamesInFolder).
+export function validateFolderRenameName(raw, siblingFolderNames) {
+  const result = validateFolderName(raw)
+  if (!result.ok) return result
+  if ((siblingFolderNames || []).includes(result.name)) {
+    return { ok: false, error: 'A folder named "' + result.name + '" already exists here.' }
+  }
+  return result
 }
 
 // computeAllFolderPaths(files, virtualFolders): every folder path that
