@@ -636,25 +636,25 @@ export function createUploadMap(canvas, captionEl, onLanded) {
   const landedHost = shardLanded
 
   // completeWrite(): the object (slab/file) has finished (or failed)
-  // -- i.e. the last shard has landed. FINAL RULE (2026-09-16,
-  // operator-confirmed): "Slab/file completion immediately fades all
-  // lines that instant." This IS a hard global override, by explicit
-  // design -- every trip's `visibleUntil` is force-cut to right now
-  // regardless of whether that trip has reached its own 5s-or-
-  // transfer floor yet. (An earlier same-day attempt at this same
-  // override was reverted because, at the time, the per-shard rule was
-  // ALSO still wrong -- with the per-shard rule now correctly measured
-  // from write-commence per the operator's restated formula, this
-  // override no longer conflicts with anything; it is simply a second,
-  // independent rule that can fire at any point, per the operator's
-  // own explicit instruction.) Only ever pulls visibleUntil earlier,
-  // never later -- a trip already mid-fade or fully faded is
-  // unaffected.
+  // -- i.e. the last shard has landed. REMOVED the force-fade-all-
+  // trips override that used to live here (2026-09-16, per operator
+  // report: "all lines gone in ~1 second"). Root cause: Tessera's
+  // fixed 30-shard layout (10 data + 20 parity) commonly finishes the
+  // WHOLE object well under 5 seconds after the FIRST shard lands --
+  // that override was truncating every trip's visibleUntil to "now"
+  // the instant the object completed, collapsing every still-young
+  // line into the 1s SHARD_FADE_MS window simultaneously, regardless
+  // of its own individual floor. The operator's own restated rule
+  // (2026-09-16, final version) is scoped entirely PER SHARD -- "write
+  // commences, line drawn, clock starts. At exactly 5 seconds, line
+  // asks ITS OWN shard: is it done? No -> remains. Yes -> fades. Write
+  // terminates past 5s -> fades." -- with no mention of a whole-object
+  // override, and the explicit requirement that at least one traveling
+  // dot get to fully traverse the line as a visual cue, which an
+  // early/forced fade defeats. So this function goes back to being a
+  // pure "no more shards coming" signal that only kicks the RAF loop
+  // if it happened to be stopped -- it does not touch trips or pins.
   function completeWrite() {
-    const now = Date.now()
-    for (const t of trips) {
-      if (t.visibleUntil > now) t.visibleUntil = now
-    }
     if (!rafId) render()
   }
 
