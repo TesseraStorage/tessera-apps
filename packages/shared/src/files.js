@@ -146,7 +146,7 @@ export function buildPath(dir, basename) {
 // MAP_SHARDS_CAP records -- NOT 400 hosts, 400 shard records (the same
 // host can appear in many records, one per shard that landed there).
 const MAP_SHARDS_KEY_SUFFIX = '.mapshards'
-export const MAP_SHARDS_CAP = 400
+export const MAP_SHARDS_CAP = 250   // 2026-09-16 "tessera-web-handoff adjustments": was 400
 
 function mapShardsKey() {
   return _credsPrefix + MAP_SHARDS_KEY_SUFFIX

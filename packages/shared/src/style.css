@@ -693,6 +693,22 @@ input:focus { border-color: var(--cyan); }
      margin-left, exactly 15px, with #filesLayout's own
      justify-content:center handling the row's position as a whole.
 
+     RE-CENTER ON EMPTY MAP SLOT (2026-09-16, "tessera-web-handoff
+     adjustments"): superseded the "0 fixed" framing above. The map
+     pane now collapses to width:0 while hidden (see .map-pane below),
+     so #filesLayout's own justify-content:center has nothing else to
+     center against and the files column sits dead-center on first
+     paint, exactly as requested ("When the file pane appears at
+     first, it should be centered in main pane"). Once .map-pane
+     animates open, the row's growing total width is re-centered by
+     the SAME justify-content:center on every animation frame -- that
+     continuous re-centering IS the "files pane gracefully slides
+     left" effect; no separate transform/animation on the files column
+     itself is needed. Reverting to hidden (width:0 again) reverses
+     the same math, sliding the files column back to center. margin-
+     left/right stay explicitly 0 (never auto) so this column's own
+     margins never fight that centering math.
+
      MOVED UP (operator, 2026-09-15): "Move both file and map panes up
      on the page. Put them 25px below line under Tessera." The header
      itself (.app-header) already carries margin-bottom: 20px below
@@ -707,6 +723,7 @@ input:focus { border-color: var(--cyan); }
   margin: 5px 0 14px 0;
   flex-shrink: 0;
   position: relative;  /* positioning context for .btn-show-map, top-right corner */
+  transition: margin .4s ease-in-out;
 }
 /* SHOW MAP / HIDE MAP (2026-09-14 "tessera-web-map-tune", moved
    2026-09-15 per operator: "Instead of 'Hide map' being in the map
@@ -722,32 +739,23 @@ input:focus { border-color: var(--cyan); }
   z-index: 5;
   font-size: 12px;
 }
-/* MAP PANE LAW (operator, 2026-09-15, "tessera-web-map-follow"):
-   "Width/opacity tricks that start from display:none or from a
-   0-width box will snap. That is the bug." -- look-v1's .map-pane
-   went from width:0 to width:720px WHILE ALSO relying on the global
-   ".hidden { display: none !important }" rule to actually hide it
-   between uploads. A CSS transition cannot animate across a
-   display:none boundary at all -- the browser never paints an
-   in-between frame, so toggling .hidden (removing display:none) and
-   the width/opacity change landed in the SAME paint, reading as a
-   snap. FIX: .map-pane is now ALWAYS width:800px/height:400px and
-   ALWAYS part of the normal flex flow (never display:none, never
-   width:0) -- ".map-pane.hidden" below overrides the global .hidden
-   rule's display:none specifically for this element (same
-   !important, higher specificity: .map-pane.hidden beats .hidden),
-   so the node never leaves the render tree ("keep the node in the
-   document while it moves" -- law #2). The ONLY thing Show/Hide
-   toggles now is a `transform: translateX(...)` value: hidden ->
-   translateX(100vw) (unconditionally past the right edge of any
-   viewport, regardless of where the box's natural slot sits),
-   shown -> translateX(0) (its natural slot, immediately right of the
-   files column across the 5px gutter). Because the box's WIDTH/MARGIN
-   never change, #filesLayout's total flex-row width is now also
-   CONSTANT across hidden/shown -- the files column's own position
-   does not shift AT ALL when the map opens or closes, which is a
-   stronger guarantee than look-v1's (unchanged width, but the row's
-   total content width used to change when .map-pane grew from 0). */
+/* MAP PANE LAW (operator, 2026-09-15, "tessera-web-map-follow", REVISED
+   2026-09-16 "tessera-web-handoff adjustments"): the original fix here
+   kept .map-pane ALWAYS width:800px so the files column's position
+   never shifted on open/close. That guarantee is EXPLICITLY reversed
+   by this packet: "When the file pane appears at first, it should be
+   centered in main pane. When the first file is uploaded, file pane
+   should gracefully slide left, and map slide in from right. If 'hide
+   map' is pressed, the file-pane should slide gracefully to center
+   again." That requires the files column's position to move, driven
+   purely by #filesLayout's own justify-content:center re-centering
+   the row as .map-pane's width animates 0 <-> 800px (see the files
+   column rule above for the other half of this). display:none is
+   still avoided (per the ORIGINAL law's own reasoning: a CSS
+   transition cannot animate across a display:none boundary, which is
+   why look-v1 snapped) -- ".map-pane.hidden" below still overrides
+   the global ".hidden" rule's display:none for this element so width
+   can animate all the way to 0 instead of jumping there. */
 .map-pane {
   width: 800px;
   height: 400px;
@@ -772,22 +780,30 @@ input:focus { border-color: var(--cyan); }
   border-radius: var(--radius);
   background: var(--bg);
   overflow: hidden;
-  transform: translateX(100vw);
-  opacity: 0;
-  pointer-events: none;
-  transition: transform .4s ease-in-out, opacity .4s ease-in-out;
+  opacity: 1;
+  pointer-events: auto;
+  /* SLIDE-FROM-COLLAPSE (2026-09-16): width/margin-left/opacity all
+     animate together so the box grows from a 0-width sliver docked
+     against the files column out to its full 800px+15px-gutter slot
+     -- reads as "map slides in from the right" while simultaneously
+     giving #filesLayout's justify-content:center a growing total row
+     width to re-center against every frame (that re-centering IS the
+     file pane's slide-left). */
+  transition: width .4s ease-in-out, margin-left .4s ease-in-out, opacity .4s ease-in-out;
 }
 .map-pane.hidden {
   /* Overrides the global ".hidden { display: none !important }" for
      THIS element only (same !important, higher specificity) -- see
      the block comment above. The pane must stay laid out/rendered at
-     all times so its transform can actually animate on click. */
+     all times so width/margin/opacity can actually animate on click,
+     all the way down to a true 0-width collapse. */
   display: block !important;
-}
-.map-pane:not(.hidden) {
-  transform: translateX(0);
-  opacity: 1;
-  pointer-events: auto;
+  width: 0;
+  margin-left: 0;
+  opacity: 0;
+  pointer-events: none;
+  border-left: none;
+  border-right: none;
 }
 .map-canvas {
   /* FIXED SIZE: exact 800x400 pixels, never a percentage of anything

@@ -86,7 +86,7 @@ let ORIGIN = { lat: 25.2, lon: 55.3 }  // Dubai, UAE -- default per this task's 
 // later. Keep them exported." Re-affirmed 2026-09-15 "tessera-web-
 // map-follow": "Do not invent traveling-dot color variants, speed, or
 // frequency knobs. Leave ARC_TRAVEL_MS and DOTS_PER_ARC exported.")
-export const ARC_TRAVEL_MS = 4800   // ms for one glow-dot to traverse an arc (2026-09-14 "tessera-web-map-tune": half speed, was 2400)
+export const ARC_TRAVEL_MS = 3200   // ms for one glow-dot to traverse an arc (2026-09-16 "tessera-web-handoff adjustments": +50% speed, was 4800; 2026-09-14 "tessera-web-map-tune": half speed, was 2400)
 export const DOTS_PER_ARC = 2       // simultaneous glow-dots per active arc, staggered (2026-09-14 "tessera-web-map-tune": halved, was 4)
 
 // PER-SHARD FADE (2026-09-15, "tessera-web-map-follow" law #4): "Finish
