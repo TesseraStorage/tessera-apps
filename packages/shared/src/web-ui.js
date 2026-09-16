@@ -1646,11 +1646,33 @@ async function doUpload(file, destPathOverride) {
     // nothing left to overwrite it -- stop it explicitly here too.
     stopEncodingAnim()
     renderProgressBar(100)
-    patchState({ progress: null })
-    // "Do not clear the landed points when the bar hits 100%." --
+    // SUCCESS LINE (2026-09-16, per operator instruction): "there
+    // should be a 'success!' message in the event of a successful
+    // file write" -- painted into r.progressLabel, the SAME row the
+    // progress bar/encoding text just occupied (not a new line, not
+    // r.statusText below the file list). progressWrap is kept
+    // unhidden (NOT set back to `progress: null` yet) so this success
+    // text is actually visible for a moment before the next Add
+    // starts and reset()s it via the normal 'encoding…' branch above.
+    r.progressLabel.textContent = '\u2705 Success!'
     if (mapController) mapController.completeWrite()
     showToast('\u2705 ' + file.name + ' added')
-    await refreshFiles()
+    // BUG FIX (2026-09-16, per operator report: "after pinning, a
+    // message below the file list reads 'Could not add this file. Try
+    // again.'" even on writes that actually succeeded): refreshFiles()
+    // used to sit INSIDE this try block, so if the post-upload file
+    // LISTING call threw for any reason (relay flake, WASM fallback
+    // hiccup) -- a completely separate operation from the upload that
+    // had already succeeded -- the outer catch below would report the
+    // whole Add as failed, overwriting the success text with the fail
+    // sentence. Moved outside try/catch (own local try/catch, log-only
+    // on failure) so a listing-refresh error can never masquerade as
+    // an upload failure.
+    try {
+      await refreshFiles()
+    } catch (e) {
+      console.warn('[tessera-web] post-upload file list refresh failed:', e.message)
+    }
   } catch (e) {
     // "On fail, freeze and show the fail line." -- stop any in-flight
     // ease immediately so the bar does not keep creeping toward a shard
@@ -1668,7 +1690,17 @@ async function doUpload(file, destPathOverride) {
     // (a de-facto stack trace to a non-technical reader). One quiet,
     // fixed sentence now -- the real e is still logged to console
     // below for debugging, just never shown in the UI.
-    patchState({ progress: null, status: 'Could not add this file. Try again.' })
+    //
+    // MOVED (2026-09-16, per operator instruction): this fail line now
+    // renders in r.progressLabel -- the SAME progress-bar row the
+    // encoding/success text uses -- instead of r.statusText (a
+    // separate paragraph below the file list, where this used to
+    // surface and read as visually disconnected from the Add that
+    // actually failed). progressWrap is kept unhidden (not reset to
+    // `progress: null`) so the fail text is actually visible, same
+    // pattern as the success line above.
+    renderProgressBar(0)
+    r.progressLabel.textContent = 'Could not add this file. Try again.'
     // FIX (2026-09-14, "tessera-web-occupy-fade"): "completeWrite() (or
     // equivalent) runs when uploadFile resolves OR REJECTS. Arcs fade.
     // A hung Add must not leave gold lines forever." Previously only
