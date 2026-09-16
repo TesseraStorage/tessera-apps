@@ -359,9 +359,14 @@ function sunflowerOffset(i, n) {
  * name.
  *
  * completeWrite(): called once the whole object finishes (success or
- * fail) -- the file's last shard has landed. Force-fades every trip
- * still at full opacity (see completeWrite()'s own comment below for
- * why this changed from the original no-op). Pins (dispersed,
+ * fail). Does NOT force any trip's fade -- the per-shard floor in
+ * shardLanded() already guarantees each line individually shows for
+ * at least LINE_FLOOR_MS or until that shard's own real transfer
+ * finishes, whichever is greater; forcing a fade here would violate
+ * that same per-line minimum for a shard that landed less than
+ * LINE_FLOOR_MS before the object as a whole completed (confirmed the
+ * hard way 2026-09-16 -- an earlier version of this function did force
+ * it and caused lines to vanish well under 5s). Pins (dispersed,
  * per-shard) are never cleared here.
  */
 export function createUploadMap(canvas, captionEl, onLanded) {
@@ -636,23 +641,25 @@ export function createUploadMap(canvas, captionEl, onLanded) {
   const landedHost = shardLanded
 
   // completeWrite(): the object has finished (or failed) -- i.e. the
-  // file's LAST shard has landed. FIXED (2026-09-16, same operator
-  // report as the FLOOR fix above): "when a file's last shard lands,
-  // all lines should fade-out." Previously this was a pure no-op ("do
-  // not wait for pinObject or the other 29 shards" was read, at the
-  // time, as "never touch trips here at all" -- too strong; the
-  // per-shard floor and the whole-object completion signal are two
-  // separate rules that can both be true). Now: every trip that is
-  // STILL at full opacity (visibleUntil in the future) gets its floor
-  // cut short to right now, so its own SHARD_FADE_MS fade-out clock
-  // starts immediately; a trip already mid-fade or fully faded is left
-  // alone (this only ever pulls visibleUntil earlier, never later, and
-  // never re-extends/resets a fade already in progress).
+  // file's last shard has landed. REVERTED (2026-09-16, same-day
+  // follow-up correction): an earlier version of this function forced
+  // every still-opaque trip's `visibleUntil` to "now," so its fade
+  // started immediately at object completion. That broke the operator's
+  // restated hard rule -- "lines show for AT LEAST 5 seconds [per
+  // individual line], if a write takes longer they continue until that
+  // shard's write is complete" -- because a fast multi-shard upload can
+  // finish (last shard lands) well under 5 seconds after an EARLIER
+  // shard's own line started, snap-fading that earlier line short of
+  // its own 5s floor. The per-shard floor formula in shardLanded()
+  // (`visibleUntil = landing + max(0, LINE_FLOOR_MS - transferMs)`)
+  // ALREADY satisfies "at least 5s, or until that shard's own write is
+  // done, whichever is greater" independently for every trip -- a shard
+  // whose transfer took >5s already fades immediately at its own
+  // landing (extraAfterLanding = 0), with no help needed from object
+  // completion. So there is nothing left for completeWrite() to force;
+  // it goes back to being a pure "no more shards coming" signal used
+  // only to kick the RAF loop if it happened to be stopped.
   function completeWrite() {
-    const now = Date.now()
-    for (const t of trips) {
-      if (t.visibleUntil > now) t.visibleUntil = now
-    }
     if (!rafId) render()
   }
 
