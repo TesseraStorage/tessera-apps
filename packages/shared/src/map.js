@@ -96,6 +96,21 @@ export const DOTS_PER_ARC = 2       // simultaneous glow-dots per active arc, st
 // packet's own named range.
 const SHARD_FADE_MS = 1000
 
+// LINE FLOOR (2026-09-16, "tessera-web-encode-hold"): "Each line
+// lasts max(5 seconds, that shard's real transfer)... When that time
+// is up, the line fades. It does not snap off." A trip is fully
+// opaque (fade === 1) at every moment before `t.visibleUntil`
+// (regardless of when it landed), then fades linearly to 0 over the
+// SHARD_FADE_MS window starting exactly at visibleUntil -- never
+// earlier. This is the ONLY function that decides "is this trip still
+// showing" -- render()'s arc/dot/cull code all call it instead of
+// re-deriving the same rule three times with room to drift apart.
+function tripFade(t, now) {
+  if (now < t.visibleUntil) return 1
+  return Math.max(0, 1 - (now - t.visibleUntil) / SHARD_FADE_MS)
+}
+const LINE_FLOOR_MS = 5000
+
 let _geoCache = null       // host_key -> {lat, lon}
 let _landFeature = null    // GeoJSON FeatureCollection (land polygons)
 let _loadPromise = null
@@ -319,7 +334,16 @@ export function createUploadMap(canvas, captionEl, onLanded) {
   const ctx = canvas.getContext('2d')
   let candidates = []   // {lat, lon} -- quiet, un-lit, shown at Add start
   let pins = []          // {lat, lon, hostKey, dxPin, dyPin} -- one per LANDED shard, dispersed, never cleared by completeWrite/fade
-  let trips = []         // {lat, lon, hostKey, dir, startedAt, fadeAt} -- one per shard trip; fadeAt set immediately (SHARD_FADE_MS), removed once fully faded
+  // FLOOR (2026-09-16, "tessera-web-encode-hold"): "Each origin→
+  // destination line lasts max(5 seconds, that shard's real
+  // transfer)." trips now carry `visibleUntil` (the wall-clock time
+  // the line's floor expires) IN ADDITION to `fadeAt` (when the fade-
+  // out alpha clock actually starts, which is `visibleUntil`, not
+  // `startedAt` -- fading before the floor is the bug this packet
+  // names). `startedAt` is unchanged, still drives the traveling-dot
+  // animation's own arc-length timing (ARC_TRAVEL_MS), independent of
+  // how long the LINE itself stays opaque.
+  let trips = []         // {lat, lon, hostKey, dir, startedAt, visibleUntil, fadeAt} -- one per shard trip
   const hostShardCounts = new Map()  // hostKey -> count of shards landed there so far, for the sunflower index/n
   let ready = false
   let rafId = null
@@ -367,18 +391,29 @@ export function createUploadMap(canvas, captionEl, onLanded) {
       drawGlow(ctx, x, y, 3, 'rgba(148, 163, 184, 0.35)')  // deliberately dim/neutral, not gold
     }
 
-    // Arcs (curved lines) -- one per still-fading shard TRIP, not per
-    // host and not per object (law #4). Each trip fades on its OWN
-    // clock, independent of every other trip -- "a finished shard's
-    // line fades while others still run." SHARPER (law #6): higher
-    // alpha, thinner stroke than look-v1.
+    // Arcs (curved lines) -- one per still-visible-or-fading shard TRIP,
+    // not per host and not per object (law #4). Each trip fades on its
+    // OWN clock, independent of every other trip -- "a finished
+    // shard's line fades while others still run." SHARPER (law #6):
+    // higher alpha, thinner stroke than look-v1.
+    //
+    // FLOOR (2026-09-16, "tessera-web-encode-hold"): a trip stays at
+    // FULL opacity (fade=1, no alpha falloff at all) until
+    // `t.visibleUntil` -- "Each line lasts max(5 seconds, that shard's
+    // real transfer). A 1-second shard still shows its line for 5
+    // seconds." Only AFTER visibleUntil does the alpha clock (still
+    // SHARD_FADE_MS long) start counting down. tripFade() is the one
+    // place this rule lives; every reader below (arcs, dots, cull)
+    // calls it instead of re-deriving "is this trip still showing" on
+    // its own, so the floor can never accidentally apply in one place
+    // and not another.
     ctx.lineWidth = LINE_WIDTH
     for (const dir of ['upload', 'download']) {
       const stroke = dir === 'download' ? STROKE_CYAN : STROKE_GOLD
       let any = false
       for (const t of trips) {
         if (t.dir !== dir) continue
-        const fade = Math.max(0, 1 - (now - t.fadeAt) / SHARD_FADE_MS)
+        const fade = tripFade(t, now)
         if (fade <= 0) continue
         if (!any) { ctx.beginPath(); any = true }
         ctx.strokeStyle = stroke + (LINE_ALPHA * fade) + ')'
@@ -404,13 +439,17 @@ export function createUploadMap(canvas, captionEl, onLanded) {
       drawGlow(ctx, hx + p.dxPin, hy + p.dyPin, PIN_RADIUS, GLOW_WHITE)
     }
 
-    // Traveling glow-dots: DOTS_PER_ARC dots per still-fading trip,
+    // Traveling glow-dots: DOTS_PER_ARC dots per still-visible trip,
     // staggered evenly across ARC_TRAVEL_MS. Removed entirely once
     // that trip's OWN fade reaches 0 (below, in the cull step) --
-    // dots never outlive their own line.
+    // dots never outlive their own line. Unaffected by the floor
+    // change above other than reading the same tripFade() gate --
+    // ARC_TRAVEL_MS/DOTS_PER_ARC themselves stay exactly as exported,
+    // per law ("Do not change ARC_TRAVEL_MS / DOTS_PER_ARC as a
+    // substitute for this floor").
     let anyAnimating = false
     for (const t of trips) {
-      const fade = Math.max(0, 1 - (now - t.fadeAt) / SHARD_FADE_MS)
+      const fade = tripFade(t, now)
       if (fade <= 0) continue
       anyAnimating = true
       const [x, y] = project(t.lat, t.lon, w, h)
@@ -429,7 +468,7 @@ export function createUploadMap(canvas, captionEl, onLanded) {
     // Cull fully-faded trips so the array doesn't grow unbounded
     // across a long-running upload/download.
     if (trips.length) {
-      trips = trips.filter(t => (now - t.fadeAt) < SHARD_FADE_MS)
+      trips = trips.filter(t => tripFade(t, now) > 0)
     }
 
     if (anyAnimating) {
@@ -488,17 +527,29 @@ export function createUploadMap(canvas, captionEl, onLanded) {
   }
 
   // shardLanded: the per-shard entry point (2026-09-15, "tessera-web-
-  // map-follow"). Draws one trip (arc + DOTS_PER_ARC traveling dots)
-  // that starts fading immediately on its own SHARD_FADE_MS clock, and
-  // adds one dispersed pin at this host's next sunflower index.
-  function shardLanded(hostKey, dir) {
+  // map-follow"). Draws one trip (arc + DOTS_PER_ARC traveling dots).
+  //
+  // FLOOR (2026-09-16, "tessera-web-encode-hold"): `transferMs` is the
+  // shard's own real send->finish duration (ShardProgress.elapsedMs,
+  // the SDK's OWN field, per sia_storage_wasm.d.ts -- not invented
+  // here). `visibleUntil = now + max(LINE_FLOOR_MS, transferMs)` --
+  // "A 1-second shard still shows its line for 5 seconds. A
+  // 12-second shard keeps its line for 12 seconds." When
+  // `transferMs` is missing/invalid (undefined, NaN, <=0 -- e.g. a
+  // caller that never had a real elapsedMs to pass, or a download
+  // path that doesn't thread it through), the floor is the ONLY
+  // input: `visibleUntil = now + LINE_FLOOR_MS`, so the line still
+  // gets the 5s minimum even for a caller that can't report the real
+  // number, rather than silently reverting to instant-fade.
+  function shardLanded(hostKey, dir, transferMs) {
     if (!hostKey) return
     const geo = geoLookup(hostKey)
     // "Skip hosts with no lat/long. Do not invent pins. Do not call
     // hosts() to fill gaps." -- no fallback placement.
     if (!geo) return
     const now = Date.now()
-    trips.push({ lat: geo.lat, lon: geo.lon, hostKey, dir: dir || 'upload', startedAt: now, fadeAt: now })
+    const floorMs = Math.max(LINE_FLOOR_MS, (typeof transferMs === 'number' && transferMs > 0) ? transferMs : 0)
+    trips.push({ lat: geo.lat, lon: geo.lon, hostKey, dir: dir || 'upload', startedAt: now, visibleUntil: now + floorMs, fadeAt: now })
 
     // Dispersed pin (law #5): index is this host's shard count BEFORE
     // incrementing (0-based), n is the count AFTER.

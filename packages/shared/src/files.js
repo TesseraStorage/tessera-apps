@@ -650,6 +650,22 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
   if (file) {
     const start = Date.now()
     const tick = (s, p) => { if (onProgress) onProgress({ stage: s, percent: p, elapsed: Date.now() - start }) }
+    // BAR HOLD (2026-09-16, "tessera-web-encode-hold"): this relay path
+    // is DEAD for Tessera Web (confirmed by this file's own PREFIX
+    // comment at the top: no relay creds are ever saved under the
+    // 'tesseraweb' prefix) -- but the unconditional `tick('uploading',
+    // 10)` that used to run here fired BEFORE relayCreds() was even
+    // checked, on every single Web Add, emitting a premature real
+    // progress tick that immediately unhid the bar at 0%/10% before
+    // any host was ever contacted. relayCreds() is synchronous/cheap
+    // (plain localStorage reads, no network) -- checking it FIRST and
+    // skipping this entire block (ticks included) when there is
+    // nothing to relay to is what actually fixes "bar jumps straight
+    // to uploading" for Web, not just the WASM path's own tick
+    // removal below. Drop (which DOES have relay creds under its own
+    // 'tessera' prefix) is completely unaffected: relayCreds() returns
+    // non-empty there, so this block runs exactly as it always did.
+    if (relayCreds()) {
     tick('uploading', 10)
 
     // Animate progress while the upload runs (the relay doesn't stream progress)
@@ -683,12 +699,49 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
       // look like it's rewinding from ~85% back to 0/5%.
       tick('uploading', 5)
     }
+    }
   }
 
   // WASM SDK fallback (no file = called from dropzone, or relay failed)
   const start = Date.now()
-  const tick = (s, p, hostKey) => { if (onProgress) onProgress({ stage: s, percent: p, elapsed: Date.now() - start, hostKey }) }
-  tick('preparing', 0)
+  const tick = (s, p, hostKey, transferMs) => { if (onProgress) onProgress({ stage: s, percent: p, elapsed: Date.now() - start, hostKey, transferMs }) }
+  // BAR HOLD (2026-09-16, "tessera-web-encode-hold"): "The progress
+  // bar does not exist yet. No bar during drop, Ready wait, or
+  // encoding." The OLD tick('preparing', 0) / tick('uploading', 5)
+  // calls that used to run here (BOTH removed from this function's
+  // WASM path entirely) each caused web-ui.js's own
+  // `subscribe('progress', ...)` to unhide r.progressWrap immediately
+  // -- that IS the "bar at 0% before ship" bug, confirmed by reading
+  // that subscriber: `if (v) { ...remove('hidden')... }` fires on ANY
+  // truthy progress object, stage name irrelevant. NO progress tick
+  // fires at all now until the SDK's own onShardUploaded callback
+  // below reports the FIRST real landed shard -- so the bar stays
+  // hidden for the entire drop / Ready-wait / pre-upload window,
+  // satisfying the law with no separate "is this the first tick"
+  // check needed in web-ui.js.
+  //
+  // ENCODING SIGNAL -- SKIPPED, NOT FABRICATED (2026-09-16,
+  // "tessera-web-encode-hold"): "Grep the wasm .d.ts / SDK callbacks
+  // for a hosts-ready / upload-started signal... If the first named
+  // event IS the first shard in flight, skip 'encoding...' rather
+  // than lie." Re-grepped sia_storage_wasm.d.ts this packet
+  // (UploadOptions, PackedUploadOptions, Sdk.upload/uploadPacked,
+  // the whole file) -- the ONLY upload-related callback the WASM
+  // binary exposes anywhere is `onShardUploaded?: (progress:
+  // ShardProgress) => void`, and it fires once a shard has ALREADY
+  // landed (ShardProgress carries `elapsedMs`, the real send->finish
+  // duration -- a value that can only exist after the transfer is
+  // done). There is no onHostsReady/onUploadStarted/
+  // onShardUploading-equivalent hook anywhere in this SDK (confirmed
+  // again, same finding as every prior map packet that searched this
+  // same file for the same reason). The first named event this SDK
+  // ever gives us is NOT "before bytes move" -- it is strictly after
+  // the first shard already finished. Per the packet's own decision
+  // tree this is exactly the "skip 'encoding...' rather than lie"
+  // branch: no tick, no status text, of any kind is emitted between
+  // the drop and the first landed shard. See this packet's Output
+  // block for the explicit "encoding signal: none" / "encoding copy:
+  // (skipped, no signal)" answer this produces.
 
   // GATE (2026-09-14, "tessera-web-native-wt"): the tunnel preflight
   // below (added by "tessera-web-upload-hang") is only meaningful when
@@ -717,7 +770,19 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
   }))
   let obj = new PinnedObject()
   obj.updateMetadata(meta)
-  tick('uploading', 5)
+  // BAR HOLD (2026-09-16, "tessera-web-encode-hold"): REMOVED the OLD
+  // `tick('uploading', 5)` that used to run here, immediately before
+  // starting the WASM upload. That was itself a REAL 'uploading'-
+  // labeled tick reaching web-ui.js's progress path (unlike the
+  // 'encoding...' tick above, which is routed to `status` only) --
+  // it unhid the bar at 5% before sdk.upload() had shipped a single
+  // shard, which is exactly "the bar appears one tick before the
+  // first shard ships" (the actual live-verified root cause of "bar
+  // jumps straight to uploading," found by tracing every tick call in
+  // this function against a stub sdk, not by inspection alone -- see
+  // this packet's own proof log). No tick at all fires between the
+  // 'encoding...' tick above and the first real onShardUploaded event
+  // below now.
   const stream = file ? file.stream() : new ReadableStream({ start(c) { c.enqueue(new Uint8Array(0)); c.close() } })
 
   // FIX (2026-09-14, "tessera-web-progress"): "Bar follows shards and pin.
@@ -752,7 +817,14 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
     // say 'shards' next to the number. Quiet status: uploading (N/30)
     // then pinning -- no 'shards'." Was 'uploading (N/M shards)' --
     // matches the packet's own copy table exactly now.
-    tick('uploading (' + shardsLanded + '/' + expectedShards + ')', pct, ev && ev.hostKey)
+    //
+    // LINE FLOOR (2026-09-16, "tessera-web-encode-hold"): ev.elapsedMs
+    // is the SDK's OWN field (ShardProgress.elapsedMs, per
+    // sia_storage_wasm.d.ts) -- this shard's real send->finish
+    // duration. Forwarded through tick()'s new 4th arg (transferMs) so
+    // map.js's shardLanded() can compute "max(5s, real transfer)"
+    // without a second timer/clock of its own.
+    tick('uploading (' + shardsLanded + '/' + expectedShards + ')', pct, ev && ev.hostKey, ev && ev.elapsedMs)
   }
 
   const uploadOptions = { dataShards, parityShards, onShardUploaded }
@@ -887,7 +959,7 @@ export async function downloadToDisk(sdk, objOrId, filename, onProgress) {
   // downloads via that path have no inbound map trip; only the WASM
   // fallback path below can light up cyan arcs this packet.
   const downloadOptions = onProgress
-    ? { onShardDownloaded: (ev) => onProgress({ hostKey: ev && ev.hostKey, direction: 'download' }) }
+    ? { onShardDownloaded: (ev) => onProgress({ hostKey: ev && ev.hostKey, direction: 'download', transferMs: ev && ev.elapsedMs }) }
     : undefined
   const stream = sdk.download(obj, downloadOptions)
   const blob = await new Response(stream).blob()

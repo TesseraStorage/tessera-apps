@@ -429,7 +429,14 @@ export async function mountApp(container) {
       // setProgressTarget()'s timer (plus the explicit 0%/100% calls in
       // doUpload at start/completion).
       r.progressLabel.textContent = v.stage + (v.elapsed ? ' \u00b7 ' + Math.round(v.elapsed / 1000) + 's' : '')
-      if (v.hostKey) mapController && mapController.landedHost(v.hostKey)
+      // LINE FLOOR (2026-09-16, "tessera-web-encode-hold"): v.transferMs
+      // is ShardProgress.elapsedMs, threaded through unchanged from
+      // files.js's onShardUploaded event -- the shard's own real
+      // send->finish duration. shardLanded()/landedHost() uses it (see
+      // map.js's own comment) to compute `visibleUntil = now +
+      // max(5000, transferMs)`, so a 1-second shard's line still shows
+      // for 5s and a 12-second shard's line shows for its real 12s.
+      if (v.hostKey) mapController && mapController.landedHost(v.hostKey, undefined, v.transferMs)
     } else {
       r.progressWrap.classList.add('hidden')
     }
@@ -1371,8 +1378,25 @@ async function doUpload(file, destPathOverride) {
   if (mapController) { mapController.reset(); mapController.seedPins(getMapShards()) }
   showMap()
   stopEase()
-  renderProgressBar(0)
-  patchState({ status: '', progress: { stage: 'Preparing\u2026', percent: 0, elapsed: 0 } })
+  // BAR HOLD (2026-09-16, "tessera-web-encode-hold"): "The progress
+  // bar does not exist yet. No bar during drop, Ready wait, or
+  // encoding." REMOVED: the old `renderProgressBar(0)` +
+  // `patchState({ progress: { stage: 'Preparing...', ... } })` pair
+  // that used to run here. That patchState call is EXACTLY what made
+  // `subscribe('progress', ...)` below unhide r.progressWrap on every
+  // single Add before a single byte moved (that subscriber unhides on
+  // ANY truthy progress value, stage text irrelevant) -- the "bar
+  // jumps straight to uploading" / "bar visible during drop" bug this
+  // packet reports. No progress state is set at all now until
+  // uploadFile()'s own onProgress callback below fires for the first
+  // time, which (per files.js's own comment on its `tick` calls) does
+  // not happen until the SDK's onShardUploaded reports a real landed
+  // shard -- so the bar and its label stay fully absent through drop,
+  // the 10s Ready wait, and the (skipped, no real signal exists)
+  // encoding phase. "No 'Preparing...'. No bar at 0% before ship." --
+  // status is left exactly as it already was (usually '') rather than
+  // set to a placeholder string.
+  patchState({ status: '' })
   try {
     // FIX (2026-09-15, "tessera-web-folder-create-fail"): "Add must not
     // hang with no error. If it cannot start the write, fail visible in
@@ -1442,13 +1466,28 @@ async function doUpload(file, destPathOverride) {
     const siblingNames = existingBasenamesInFolder(files, destPath)
     const finalBasename = resolveCollisionName(siblingNames, file.name)
     const metaName = destPath ? buildPath(destPath, finalBasename) : (finalBasename !== file.name ? finalBasename : undefined)
-    await uploadFile(sdk, file, ({ stage, percent, elapsed, hostKey }) => {
+    await uploadFile(sdk, file, ({ stage, percent, elapsed, hostKey, transferMs }) => {
+      // ENCODING (2026-09-16, "tessera-web-encode-hold"): "encoding..."
+      // is intentionally NEVER emitted by files.js's uploadFile() --
+      // re-grepped sia_storage_wasm.d.ts and confirmed no hosts-ready/
+      // upload-started signal exists anywhere in this SDK; the first
+      // named event it gives us IS the first shard already landed, so
+      // per the packet's own decision tree this status is skipped
+      // rather than fabricated (see files.js's own comment for the
+      // full grep trail). This callback therefore only ever receives
+      // real onShardUploaded/pinning/done ticks -- there is no
+      // 'encoding...'-labeled branch to guard against here; leaving
+      // this comment (rather than dead branch code) so a future
+      // packet that DOES find a real signal knows exactly where to
+      // wire it back in without re-deriving the bar-hold rule: route
+      // it to `status`, never to `progress` (progress is what
+      // unhides r.progressWrap below on any truthy value).
       // Real target only -- setProgressTarget's own ease-out never passes
       // this value (see EASE_MS comment above). The 'done' tick still
       // sets exactly 100, but only files.js ever calls that, after
       // pinObject() has already returned -- never this eased path.
       setProgressTarget(percent)
-      patchState({ progress: { stage, percent, elapsed, hostKey } })
+      patchState({ progress: { stage, percent, elapsed, hostKey, transferMs } })
     }, metaName)
     stopEase()
     renderProgressBar(100)
@@ -1504,8 +1543,8 @@ async function onDownload() {
   if (mapController) { mapController.reset(); mapController.seedPins(getMapShards()) }
   showMap()
   try {
-    await downloadToDisk(sdk, sf.id, sf.name, ({ hostKey, direction }) => {
-      if (mapController && hostKey) mapController.landedHost(hostKey, direction)
+    await downloadToDisk(sdk, sf.id, sf.name, ({ hostKey, direction, transferMs }) => {
+      if (mapController && hostKey) mapController.landedHost(hostKey, direction, transferMs)
     })
     if (mapController) mapController.completeWrite()
     showToast('\u2B07\uFE0F Downloaded: ' + sf.name)
