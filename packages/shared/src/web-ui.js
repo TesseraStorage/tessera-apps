@@ -434,13 +434,13 @@ export async function mountApp(container) {
       // setProgressTarget()'s timer (plus the explicit 0%/100% calls in
       // doUpload at start/completion).
       r.progressLabel.textContent = v.stage + (v.elapsed ? ' \u00b7 ' + Math.round(v.elapsed / 1000) + 's' : '')
-      // LINE FLOOR (2026-09-16, "tessera-web-encode-hold"): v.transferMs
-      // is ShardProgress.elapsedMs, threaded through unchanged from
-      // files.js's onShardUploaded event -- the shard's own real
-      // send->finish duration. shardLanded()/landedHost() uses it (see
-      // map.js's own comment) to compute `visibleUntil = now +
-      // max(5000, transferMs)`, so a 1-second shard's line still shows
-      // for 5s and a 12-second shard's line shows for its real 12s.
+      // LINE LIFETIME (2026-09-16, "tessera-web-encode-hold",
+      // SIMPLIFIED FINAL): map.js's shardLanded()/landedHost() no
+      // longer uses transferMs for line timing at all -- every line
+      // now lasts a flat LINE_FLOOR_MS (4s) from landing, full stop.
+      // v.transferMs is still threaded through here unchanged (still
+      // useful as ShardProgress.elapsedMs for any future caller), just
+      // no longer READ by map.js's fade logic.
       if (v.hostKey) mapController && mapController.landedHost(v.hostKey, undefined, v.transferMs)
     } else {
       r.progressWrap.classList.add('hidden')

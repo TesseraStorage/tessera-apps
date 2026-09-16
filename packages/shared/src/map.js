@@ -96,20 +96,22 @@ export const DOTS_PER_ARC = 2       // simultaneous glow-dots per active arc, st
 // packet's own named range.
 const SHARD_FADE_MS = 1000
 
-// LINE LIFETIME RULE (2026-09-16, "tessera-web-encode-hold", FINAL
-// operator-confirmed statement): "Upon write commence, line begins.
-// FROM THAT INSTANT, it will last for 5 seconds, OR until the file
-// write completes, whichever is longer. Slab/file completion
-// immediately fades all lines that instant." tripFade() below is
-// unchanged mechanically -- a trip is fully opaque until
-// `t.visibleUntil`, then fades linearly to 0 over SHARD_FADE_MS. What
-// changed (see shardLanded()/completeWrite() below) is HOW
-// `visibleUntil` gets computed and who is allowed to cut it short.
+// LINE LIFETIME RULE (2026-09-16, "tessera-web-encode-hold", SIMPLIFIED
+// FINAL: prior "5s-or-write-completion, whichever is longer" logic
+// could not be made to visibly work across several attempts and was
+// abandoned by explicit operator instruction -- "let's give up.
+// Here's what we'll do: each line lasts a flat 4 seconds, from write.
+// After last shard, we move on to 'waiting for pin confirmation.'"
+// So: every line is drawn at write-landing (the only moment the SDK
+// gives us a hook) and lasts a FLAT LINE_FLOOR_MS, no per-shard
+// completion check, no whole-object override. tripFade() is fully
+// opaque until `t.visibleUntil`, then fades linearly to 0 over
+// SHARD_FADE_MS -- unchanged mechanically from before.
 function tripFade(t, now) {
   if (now < t.visibleUntil) return 1
   return Math.max(0, 1 - (now - t.visibleUntil) / SHARD_FADE_MS)
 }
-const LINE_FLOOR_MS = 5000
+const LINE_FLOOR_MS = 4000
 
 let _geoCache = null       // host_key -> {lat, lon}
 let _landFeature = null    // GeoJSON FeatureCollection (land polygons)
@@ -351,41 +353,40 @@ function sunflowerOffset(i, n) {
  * packet by re-grepping sia_storage_wasm.d.ts for onShardUploading/
  * onShardStarted/equivalent -- neither exists; UploadOptions/
  * DownloadOptions/PackedUploadOptions expose only onShardUploaded/
- * onShardDownloaded). The event fires at LANDING (completion), but the
- * line's own lifetime is defined from WRITE COMMENCE (2026-09-16,
- * operator-confirmed final rule) -- so this function backdates the
- * trip's `startedAt` to `now - transferMs` (transferMs is
- * ShardProgress.elapsedMs, the SDK's own real send->finish duration)
- * and sets `visibleUntil = startedAt + max(LINE_FLOOR_MS,
- * transferMs)`. `landedHost` is kept as an alias below for any
- * external caller still using the old name.
+ * onShardDownloaded). SIMPLIFIED FINAL (2026-09-16): every line lasts
+ * a FLAT LINE_FLOOR_MS (4s) from the moment it's drawn (landing --
+ * the only hook available). No per-shard completion check, no
+ * write-commence backdating -- several attempts at that were tried
+ * and abandoned same day per explicit operator instruction ("let's
+ * give up... each line lasts a flat 4 seconds, from write"; the
+ * follow-up messaging for "last shard landed" is a separate concern,
+ * "waiting for pin confirmation," handled outside this file).
+ * `landedHost` is kept as an alias below for any external caller
+ * still using the old name.
  *
  * completeWrite(): called once the whole object (slab/file) finishes
- * (success or fail) -- i.e. the last shard has landed. Per the
- * operator's final rule ("Slab/file completion immediately fades all
- * lines that instant"), this is a hard global override: every trip's
- * `visibleUntil` is force-cut to right now, regardless of whether that
- * trip has reached its own 5s-or-transfer floor yet. Pins (dispersed,
- * per-shard) are never cleared here.
+ * (success or fail) -- i.e. the last shard has landed. Does NOT touch
+ * trips or pins -- every line already fades on its own flat 4s clock,
+ * independent of object completion. Kept only as a "no more shards
+ * coming" signal so a caller can kick the RAF loop if it happened to
+ * be stopped.
  */
 export function createUploadMap(canvas, captionEl, onLanded) {
   const ctx = canvas.getContext('2d')
   let candidates = []   // {lat, lon} -- quiet, un-lit, shown at Add start
   let pins = []          // {lat, lon, hostKey, dxPin, dyPin} -- one per LANDED shard, dispersed, never cleared by completeWrite/fade
-  // LINE LIFETIME (2026-09-16, "tessera-web-encode-hold", FINAL
-  // operator-confirmed rule): "Upon write commence, line begins. From
-  // that instant, it lasts 5s OR until the write completes, whichever
-  // is longer." trips gain a `commenceAt` field -- backdated to the
-  // shard's real write-commence instant (`landingTime - transferMs`),
-  // NOT the landing time -- used ONLY to compute `visibleUntil =
-  // commenceAt + max(LINE_FLOOR_MS, transferMs)`. `startedAt` stays
-  // the landing-time value it always was, since the traveling-dot
-  // animation's own arc-length phase (ARC_TRAVEL_MS-modulo looping)
-  // is a completely separate concern already confirmed correct --
-  // this rule only ever touches the LINE's opacity clock, never the
-  // dot's. completeWrite() is the only thing allowed to cut
-  // visibleUntil short of that (global slab/file-completion override).
-  let trips = []         // {lat, lon, hostKey, dir, startedAt, commenceAt, visibleUntil, fadeAt} -- one per shard trip
+  // LINE LIFETIME (2026-09-16, "tessera-web-encode-hold", SIMPLIFIED
+  // FINAL): every trip fades on a FLAT LINE_FLOOR_MS (4s) clock from
+  // the moment it's drawn (landing) -- no per-shard real-transfer
+  // check, no write-commence backdating, no whole-object override.
+  // Several more elaborate formulas were tried and abandoned same day
+  // (see shardLanded()'s own comment) after repeated live reports that
+  // lines were disappearing far too early. `startedAt` doubles as both
+  // the traveling-dot phase-animation reference AND now the line's own
+  // opacity-clock reference (previously two different fields --
+  // collapsed back into one now that there's no separate commence-time
+  // math to keep isolated from the dot's phase timing).
+  let trips = []         // {lat, lon, hostKey, dir, startedAt, visibleUntil, fadeAt} -- one per shard trip
   const hostShardCounts = new Map()  // hostKey -> count of shards landed there so far, for the sunflower index/n
   let ready = false
   let rafId = null
@@ -580,22 +581,13 @@ export function createUploadMap(canvas, captionEl, onLanded) {
   // shardLanded: the per-shard entry point (2026-09-15, "tessera-web-
   // map-follow"). Draws one trip (arc + DOTS_PER_ARC traveling dots).
   //
-  // LINE LIFETIME (2026-09-16, "tessera-web-encode-hold", FINAL
-  // operator-confirmed rule -- all prior same-day attempts at this
-  // formula REMOVED): "Upon write commence, line begins. From that
-  // instant, it lasts 5 seconds, OR until the file write completes,
-  // whichever is longer." `transferMs` is the shard's own real
-  // send->finish duration (ShardProgress.elapsedMs, the SDK's OWN
-  // field, per sia_storage_wasm.d.ts -- not invented here). The SDK
-  // only ever fires this callback at LANDING (there is no separate
-  // "shard started" hook), so `commenceAt` -- the instant the rule's
-  // clock actually starts -- is backdated: `now - realTransferMs`.
-  // `visibleUntil = commenceAt + max(LINE_FLOOR_MS, realTransferMs)`,
-  // which collapses to exactly `now + max(0, LINE_FLOOR_MS -
-  // realTransferMs)` -- but written via the explicit commenceAt field
-  // so the RULE (measured from write-commence) stays legible in the
-  // code rather than living only in a pre-simplified arithmetic
-  // identity.
+  // LINE LIFETIME (2026-09-16, "tessera-web-encode-hold", SIMPLIFIED
+  // FINAL -- all prior same-day "5s-or-real-transfer" formulas REMOVED
+  // per explicit operator instruction to abandon that approach): every
+  // line lasts a FLAT LINE_FLOOR_MS (4s) from the moment it's drawn
+  // (shard landing -- the only SDK hook available; there is no
+  // separate "shard started" event). `transferMs` is no longer read
+  // or used for line timing at all.
   function shardLanded(hostKey, dir, transferMs) {
     if (!hostKey) return
     const geo = geoLookup(hostKey)
@@ -603,10 +595,7 @@ export function createUploadMap(canvas, captionEl, onLanded) {
     // hosts() to fill gaps." -- no fallback placement.
     if (!geo) return
     const now = Date.now()
-    const realTransferMs = (typeof transferMs === 'number' && transferMs > 0) ? transferMs : 0
-    const commenceAt = now - realTransferMs
-    const visibleUntil = commenceAt + Math.max(LINE_FLOOR_MS, realTransferMs)
-    trips.push({ lat: geo.lat, lon: geo.lon, hostKey, dir: dir || 'upload', startedAt: now, commenceAt, visibleUntil, fadeAt: now })
+    trips.push({ lat: geo.lat, lon: geo.lon, hostKey, dir: dir || 'upload', startedAt: now, visibleUntil: now + LINE_FLOOR_MS, fadeAt: now })
 
     // Dispersed pin (law #5): index is this host's shard count BEFORE
     // incrementing (0-based), n is the count AFTER.
@@ -636,24 +625,16 @@ export function createUploadMap(canvas, captionEl, onLanded) {
   const landedHost = shardLanded
 
   // completeWrite(): the object (slab/file) has finished (or failed)
-  // -- i.e. the last shard has landed. REMOVED the force-fade-all-
-  // trips override that used to live here (2026-09-16, per operator
-  // report: "all lines gone in ~1 second"). Root cause: Tessera's
-  // fixed 30-shard layout (10 data + 20 parity) commonly finishes the
-  // WHOLE object well under 5 seconds after the FIRST shard lands --
-  // that override was truncating every trip's visibleUntil to "now"
-  // the instant the object completed, collapsing every still-young
-  // line into the 1s SHARD_FADE_MS window simultaneously, regardless
-  // of its own individual floor. The operator's own restated rule
-  // (2026-09-16, final version) is scoped entirely PER SHARD -- "write
-  // commences, line drawn, clock starts. At exactly 5 seconds, line
-  // asks ITS OWN shard: is it done? No -> remains. Yes -> fades. Write
-  // terminates past 5s -> fades." -- with no mention of a whole-object
-  // override, and the explicit requirement that at least one traveling
-  // dot get to fully traverse the line as a visual cue, which an
-  // early/forced fade defeats. So this function goes back to being a
-  // pure "no more shards coming" signal that only kicks the RAF loop
-  // if it happened to be stopped -- it does not touch trips or pins.
+  // -- i.e. the last shard has landed. Does NOT touch trips or pins --
+  // per the SIMPLIFIED FINAL rule (2026-09-16), every line already
+  // fades on its own flat LINE_FLOOR_MS clock, independent of object
+  // completion. Kept only as a "no more shards coming" signal so a
+  // caller can kick the RAF loop if it happened to be stopped. The
+  // operator's separate instruction -- "after last shard, we move on
+  // to 'waiting for pin confirmation'" -- is a STATUS TEXT concern
+  // (what the caller shows the user while sdk.pinObject() is in
+  // flight), not a map-drawing concern; that messaging lives in
+  // web-ui.js/files.js's own status-string plumbing, not here.
   function completeWrite() {
     if (!rafId) render()
   }
