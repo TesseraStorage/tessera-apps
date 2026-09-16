@@ -455,12 +455,21 @@ export function createUploadMap(canvas, captionEl, onLanded) {
       const [x, y] = project(t.lat, t.lon, w, h)
       const midX = (ox + x) / 2, midY = Math.min(oy, y) - 18
       const dotColor = (t.dir === 'download') ? DOT_CYAN : DOT_GOLD
+      // DIRECTION (2026-09-16, "tessera-web-handoff adjustments"): the arc's
+      // bezier is always defined origin(t=0) -> host(t=1) -- that part is
+      // unchanged. For 'download' (client reading a file, host-to-origin),
+      // the traveling dot must visually move the OTHER way: host -> origin
+      // as real time elapses. Flipping the bezier parameter (1 - tt) rather
+      // than swapping the curve's own endpoints keeps the arc/midpoint math
+      // above (and the line/fade code, which never reads direction) exactly
+      // as-is -- only the dot's position-over-time is reversed.
       for (let i = 0; i < DOTS_PER_ARC; i++) {
         const stagger = (i / DOTS_PER_ARC) * ARC_TRAVEL_MS
         const dotElapsed = (now - t.startedAt - stagger)
         if (dotElapsed < 0) continue
         const tt = (dotElapsed % ARC_TRAVEL_MS) / ARC_TRAVEL_MS
-        const [px, py] = bezierPoint(tt, ox, oy, midX, midY, x, y)
+        const tEff = (t.dir === 'download') ? (1 - tt) : tt
+        const [px, py] = bezierPoint(tEff, ox, oy, midX, midY, x, y)
         drawGlow(ctx, px, py, 7, dotColor)
       }
     }
