@@ -951,9 +951,31 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
   // frozen percent for up to 5 minutes.
   const STALL_MS = 20000
   let lastProgressAt = Date.now()
+  // WATCHDOG DISARM (2026-09-16, "tessera-web-add-false-fail-after-30of30"):
+  // operator report -- "progress bar stuck at 30/30, map lines drawn (real
+  // shards landed), then 'Could not reach storage hosts. Please try again.'"
+  // -- even though every shard had actually shipped. Root cause: this
+  // watchdog only resets lastProgressAt on onShardUploaded. Once the LAST
+  // shard lands (shardsLanded === expectedShards), no further shard events
+  // will EVER fire for this upload -- but the Rust SDK's Upload::finish()
+  // (called by sdk.upload() internally, confirmed in
+  // /tmp/sia-sdk-rs-full/sia_storage/src/upload.rs's finish()) still has to
+  // AWAIT each slab task handle to completion after the last shard send --
+  // real post-shard bookkeeping (erasure-coding finalization etc.), not a
+  // stuck/hung write. If that legitimately takes longer than STALL_MS after
+  // shard #30/30, this watchdog fired a FALSE failure on an upload that had
+  // already fully shipped (and may go on to succeed anyway in the
+  // now-abandoned background promise -- see the "no cancel hook" comment
+  // below). The watchdog's actual job -- catching a write that never
+  // started, the "occupy 0 the whole time" bug it was built for -- is
+  // already fully satisfied once all expected shards have landed, so it is
+  // disarmed at that point rather than kept racing against finalization
+  // time it was never designed to bound.
+  let shardsFullyLanded = false
   const onShardUploadedWithWatchdog = (ev) => {
     lastProgressAt = Date.now()
     onShardUploaded(ev)
+    if (shardsLanded >= expectedShards) shardsFullyLanded = true
   }
   uploadOptions.onShardUploaded = onShardUploadedWithWatchdog
 
@@ -984,6 +1006,12 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
   let stallTimer = null
   const stallPromise = new Promise((_, reject) => {
     stallTimer = setInterval(() => {
+      // See WATCHDOG DISARM comment above: once every expected shard has
+      // landed, this watchdog has nothing left to protect against -- the
+      // remaining wait is finalize()/pin bookkeeping, not a stalled write.
+      // Never reject past that point; let the real uploadPromise settle on
+      // its own, however long that legitimately takes.
+      if (shardsFullyLanded) { clearInterval(stallTimer); return }
       if (Date.now() - lastProgressAt > STALL_MS) {
         clearInterval(stallTimer)
         reject(new Error('Could not reach storage hosts. Please try again.'))
