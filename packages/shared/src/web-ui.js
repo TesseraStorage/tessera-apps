@@ -1467,21 +1467,33 @@ async function doUpload(file, destPathOverride) {
     const finalBasename = resolveCollisionName(siblingNames, file.name)
     const metaName = destPath ? buildPath(destPath, finalBasename) : (finalBasename !== file.name ? finalBasename : undefined)
     await uploadFile(sdk, file, ({ stage, percent, elapsed, hostKey, transferMs }) => {
-      // ENCODING (2026-09-16, "tessera-web-encode-hold"): "encoding..."
-      // is intentionally NEVER emitted by files.js's uploadFile() --
-      // re-grepped sia_storage_wasm.d.ts and confirmed no hosts-ready/
-      // upload-started signal exists anywhere in this SDK; the first
-      // named event it gives us IS the first shard already landed, so
-      // per the packet's own decision tree this status is skipped
-      // rather than fabricated (see files.js's own comment for the
-      // full grep trail). This callback therefore only ever receives
-      // real onShardUploaded/pinning/done ticks -- there is no
-      // 'encoding...'-labeled branch to guard against here; leaving
-      // this comment (rather than dead branch code) so a future
-      // packet that DOES find a real signal knows exactly where to
-      // wire it back in without re-deriving the bar-hold rule: route
-      // it to `status`, never to `progress` (progress is what
-      // unhides r.progressWrap below on any truthy value).
+      // ENCODING WORD (2026-09-16, "tessera-web-encoding-word",
+      // supersedes "tessera-web-encode-hold"'s "never emitted" era):
+      // files.js now emits exactly one 'encoding...' tick, right
+      // before calling sdk.upload() (see that file's own comment for
+      // the exact moment and rationale). Routed to `status` ONLY,
+      // never to `progress` -- patchState({ progress: ... }) is
+      // exactly what unhides r.progressWrap below (see that
+      // subscriber's own "fires on ANY truthy progress value"
+      // comment), so if this tick took the same path as every real
+      // onShardUploaded tick, the bar would appear one tick early, at
+      // 0%, before any shard has shipped -- the exact bug encode-hold
+      // fixed. Every OTHER tick (all real onShardUploaded/pinning/
+      // done events) is completely unaffected by this branch and
+      // still flows to `progress` exactly as before.
+      if (stage === 'encoding\u2026') {
+        patchState({ status: stage })
+        return
+      }
+      // First real tick past the branch above IS the first shard
+      // shipping -- clear the lingering 'encoding...' status here so
+      // it doesn't sit next to the now-visible bar. Matches the
+      // packet's own copy table: "First shard shipping: bar appears.
+      // Status uploading (N/30)." r.statusText and r.progressLabel
+      // are two different DOM nodes (see the 'progress' subscriber
+      // below for progressLabel's own text), so this does not fight
+      // with that subscriber's write.
+      if (getState().status) patchState({ status: '' })
       // Real target only -- setProgressTarget's own ease-out never passes
       // this value (see EASE_MS comment above). The 'done' tick still
       // sets exactly 100, but only files.js ever calls that, after

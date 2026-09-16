@@ -720,28 +720,39 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
   // satisfying the law with no separate "is this the first tick"
   // check needed in web-ui.js.
   //
-  // ENCODING SIGNAL -- SKIPPED, NOT FABRICATED (2026-09-16,
-  // "tessera-web-encode-hold"): "Grep the wasm .d.ts / SDK callbacks
-  // for a hosts-ready / upload-started signal... If the first named
-  // event IS the first shard in flight, skip 'encoding...' rather
-  // than lie." Re-grepped sia_storage_wasm.d.ts this packet
-  // (UploadOptions, PackedUploadOptions, Sdk.upload/uploadPacked,
-  // the whole file) -- the ONLY upload-related callback the WASM
-  // binary exposes anywhere is `onShardUploaded?: (progress:
-  // ShardProgress) => void`, and it fires once a shard has ALREADY
-  // landed (ShardProgress carries `elapsedMs`, the real send->finish
-  // duration -- a value that can only exist after the transfer is
-  // done). There is no onHostsReady/onUploadStarted/
-  // onShardUploading-equivalent hook anywhere in this SDK (confirmed
-  // again, same finding as every prior map packet that searched this
-  // same file for the same reason). The first named event this SDK
-  // ever gives us is NOT "before bytes move" -- it is strictly after
-  // the first shard already finished. Per the packet's own decision
-  // tree this is exactly the "skip 'encoding...' rather than lie"
-  // branch: no tick, no status text, of any kind is emitted between
-  // the drop and the first landed shard. See this packet's Output
-  // block for the explicit "encoding signal: none" / "encoding copy:
-  // (skipped, no signal)" answer this produces.
+  // ENCODING SIGNAL -- UPDATED (2026-09-16, "tessera-web-encoding-
+  // word", supersedes "tessera-web-encode-hold"'s "skip, don't
+  // fabricate" call below): the encode-hold packet's grep finding
+  // still stands -- there is no SDK-level hosts-ready/upload-started
+  // EVENT (onShardUploaded is the SDK's only per-shard hook, firing
+  // only after a shard has landed; re-confirmed again this packet,
+  // same file, same result). What changed is the OPERATOR's own
+  // instruction: "The operator read the skip and rejected the blank.
+  // They know what the page is doing between 'hosts are in' and
+  // 'shards go out'. Show that word." -- i.e. the signal doesn't need
+  // to come FROM the SDK; the app's own act of CALLING sdk.upload()
+  // (right below) IS the moment named by this packet's own window:
+  // "Start: the moment this Add calls sdk.upload(...). That is after
+  // Ready. That is when the SDK has (or is fetching) hosts and is
+  // encoding shards to send." The one 'encoding...' tick now sits
+  // immediately before that call (see below, right after
+  // uploadOptions.onShardUploaded is wired) -- not fabricating an SDK
+  // signal, just naming the true app-level moment the packet asked
+  // for. Still routed to `status` only, never `progress` -- BAR HOLD
+  // above is otherwise completely unchanged: no tick reaches
+  // `progress` (and therefore r.progressWrap) until the first real
+  // onShardUploaded event.
+  //
+  // (Prior packet's own text, preserved for the grep trail: "Grep the
+  // wasm .d.ts / SDK callbacks for a hosts-ready / upload-started
+  // signal... If the first named event IS the first shard in flight,
+  // skip 'encoding...' rather than lie." Re-grepped
+  // sia_storage_wasm.d.ts again this packet [UploadOptions,
+  // PackedUploadOptions, Sdk.upload/uploadPacked, the whole file] --
+  // still zero onHostsReady/onUploadStarted/onShardUploading-
+  // equivalent hook anywhere in this SDK. That finding didn't change;
+  // only the app-level definition of "the encoding moment" did, per
+  // this packet's explicit instruction above.)
 
   // GATE (2026-09-14, "tessera-web-native-wt"): the tunnel preflight
   // below (added by "tessera-web-upload-hang") is only meaningful when
@@ -865,6 +876,22 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
   }
   uploadOptions.onShardUploaded = onShardUploadedWithWatchdog
 
+  // ENCODING WORD (2026-09-16, "tessera-web-encoding-word"): "The
+  // operator read the skip and rejected the blank... Show that word."
+  // This is the exact moment named by the packet's own window: "Start:
+  // the moment this Add calls sdk.upload(...). That is after Ready.
+  // That is when the SDK has (or is fetching) hosts and is encoding
+  // shards to send." One tick, stage 'encoding...', percent 0 --
+  // routed to `status` only by web-ui.js's caller (see that file's
+  // own comment), NEVER to `progress` (progress is what unhides
+  // r.progressWrap on any truthy value -- see encode-hold's BAR HOLD
+  // comment above). If sdk.upload() itself throws before any shard
+  // (caught by doUpload's own try/catch in web-ui.js), the caller's
+  // existing fail-sentence path clears `status` and shows the one
+  // fixed fail sentence -- this tick does not need its own undo logic
+  // for that case, matching the packet's "drop the word and use the
+  // existing fail sentence" instruction exactly.
+  tick('encoding\u2026', 0)
   const uploadPromise = sdk.upload(obj, stream, uploadOptions)
   // Swallow a later resolve/reject from the abandoned promise once the
   // stall watchdog has already won the race below -- the underlying
