@@ -359,11 +359,10 @@ function sunflowerOffset(i, n) {
  * name.
  *
  * completeWrite(): called once the whole object finishes (success or
- * fail). Per-shard trips that are already fading keep fading on their
- * own clocks -- this does NOT snap-remove them or force an object-
- * level fade; it only exists so a caller can signal "no more shards
- * are coming" (used to stop the RAF loop once nothing is left
- * animating). Pins (dispersed, per-shard) are never cleared here.
+ * fail) -- the file's last shard has landed. Force-fades every trip
+ * still at full opacity (see completeWrite()'s own comment below for
+ * why this changed from the original no-op). Pins (dispersed,
+ * per-shard) are never cleared here.
  */
 export function createUploadMap(canvas, captionEl, onLanded) {
   const ctx = canvas.getContext('2d')
@@ -573,18 +572,31 @@ export function createUploadMap(canvas, captionEl, onLanded) {
   // shardLanded: the per-shard entry point (2026-09-15, "tessera-web-
   // map-follow"). Draws one trip (arc + DOTS_PER_ARC traveling dots).
   //
-  // FLOOR (2026-09-16, "tessera-web-encode-hold"): `transferMs` is the
-  // shard's own real send->finish duration (ShardProgress.elapsedMs,
-  // the SDK's OWN field, per sia_storage_wasm.d.ts -- not invented
-  // here). `visibleUntil = now + max(LINE_FLOOR_MS, transferMs)` --
-  // "A 1-second shard still shows its line for 5 seconds. A
-  // 12-second shard keeps its line for 12 seconds." When
-  // `transferMs` is missing/invalid (undefined, NaN, <=0 -- e.g. a
-  // caller that never had a real elapsedMs to pass, or a download
-  // path that doesn't thread it through), the floor is the ONLY
-  // input: `visibleUntil = now + LINE_FLOOR_MS`, so the line still
-  // gets the 5s minimum even for a caller that can't report the real
-  // number, rather than silently reverting to instant-fade.
+  // FLOOR (2026-09-16, "tessera-web-encode-hold", FIXED same day per
+  // operator bug report): `transferMs` is the shard's own real
+  // send->finish duration (ShardProgress.elapsedMs, the SDK's OWN
+  // field, per sia_storage_wasm.d.ts -- not invented here). The line
+  // is only ever DRAWN starting at `now` (shard landing/completion --
+  // there is no earlier SDK event to draw it from), but the shard
+  // already spent `transferMs` invisibly in flight BEFORE that. So
+  // "each line lasts max(5s, real transfer), per individual line" means
+  // the line's TOTAL lifetime -- counted from when the shard's transfer
+  // actually started, not from when we started drawing it -- must equal
+  // max(LINE_FLOOR_MS, transferMs). Since transferMs of that lifetime
+  // already elapsed invisibly, the line only needs to stay opaque AFTER
+  // landing for the remainder: max(0, LINE_FLOOR_MS - transferMs).
+  //   - transferMs = 2000 (2s write): extra = 5000-2000 = 3000ms visible
+  //     after landing -- total lifetime (2000 invisible + 3000 visible)
+  //     = 5000ms = the 5s floor. Matches "a 2-second write shows for 5
+  //     seconds total."
+  //   - transferMs = 8000 (8s write): extra = max(0, 5000-8000) = 0 --
+  //     the line starts fading THE INSTANT it lands. Total lifetime (8000
+  //     invisible + 0 visible-before-fade) = 8000ms = the write's own
+  //     time. Matches "an 8-second write begins fade at 8 seconds."
+  // The OLD formula (`now + max(floor, transferMs)`) double-counted
+  // transferMs -- an 8s write got 8s floor-extra ON TOP of its already-
+  // elapsed 8s, i.e. stayed opaque until 16s post-landing instead of
+  // fading immediately. This is the bug the operator reported.
   function shardLanded(hostKey, dir, transferMs) {
     if (!hostKey) return
     const geo = geoLookup(hostKey)
@@ -592,8 +604,9 @@ export function createUploadMap(canvas, captionEl, onLanded) {
     // hosts() to fill gaps." -- no fallback placement.
     if (!geo) return
     const now = Date.now()
-    const floorMs = Math.max(LINE_FLOOR_MS, (typeof transferMs === 'number' && transferMs > 0) ? transferMs : 0)
-    trips.push({ lat: geo.lat, lon: geo.lon, hostKey, dir: dir || 'upload', startedAt: now, visibleUntil: now + floorMs, fadeAt: now })
+    const realTransferMs = (typeof transferMs === 'number' && transferMs > 0) ? transferMs : 0
+    const extraAfterLanding = Math.max(0, LINE_FLOOR_MS - realTransferMs)
+    trips.push({ lat: geo.lat, lon: geo.lon, hostKey, dir: dir || 'upload', startedAt: now, visibleUntil: now + extraAfterLanding, fadeAt: now })
 
     // Dispersed pin (law #5): index is this host's shard count BEFORE
     // incrementing (0-based), n is the count AFTER.
@@ -622,13 +635,24 @@ export function createUploadMap(canvas, captionEl, onLanded) {
   // Back-compat alias -- some call sites still say "landedHost".
   const landedHost = shardLanded
 
-  // completeWrite(): the object has finished (or failed). Per-shard
-  // trips already fade themselves on their own clocks (law #4: "do
-  // not wait for pinObject or the other 29 shards" -- so there is
-  // nothing left to fade "for the object" here). This function is
-  // kept only so callers can signal the object boundary; it does not
-  // touch trips or pins at all -- no snap-remove, no forced fade.
+  // completeWrite(): the object has finished (or failed) -- i.e. the
+  // file's LAST shard has landed. FIXED (2026-09-16, same operator
+  // report as the FLOOR fix above): "when a file's last shard lands,
+  // all lines should fade-out." Previously this was a pure no-op ("do
+  // not wait for pinObject or the other 29 shards" was read, at the
+  // time, as "never touch trips here at all" -- too strong; the
+  // per-shard floor and the whole-object completion signal are two
+  // separate rules that can both be true). Now: every trip that is
+  // STILL at full opacity (visibleUntil in the future) gets its floor
+  // cut short to right now, so its own SHARD_FADE_MS fade-out clock
+  // starts immediately; a trip already mid-fade or fully faded is left
+  // alone (this only ever pulls visibleUntil earlier, never later, and
+  // never re-extends/resets a fade already in progress).
   function completeWrite() {
+    const now = Date.now()
+    for (const t of trips) {
+      if (t.visibleUntil > now) t.visibleUntil = now
+    }
     if (!rafId) render()
   }
 
