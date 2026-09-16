@@ -28,7 +28,8 @@ import {
   deleteFile, createShareURL, getAccount, waitForReady, initRelay,
   setCredsPrefix,
   buildPath, folderMarkerName, validateFolderName, computeFolderView,
-  isNonEmptyFolder, findFolderMarkerId, createFolderMarker,
+  isNonEmptyFolder, findFolderMarkerId,
+  getVirtualFolders, addVirtualFolder, removeVirtualFolder,
 } from './files.js'
 import { createUploadMap } from './map.js'
 import {
@@ -752,7 +753,15 @@ function updateTotals() {
 function renderFileList() {
   const { files, selectedIdx, currentPath } = getState()
   r.fileList.innerHTML = ''
-  const { folders, files: fileRows } = computeFolderView(files, currentPath)
+  // FOLDER-CREATE-FAIL FIX (2026-09-15): empty folders are now tracked
+  // virtually (localStorage), not a pinned marker object -- see
+  // files.js's own block comment for the confirmed root cause
+  // (zero-byte upload always throws in the WASM SDK's erasure coder).
+  // getVirtualFolders() is read fresh on every render rather than
+  // cached in state -- it's synchronous localStorage, cheap, and this
+  // keeps it trivially correct after New Folder / Delete without a
+  // second piece of reactive state to keep in sync with `files`.
+  const { folders, files: fileRows } = computeFolderView(files, currentPath, getVirtualFolders())
 
   if (!folders.length && !fileRows.length) {
     // COPY (2026-09-15, "tessera-web-look-v1", extended 2026-09-15
@@ -832,14 +841,18 @@ function onBreadcrumbClick(e) {
 // name. Reject empty, /, ., ... Trim. Max 64 characters." Uses the
 // native prompt() (same UI family as onDelete's confirm() below --
 // look-v1 law: "no new icon font," no custom modal invented here).
-// "Creating Photos/Italy also ensures Photos/ exists" -- true by
-// construction: you can only reach the New-folder control for
-// "Photos/Italy" by having already navigated INTO Photos, which
-// itself required Photos/ to already exist (either as a marker or
-// because Photos already had files) -- so there is nothing extra to
-// ensure here beyond pinning the new segment's own marker.
-async function onNewFolder() {
-  const sdk = getState().sdk; if (!sdk) return
+//
+// FOLDER-CREATE-FAIL FIX (2026-09-15, "tessera-web-folder-create-fail"):
+// no longer calls the SDK at all. The original design pinned a
+// zero-byte marker object here, which always threw inside the WASM
+// SDK's own erasure-coding step (confirmed root cause -- see files.js's
+// block comment above FOLDER_MARKER_MIME) -- that is the exact "Could
+// not create folder. Try again." toast the operator saw on every
+// single retry. addVirtualFolder() is synchronous localStorage only:
+// no upload, no pin, no await, nothing that can throw or hang, and no
+// sdk needed at all (removed the sdk-missing early-return since
+// there's no SDK call left to guard).
+function onNewFolder() {
   const raw = prompt('New folder name:')
   if (raw === null) return  // cancelled
   const { ok, error, name } = validateFolderName(raw)
@@ -850,26 +863,14 @@ async function onNewFolder() {
   // "no (1)/(2)" law as files -- this packet's own law says "do not
   // implement duplicate (1)/(2) in this packet," which cuts both ways:
   // don't invent de-duplication suffixes for folders either).
-  const { folders: existingFolders } = computeFolderView(files, currentPath)
+  const { folders: existingFolders } = computeFolderView(files, currentPath, getVirtualFolders())
   if (existingFolders.some(f => f.name === name)) {
     showToast('A folder named "' + name + '" already exists here.')
     return
   }
-  setBusy(true)
-  try {
-    await createFolderMarker(sdk, path)
-    await refreshFiles()
-    showToast('\u{1F4C1} Folder created: ' + name)
-  } catch (e) {
-    // "If a zero-byte pin is refused, print BLOCKED with the error and
-    // still ship navigation + prefix-on-upload against folders that
-    // already have a file." -- this is the live per-click failure
-    // mode of that same case; the BLOCKED print itself belongs in this
-    // packet's own written Output/report, not the UI, so the customer
-    // just sees one quiet sentence like every other failure path here.
-    showToast('Could not create that folder. Try again.')
-    console.error(e)
-  } finally { setBusy(false) }
+  addVirtualFolder(path)
+  renderFileList()
+  showToast('\u{1F4C1} Folder created: ' + name)
 }
 
 function onFilePicked() {
@@ -1001,7 +1002,31 @@ async function doUpload(file) {
   renderProgressBar(0)
   patchState({ status: '', progress: { stage: 'Preparing\u2026', percent: 0, elapsed: 0 } })
   try {
-    await waitForReady(sdk)
+    // FIX (2026-09-15, "tessera-web-folder-create-fail"): "Add must not
+    // hang with no error. If it cannot start the write, fail visible in
+    // a few seconds with one sentence. No 5-minute bar. No silent
+    // freeze." waitForReady(sdk)'s DEFAULT timeout is 300000ms (5
+    // minutes), polling sdk.account() every 5s with ZERO UI update in
+    // between -- this is the exact "occupy 0" hang the operator saw:
+    // sdk.upload() (and therefore any hosts() contact at all) is never
+    // even reached while this call is still pending, so no amount of
+    // waiting here ever touches a host. Confirmed by direct read: the
+    // progress bar's own patchState() call above already ran with
+    // stage: 'Preparing...' BEFORE this line, and nothing between here
+    // and uploadFile() below updates it again until this resolves --
+    // a customer watching the bar sees it frozen at 0% for up to 5
+    // minutes with no distinguishable difference from a true hang.
+    // A 10s cap turns that into a fast, visible failure instead --
+    // Ready is a near-instant sdk.account() call once truly connected
+    // (confirmed by files.js's own getAccount() being a direct,
+    // un-retried sdk.account() passthrough); an account still not
+    // Ready after 10s of polling is a real, reportable condition, not
+    // something worth silently waiting multiple minutes for on every
+    // single Add. enterFiles()'s own separate waitForReady() call
+    // (line ~714, background/non-blocking, only feeds the header dot)
+    // keeps its original 5-minute default -- that one was never the
+    // hang, since it never gates Add.
+    await waitForReady(sdk, 10000)
     // FIX (2026-09-14, "tessera-web-occupy-fade"): REMOVED. The extra
     // sdk.hosts({limit:60}) call the "tessera-web-map-30" packet added
     // here (for the Add-start candidate preview) is a SECOND, real
@@ -1132,25 +1157,34 @@ async function onDelete() {
 // sentence ('This folder has files.'). Do not mass-delete. Do not
 // recurse." isNonEmptyFolder() itself DOES recurse (read-only) to
 // answer that question correctly for nested content -- see its own
-// comment in files.js -- but this function never deletes more than
-// the single marker object either way.
+// comment in files.js.
+//
+// FOLDER-CREATE-FAIL FIX (2026-09-15): a folder created after this fix
+// has no marker object at all -- findFolderMarkerId() returns null for
+// those, and the correct action is removeVirtualFolder() (synchronous
+// localStorage, no SDK call). A LEGACY marker object (pinned by the
+// original folders-v1 design, before this fix, if any account already
+// has one) is still deleted via deleteFile() exactly as before -- both
+// paths are supported so neither an old nor a new empty folder is
+// stuck undeletable.
 async function onDeleteFolder(path, name) {
-  const sdk = getState().sdk; if (!sdk) return
   const { files } = getState()
   if (isNonEmptyFolder(files, path)) {
     showToast('This folder has files.')
     return
   }
   const markerId = findFolderMarkerId(files, path)
+  if (!confirm('Delete "' + name + '"?\n\nThis cannot be undone.')) return
   if (!markerId) {
-    // Should not happen (a folder row only exists because SOMETHING
-    // under this path exists, and isNonEmptyFolder() above already
-    // confirmed it isn't a real file) -- but never silently no-op a
-    // Delete click.
-    showToast('Could not find that folder\u2019s marker.')
+    // No legacy marker object -- this is a virtual (localStorage-only)
+    // folder, the normal case for anything created after this fix. No
+    // SDK call, nothing that can throw.
+    removeVirtualFolder(path)
+    renderFileList()
+    showToast('\u{1F5D1}\uFE0F Deleted: ' + name)
     return
   }
-  if (!confirm('Delete "' + name + '"?\n\nThis cannot be undone.')) return
+  const sdk = getState().sdk; if (!sdk) return
   setBusy(true); patchState({ status: 'Deleting\u2026' })
   try {
     await deleteFile(sdk, markerId)

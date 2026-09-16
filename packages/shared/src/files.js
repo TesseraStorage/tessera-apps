@@ -14,28 +14,99 @@ import { PinnedObject } from './sdk.js'
 import { proxyOrigin } from './utils.js'
 import { checkTunnelReachable } from './interceptor.js'
 
-// FOLDERS (2026-09-15, "tessera-web-folders-v1"): "The SDK has no
-// directories. A folder is a prefix on the object's existing metadata
-// name." Forward slashes only; display name is the last segment; root
-// is "". This constant is the marker object's own mime -- pinned so an
-// otherwise-empty folder survives reload ("Empty folders persist").
-// Never shown as a file row, never downloadable/shareable.
+// FOLDERS (2026-09-15, "tessera-web-folders-v1", REVISED 2026-09-15
+// "tessera-web-folder-create-fail"): "The SDK has no directories. A
+// folder is a prefix on the object's existing metadata name." Forward
+// slashes only; display name is the last segment; root is "".
+//
+// REVISION -- empty folders are now VIRTUAL, not a pinned marker
+// object. The original design (marker mime, below, now UNUSED for
+// creation but kept exported/documented since a marker object from
+// before this fix may still exist in some account's real object list
+// and must still be recognized/hidden if seen) pinned a zero-byte
+// object per empty folder. That zero-byte upload throws inside the
+// WASM SDK's own erasure-coding step -- confirmed via the WASM
+// binary's own error strings ("data shards cannot be zero", "empty
+// shard", "TooFewShards") and via encodedSize(0, 10, 20) === 0n (a
+// zero-byte object produces ZERO encoded shards, which cannot satisfy
+// a 10-data-shard request no matter what dataShards/parityShards are
+// passed) -- there is no tiny-but-nonzero blob that fixes this; ANY
+// empty object is fundamentally incompatible with erasure coding.
+// This is why every New Folder click failed with the same toast on
+// every retry (files.js createFolderMarker -> sdk.upload() rejecting
+// before any network/host activity, confirmed by the fact this
+// packet's own catch block below now logs the REAL thrown message).
+//
+// FIX: an empty folder is now purely a client-side fact -- its path
+// is recorded in this browser's own localStorage
+// (PREFIX + '.folders', a JSON array of path strings), never pinned,
+// never costing a real 10+20 write. "First real Add inside the
+// folder still writes Photos/vacation.jpg in object metadata" is
+// unchanged -- a folder that already has a real file inside it needs
+// no localStorage row at all (computeFolderView infers it from the
+// file's own prefix, same as before). Reload still shows an empty
+// folder correctly IF it was created in this same browser (its path
+// is still in localStorage) -- "That is acceptable" per the packet's
+// own law; it does not survive a different browser/device, which a
+// pinned marker would have (at the cost of every New Folder click
+// failing outright, which is strictly worse).
 export const FOLDER_MARKER_MIME = 'application/x-tessera-folder'
 
-// buildPath(dir, basename): the one place that joins a directory and a
-// leaf name into a full metadata `name` string. dir === '' (root) means
-// no prefix at all -- existing flat uploads (Drop, or any pre-folders
-// Tessera Web object) are untouched by this function; it is only ever
-// called with a non-empty dir when the caller is actually inside a
-// folder.
+const VIRTUAL_FOLDERS_KEY_SUFFIX = '.folders'
+
+function virtualFoldersKey() {
+  return _credsPrefix + VIRTUAL_FOLDERS_KEY_SUFFIX
+}
+
+// getVirtualFolders(): the full list of empty-folder paths this
+// browser has created, from localStorage. Corrupt/missing JSON reads
+// back as an empty list rather than throwing -- a broken localStorage
+// value must never crash the Files screen.
+export function getVirtualFolders() {
+  try {
+    const raw = localStorage.getItem(virtualFoldersKey())
+    const arr = raw ? JSON.parse(raw) : []
+    return Array.isArray(arr) ? arr.filter(p => typeof p === 'string') : []
+  } catch (_) {
+    return []
+  }
+}
+
+function setVirtualFolders(paths) {
+  localStorage.setItem(virtualFoldersKey(), JSON.stringify(paths))
+}
+
+// addVirtualFolder(path): records a new empty folder path. No SDK
+// call, no network, no upload, no pin -- this is the entire "create"
+// operation for an empty folder now. Idempotent (a path already
+// present is not duplicated).
+export function addVirtualFolder(path) {
+  const paths = getVirtualFolders()
+  if (!paths.includes(path)) {
+    paths.push(path)
+    setVirtualFolders(paths)
+  }
+}
+
+// removeVirtualFolder(path): "Delete empty folder removes that path
+// from tesseraweb.folders only." No SDK call -- there is no marker
+// object to delete anymore.
+export function removeVirtualFolder(path) {
+  const paths = getVirtualFolders().filter(p => p !== path)
+  setVirtualFolders(paths)
+}
+
 export function buildPath(dir, basename) {
   return dir ? dir + '/' + basename : basename
 }
 
-// folderMarkerName(path): the exact metadata `name` a folder's marker
-// object is pinned under -- always path + '/' (packet's own example:
-// "Photos/"). `path` here is a full folder path with NO trailing
-// slash (e.g. "Photos" or "Photos/Italy").
+// folderMarkerName(path): the metadata `name` a LEGACY folder marker
+// object (pinned by the original folders-v1 design, before this fix)
+// would have used -- always path + '/'. Still exported/used by
+// computeFolderView()/isNonEmptyFolder() below so that if any account
+// already has a real marker object from before this fix, it is still
+// correctly recognized and hidden, not shown as a garbled file row.
+// No code path PINS a new one anymore -- see the block comment above.
 export function folderMarkerName(path) {
   return path + '/'
 }
@@ -55,17 +126,23 @@ export function validateFolderName(raw) {
   return { ok: true, name }
 }
 
-// computeFolderView(files, currentPath): splits the SDK's flat object
-// list into the folders and files visible AT this one directory level
-// -- "folder rows sit above file rows in the current place." `files`
-// is listFiles()'s own flat array (every object, full-path `name`,
-// unfiltered). `currentPath` is '' at root or a full path with no
-// trailing slash (e.g. "Photos/Italy").
+// computeFolderView(files, currentPath, virtualFolders): splits the
+// SDK's flat object list into the folders and files visible AT this
+// one directory level -- "folder rows sit above file rows in the
+// current place." `files` is listFiles()'s own flat array (every
+// object, full-path `name`, unfiltered). `currentPath` is '' at root
+// or a full path with no trailing slash (e.g. "Photos/Italy").
 //
-// A folder is "empty" (for display / delete purposes at THIS level)
-// only in the recursive sense used by isNonEmptyFolder() below -- see
-// that function's own comment for why markers don't count as "files".
-export function computeFolderView(files, currentPath) {
+// NEW 3rd argument `virtualFolders` (2026-09-15,
+// "tessera-web-folder-create-fail"): the localStorage-backed empty-
+// folder path list from getVirtualFolders(). A folder now appears in
+// the view for EITHER reason: a real file exists somewhere below it
+// (inferred from object names, unchanged from before), OR its exact
+// path is in this list (new). Optional/defaults to [] so any other
+// caller that doesn't pass it still behaves exactly as before this
+// fix for folders that already have real content.
+export function computeFolderView(files, currentPath, virtualFolders) {
+  virtualFolders = virtualFolders || []
   const prefix = currentPath ? currentPath + '/' : ''
   const folderNames = new Set()
   const fileRows = []
@@ -76,11 +153,11 @@ export function computeFolderView(files, currentPath) {
       // all in its name. Falls through to the fileRows push below.
     }
     const rel = prefix ? f.name.slice(prefix.length) : f.name
-    if (rel === '') continue  // this directory's OWN marker -- never a row
+    if (rel === '') continue  // this directory's OWN marker (legacy) -- never a row
     const slashIdx = rel.indexOf('/')
     if (slashIdx === -1) {
-      // A direct child with no further path segment. This directory's
-      // own marker (mime === FOLDER_MARKER_MIME) can only ever produce
+      // A direct child with no further path segment. A LEGACY marker
+      // object (mime === FOLDER_MARKER_MIME) can only ever produce
       // rel === '' (handled above), so anything reaching here with no
       // slash is a genuine file -- but guard defensively anyway in
       // case of a malformed/legacy object.
@@ -88,14 +165,18 @@ export function computeFolderView(files, currentPath) {
       fileRows.push({ ...f, displayName: rel })
     } else {
       // Something inside a subfolder named rel.slice(0, slashIdx).
-      // Its own marker (rel === subfolderName + '/', i.e. the slash is
-      // the LAST character) only confirms existence; anything with
-      // real content after that slash is just recorded as existing --
-      // isNonEmptyFolder() (not this function) decides "has files" for
-      // the Delete-refusal rule, since that check must also look
-      // BELOW this one level (nested subfolders).
       folderNames.add(rel.slice(0, slashIdx))
     }
+  }
+  // Merge in virtual (empty, localStorage-only) folders that live
+  // directly under currentPath -- same one-level-deep rule as the
+  // real-object inference above.
+  for (const vPath of virtualFolders) {
+    if (prefix && !vPath.startsWith(prefix)) continue
+    if (!prefix && vPath.includes('/')) continue  // not a direct child of root
+    const rel = prefix ? vPath.slice(prefix.length) : vPath
+    if (!rel || rel.includes('/')) continue  // not a direct child of currentPath
+    folderNames.add(rel)
   }
   const folders = Array.from(folderNames).sort().map(name => ({
     name,
@@ -110,18 +191,24 @@ export function computeFolderView(files, currentPath) {
 // levels down still means "this folder has files," matching the
 // proof's own framing ("Delete Photos while it still has a file is
 // refused" -- the file could be directly in Photos or in Photos/Italy).
-// Folder MARKER objects (mime === FOLDER_MARKER_MIME) do not count as
+// LEGACY marker objects (mime === FOLDER_MARKER_MIME) do not count as
 // "files" here -- an entirely-empty nested subfolder (marker only, no
 // real content anywhere under it) does not by itself make an ancestor
-// folder "have files".
+// folder "have files". Virtual (localStorage) folders never appear in
+// `files` at all, so they naturally never count as "having files"
+// either -- no special-casing needed for them here.
 export function isNonEmptyFolder(files, path) {
   const prefix = path + '/'
   return files.some(f => f.name.startsWith(prefix) && f.mime !== FOLDER_MARKER_MIME)
 }
 
-// findFolderMarkerId(files, path): the marker object's own id, for the
-// "empty folder: delete its marker only" path. Exact match only --
-// path + '/' -- never a prefix match.
+// findFolderMarkerId(files, path): the LEGACY marker object's own id,
+// if one exists (pinned by the original folders-v1 design before this
+// fix). Exact match only -- path + '/' -- never a prefix match. A
+// folder created after this fix has no marker at all -- this returns
+// null for those, which the caller (onDeleteFolder in web-ui.js)
+// handles by falling through to the virtual-folder removal path
+// instead.
 export function findFolderMarkerId(files, path) {
   const markerName = folderMarkerName(path)
   const hit = files.find(f => f.name === markerName)
@@ -427,9 +514,51 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
   // before this task.
   if (!window.___wtpoly___) uploadOptions.maxInflight = 10
 
+  // FIX (2026-09-15, "tessera-web-folder-create-fail"): "Add must not
+  // hang with no error... No 5-minute bar. No silent freeze." The OLD
+  // timeoutPromise below raced the ENTIRE upload against a flat
+  // 300000ms (5 minute) deadline -- that IS the "5-minute bar" the
+  // operator saw, and it does nothing to distinguish a write that
+  // never started (occupy 0, the reported bug) from one that is
+  // genuinely still running late in a large file's shard sequence.
+  // Replaced with a STALL watchdog instead: it resets on every real
+  // onShardUploaded event (via lastProgressAt below) and only fires if
+  // NO shard has landed within STALL_MS of the write starting, or
+  // within STALL_MS of the most recent shard -- a write that is
+  // actually making progress can run as long as it needs to; one that
+  // has not moved in STALL_MS (occupy 0 the whole time, exactly this
+  // bug's own symptom) fails fast and visibly instead of sitting at a
+  // frozen percent for up to 5 minutes.
+  const STALL_MS = 20000
+  let lastProgressAt = Date.now()
+  const onShardUploadedWithWatchdog = (ev) => {
+    lastProgressAt = Date.now()
+    onShardUploaded(ev)
+  }
+  uploadOptions.onShardUploaded = onShardUploadedWithWatchdog
+
   const uploadPromise = sdk.upload(obj, stream, uploadOptions)
-  const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Upload timed out after 5 minutes')), 300000))
-  obj = await Promise.race([uploadPromise, timeoutPromise])
+  // Swallow a later resolve/reject from the abandoned promise once the
+  // stall watchdog has already won the race below -- the underlying
+  // WASM upload has no documented cancel/AbortController hook (checked
+  // sia_storage_wasm.d.ts), so it may keep running in the background;
+  // this only prevents an unhandled-rejection console warning, it does
+  // not (and cannot, from here) actually stop that background work.
+  uploadPromise.catch(() => {})
+  let stallTimer = null
+  const stallPromise = new Promise((_, reject) => {
+    stallTimer = setInterval(() => {
+      if (Date.now() - lastProgressAt > STALL_MS) {
+        clearInterval(stallTimer)
+        reject(new Error('Could not reach storage hosts. Please try again.'))
+      }
+    }, 2000)
+  })
+  try {
+    obj = await Promise.race([uploadPromise, stallPromise])
+  } finally {
+    if (stallTimer) clearInterval(stallTimer)
+  }
   tick('pinning', 90)
   await sdk.pinObject(obj)
   tick('done', 100)
@@ -438,46 +567,16 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
 
 // ── folders ─────────────────────────────────────────────
 //
-// "Pin one marker object per folder... Smallest upload the SDK will
-// pin (empty/tiny blob). Never shown as a file row. Never download /
-// share / open as a file." Reuses uploadFile()'s own WASM SDK path
-// (which already supports a zero-byte stream for the desktop dropzone
-// case -- see `file ? file.stream() : new ReadableStream(...)` above)
-// rather than duplicating the upload/pin call. Deliberately does NOT
-// go through the relay-first branch above at all -- markers are tiny
-// and infrequent, and Tessera Web never has relay creds anyway (this
-// file's own PREFIX comment), so there is no real cost to always
-// using the direct WASM path here, and it keeps this function simple
-// (no progress ticks needed for a folder marker).
-export async function createFolderMarker(sdk, path) {
-  // GATE: same native-WebTransport tunnel preflight uploadFile() itself
-  // runs, so a folder create fails the same clean way an Add would if
-  // Tessera Web's own tunnel check ever applied (it doesn't today --
-  // window.___wtpoly___ is false on Web's native path, so this is a
-  // no-op in practice, kept only so this function's own behavior
-  // matches uploadFile()'s exactly if that ever changes).
-  if (window.___wtpoly___) {
-    const tunnelOk = await checkTunnelReachable()
-    if (!tunnelOk) {
-      throw new Error('File storage is temporarily unavailable. Please try again in a few minutes.')
-    }
-  }
-  const meta = new TextEncoder().encode(JSON.stringify({
-    name: folderMarkerName(path),
-    mime: FOLDER_MARKER_MIME,
-  }))
-  let obj = new PinnedObject()
-  obj.updateMetadata(meta)
-  // "Smallest upload the SDK will pin (empty/tiny blob)." -- a
-  // zero-byte stream, same construction the WASM fallback in
-  // uploadFile() already uses for the desktop no-file dropzone case.
-  const stream = new ReadableStream({ start(c) { c.enqueue(new Uint8Array(0)); c.close() } })
-  const uploadOptions = { dataShards: 10, parityShards: 20 }
-  if (!window.___wtpoly___) uploadOptions.maxInflight = 10
-  obj = await sdk.upload(obj, stream, uploadOptions)
-  await sdk.pinObject(obj)
-  return obj
-}
+// createFolderMarker() REMOVED (2026-09-15,
+// "tessera-web-folder-create-fail"): "Stop pinning a marker on New
+// folder." This function used to pin a zero-byte object per empty
+// folder -- that upload always threw inside the WASM SDK's own
+// erasure-coding step (see the block comment above FOLDER_MARKER_MIME
+// for the confirmed root cause: encodedSize(0, 10, 20) === 0n, and the
+// WASM binary's own "data shards cannot be zero"/"EmptyShard" error
+// strings). Empty folders are now tracked virtually via
+// addVirtualFolder()/getVirtualFolders()/removeVirtualFolder() above
+// -- no SDK call, no upload, no pin, nothing that can throw.
 
 // ── download ────────────────────────────────────────────
 
