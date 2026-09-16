@@ -63,7 +63,7 @@ function cacheRefs() {
     'recoverScreen', 'recoverPhraseInput', 'btnRecoverContinue', 'recoverStatus',
     'unlockScreen', 'unlockPassword', 'btnUnlock', 'unlockStatus', 'btnForgotPassword',
     'filesScreen', 'dropzone', 'fileInput', 'fileList', 'fileActions',
-    'btnDownload', 'btnShare', 'btnDelete', 'btnRemoveBrowser',
+    'btnDownload', 'btnShare', 'btnDelete',
     'btnMove', 'btnRename',
     'btnNewFolder', 'breadcrumb', 'newFolderInline', 'newFolderInput',
     'btnNewFolderConfirm', 'btnNewFolderCancel',
@@ -255,9 +255,6 @@ const SKELETON = /*html*/`
         <button id="btnDelete" class="btn btn-danger" disabled>Delete</button>
       </div>
       <p id="statusText" class="status-text"></p>
-      <p style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border)">
-        <button id="btnRemoveBrowser" class="btn btn-ghost">Remove from this browser</button>
-      </p>
     </section>
 
     <aside id="mapPane" class="map-pane hidden">
@@ -342,7 +339,6 @@ export async function mountApp(container) {
   r.btnUnlock.addEventListener('click', onUnlock)
   r.btnForgotPassword.addEventListener('click', onForgotPassword)
   r.btnLock.addEventListener('click', onLock)
-  r.btnRemoveBrowser.addEventListener('click', onRemoveBrowser)
   r.btnHideMap.addEventListener('click', hideMap)
   r.btnShowMap.addEventListener('click', showMap)
   r.btnNewFolder.addEventListener('click', onNewFolder)
@@ -1811,6 +1807,20 @@ function onLock() {
 }
 
 function onRemoveBrowser() {
+  // ⚠️ UNUSED AS OF 2026-09-16 ("tessera-web-handoff adjustments"):
+  // the "Remove from this browser" button + its horizontal separator
+  // line were removed from the #filesScreen skeleton (and this
+  // function's own event listener wire-up removed) per explicit
+  // operator instruction: "Remove both. The space freed up is now
+  // part of the files-list area." This function's LOGIC was
+  // deliberately kept, unused, at the operator's own request ("Leave
+  // it in the code. Note it prominently.") in case the capability
+  // needs to be re-exposed elsewhere later -- it is not dead code by
+  // accident, do not delete it as part of an unrelated cleanup pass
+  // without checking with the operator first. clearCredentials(PREFIX)
+  // is still a real, correct call (deletes tesseraweb.* -- see the
+  // "lock / remove from this browser" law above); only the UI entry
+  // point to reach this function is gone.
   if (!confirm('Remove Tessera from this browser? You will need your 12 words to come back.')) return
   clearCredentials(PREFIX)
   patchState({
