@@ -33,6 +33,7 @@ import {
   computeAllFolderPaths, existingBasenamesInFolder, resolveCollisionName,
   validateRenameName, renameObjectPath,
   getMapShards, addMapShard,
+  getMapShownPref, setMapShownPref,
   filesUnderFolder, countFilesUnderFolder, renameFilePath,
   validateFolderRenameName, renameVirtualFolderPrefix, removeVirtualFolderPrefix,
 } from './files.js'
@@ -193,15 +194,23 @@ const SKELETON = /*html*/`
            logo." Moved here (was previously a full-width button below
            'Remove from this browser') and repositioned via CSS to
            absolute top-right, matching #btnHideMap's own corner
-           placement on the map pane -- "same pair as Hide map." -->
-      <button id="btnShowMap" class="btn btn-ghost btn-show-map hidden">Show map</button>
+           placement on the map pane -- "same pair as Hide map."
+           ALWAYS VISIBLE BY DEFAULT (2026-09-16, "tessera-web-handoff
+           adjustments", REVISES the prior "starts hidden until a map
+           has existed" law): "Show/hide link is always shown... on
+           first visit, initial state is hidden w/ the link shown."
+           No 'hidden' class on this button anymore -- enterFiles()'s
+           preference-restore logic (web-ui.js) is the only thing that
+           ever swaps it for #btnHideMap now, never boot-time CSS. -->
+      <button id="btnShowMap" class="btn btn-ghost btn-show-map">Show map</button>
       <!-- HIDE MAP MOVED (operator, 2026-09-15): "Instead of 'Hide map'
            being in the map pane, put it top right of file pane (where
            'Show map' is shown when map isn't)." Both buttons now live
            in the SAME top-right corner slot of #filesScreen
            (.btn-show-map's own absolute position) -- showMap()/
            hideMap() toggle which ONE of the two is visible, so they
-           never overlap. -->
+           never overlap. Starts hidden (the map itself starts hidden
+           by default -- see btnShowMap's own comment above). -->
       <button id="btnHideMap" class="btn btn-ghost btn-show-map hidden">Hide map</button>
       <!-- BREADCRUMB (2026-09-15, "tessera-web-folders-v1"): "Files >
            Photos > Italy. Files is root. Each segment is a tap." One
@@ -491,7 +500,33 @@ function renderScreen(s) {
   r.filesScreen.classList.toggle('hidden', s !== 'files')
   r.filesLayout.classList.toggle('hidden', s !== 'files')
   r.header.classList.toggle('hidden', s === 'loading' || s === 'welcome')
+  // VIEWPORT-CLAMPED PANEL (2026-09-16, "tessera-web-handoff
+  // adjustments" bug report): re-measure every time Files becomes the
+  // visible screen -- the panel was display:none an instant ago, so
+  // its own getBoundingClientRect().top is only meaningful right after
+  // it's back in the render tree.
+  if (s === 'files') clampFilesPanelHeight()
 }
+
+// clampFilesPanelHeight(): "The entire visible, scrollable list should
+// be contained within the files pane, which should not extend off the
+// page." #filesScreen's CSS rule (style.css, #filesLayout
+// .column-screen) makes it a column flexbox with #fileList as the one
+// growing/shrinking child -- this function only supplies the actual
+// max-height NUMBER, via a real getBoundingClientRect() measurement
+// (the panel's top offset moves with header wrap state and viewport
+// width, so a static calc() in CSS can't answer this correctly -- same
+// reasoning map.js's own ResizeObserver uses for the canvas). Leaves
+// an 18px breathing gap below the panel's own bottom edge to the
+// viewport bottom, matching this file's existing panel margins
+// (14px bottom margin + a few px, not a bespoke new number).
+function clampFilesPanelHeight() {
+  if (!r.filesScreen || r.filesScreen.classList.contains('hidden')) return
+  const top = r.filesScreen.getBoundingClientRect().top
+  const maxH = Math.max(200, window.innerHeight - top - 18)
+  r.filesScreen.style.maxHeight = maxH + 'px'
+}
+window.addEventListener('resize', clampFilesPanelHeight)
 
 // ── preload (background, never awaited by onboarding) ────
 //
@@ -782,6 +817,40 @@ async function enterFiles() {
   // check and file list load in the background instead of gating on it.
   patchState({ status: '' })
   refreshFiles().catch(e => console.warn('[tessera-web] initial file list load failed:', e.message))
+
+  // BACKGROUND MAP PRELOAD (2026-09-16, "tessera-web-handoff
+  // adjustments"): "When a user arrives on the files page, the map's
+  // shard-cache should begin loading in the background. This way, it
+  // does not cause a delay in later display of data, nor a delay in
+  // getting the files' page's other items to load." ensureMapController()
+  // creates the canvas controller and kicks off its own async init()
+  // (CDN topojson scripts + geo.json fetch, see map.js) and seeds it
+  // from the persisted mapshards records -- all of that already
+  // happens off the main synchronous path (init() is async, seedPins()
+  // is synchronous localStorage-only and cheap). Firing it here, NOT
+  // awaited, means it's warm by the time the user's first Add or first
+  // "Show map" click needs it, without blocking refreshFiles() or
+  // anything else on this screen. Previously this only ever ran lazily
+  // on first Add or first manual "Show map" click.
+  ensureMapController()
+  // MAP SHOW/HIDE PREFERENCE (2026-09-16, "tessera-web-handoff
+  // adjustments"): "On first visit, initial state is hidden w/ the
+  // link shown... If a user has chosen to hide map, then subsequent
+  // activity should not change show/hide status." getMapShownPref()
+  // returns null on a true first visit (no explicit preference ever
+  // set) -- in that case we leave the map hidden (the default DOM
+  // state already is) and do NOT call showMap()/hideMap() at all, so
+  // btnShowMap/btnHideMap stay exactly as the SKELETON's own hidden
+  // classes left them until doUpload()'s first-upload check (below)
+  // decides whether to reveal "Show map". If the user has an explicit
+  // prior preference (true or false, from a past visit's showMap()/
+  // hideMap() click), that preference is restored here so it survives
+  // a reload/relock -- entering Files must never silently reset it.
+  {
+    const pref = getMapShownPref()
+    if (pref === true) showMap(false)
+    else if (pref === false) hideMap(false)
+  }
 
   try {
     await waitForReady(sdk)
@@ -1301,7 +1370,28 @@ function ensureMapController() {
   return mapController
 }
 
-function showMap() {
+// showMap(persist)/hideMap(persist): the shared toggle logic behind
+// both the manual btnShowMap/btnHideMap click and the automatic first-
+// upload reveal / boot-time preference restore. `persist` (default
+// true) writes the new state to localStorage via setMapShownPref() --
+// callers that are only REPLAYING an already-persisted preference
+// (enterFiles()'s boot-time restore, above) pass persist=false so
+// restoring a preference on load can never itself count as a fresh
+// user choice or double-write the same value.
+//
+// SHOW/HIDE LINK ALWAYS VISIBLE (2026-09-16, "tessera-web-handoff
+// adjustments", REVISES the prior "tessera-web-map-follow" law):
+// "Show/hide link is always shown." Previously btnShowMap stayed
+// hidden until the map had been shown at least once this session
+// ("one pair of controls, no third layout" -- the old worry was a
+// user seeing "Show map" before there was anything to show). This
+// packet explicitly asks for the link to be visible from first paint
+// regardless of upload history, so hideMap() below no longer gates
+// btnShowMap's visibility on `mapController` truthiness -- the two
+// buttons still share the exact same corner slot and still never
+// both show at once, only the "only after a map has existed" gate on
+// btnShowMap itself is removed.
+function showMap(persist = true) {
   ensureMapController()
   r.filesScreen.classList.add('files-narrow')
   r.mapPane.classList.remove('hidden')
@@ -1311,18 +1401,18 @@ function showMap() {
   r.btnShowMap.classList.add('hidden')
   r.btnHideMap.classList.remove('hidden')
   mapShown = true
+  if (persist) setMapShownPref(true)
 }
 
-function hideMap() {
+function hideMap(persist = true) {
   r.filesScreen.classList.remove('files-narrow')
   r.mapPane.classList.add('hidden')
   r.btnHideMap.classList.add('hidden')
-  // Only offer "Show map" again if this browser has actually seen a map
-  // this session (btnShowMap stays hidden before the first Add ever
-  // shows one) -- "one pair of controls, no third layout."
-  if (mapController) r.btnShowMap.classList.remove('hidden')
+  r.btnShowMap.classList.remove('hidden')
   mapShown = false
+  if (persist) setMapShownPref(false)
 }
+
 
 // ── steady progress: interpolate between real shard ticks ─
 //
@@ -1376,7 +1466,18 @@ async function doUpload(file, destPathOverride) {
   // every reset, same zero-network seedPins() call ensureMapController
   // used at creation.
   if (mapController) { mapController.reset(); mapController.seedPins(getMapShards()) }
-  showMap()
+  // FIRST-UPLOAD-ONLY REVEAL (2026-09-16, "tessera-web-handoff
+  // adjustments"): "Upon a user's first upload only, map should be
+  // unhidden. From then on, user's map preference persists." Every
+  // upload used to force showMap() unconditionally; now that only
+  // happens when getMapShownPref() is still null (no explicit
+  // preference has EVER been recorded -- true first-visit, pre-first-
+  // upload state). Once any preference exists -- including the one
+  // this very call is about to set -- a later upload must never
+  // re-open a map the user explicitly hid. showMap() here persists
+  // (default persist=true), which is exactly right: this first reveal
+  // IS the moment the preference is born.
+  if (getMapShownPref() === null) showMap()
   stopEase()
   // BAR HOLD (2026-09-16, "tessera-web-encode-hold"): "The progress
   // bar does not exist yet. No bar during drop, Ready wait, or
@@ -1553,7 +1654,15 @@ async function onDownload() {
   // before. No hosts() call added here -- this only listens to shard
   // events the download was already making.
   if (mapController) { mapController.reset(); mapController.seedPins(getMapShards()) }
-  showMap()
+  // PREFERENCE RESPECTED (2026-09-16, "tessera-web-handoff
+  // adjustments"): "If a user has chosen to hide map, then subsequent
+  // activity should not change show/hide status." Mirrors doUpload's
+  // own fix -- a Download used to force showMap() unconditionally too,
+  // which would silently re-open a map the user had explicitly hidden.
+  // Only auto-reveal here on the same true-first-visit condition
+  // doUpload uses (no preference ever set); once ANY preference
+  // exists, Download respects it exactly like every other action.
+  if (getMapShownPref() === null) showMap()
   try {
     await downloadToDisk(sdk, sf.id, sf.name, ({ hostKey, direction, transferMs }) => {
       if (mapController && hostKey) mapController.landedHost(hostKey, direction, transferMs)

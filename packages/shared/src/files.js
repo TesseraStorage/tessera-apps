@@ -193,6 +193,35 @@ export function addMapShard(record) {
   localStorage.setItem(mapShardsKey(), JSON.stringify(trimmed))
 }
 
+// MAP SHOW/HIDE PREFERENCE (2026-09-16, "tessera-web-handoff
+// adjustments"): "User's map show/hide preference should persist. On
+// first visit, initial state is hidden. Upon a user's first upload
+// only, map should be unhidden. From then on, user's map preference
+// persists." Persisted the same way folders/mapshards already are --
+// one localStorage key under this browser's creds-prefix, tri-state
+// via presence: absent (never explicitly set = "first visit, no
+// upload yet") vs the literal strings 'shown'/'hidden' once the user
+// (or the one-time auto-unhide-on-first-upload rule) has set it.
+// getMapShownPref() returning null (not a boolean) is the signal
+// "no explicit preference yet" -- callers must NOT treat null as
+// false, or the first-visit/first-upload distinction collapses.
+const MAP_SHOWN_KEY_SUFFIX = '.mapshown'
+
+function mapShownKey() {
+  return _credsPrefix + MAP_SHOWN_KEY_SUFFIX
+}
+
+export function getMapShownPref() {
+  const raw = localStorage.getItem(mapShownKey())
+  if (raw === 'shown') return true
+  if (raw === 'hidden') return false
+  return null  // no explicit preference yet (first visit, pre-first-upload)
+}
+
+export function setMapShownPref(shown) {
+  localStorage.setItem(mapShownKey(), shown ? 'shown' : 'hidden')
+}
+
 // folderMarkerName(path): the metadata `name` a LEGACY folder marker
 // object (pinned by the original folders-v1 design, before this fix)
 // would have used -- always path + '/'. Still exported/used by

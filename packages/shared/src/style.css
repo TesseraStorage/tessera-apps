@@ -454,6 +454,26 @@ input:focus { border-color: var(--cyan); }
   max-height: 55vh;
   overflow-y: auto;
 }
+/* VIEWPORT-CLAMPED PANEL (2026-09-16, "tessera-web-handoff
+   adjustments" bug report): inside #filesScreen (now a clamped column
+   flexbox -- see #filesLayout .column-screen's own comment above),
+   #fileList (id selector always wins over the plain .file-list rule
+   above, no !important needed) drops the fixed 55vh cap and instead
+   grows/shrinks to fill whatever room is left after every sibling
+   (breadcrumb, toolbar, progress bar, actions bar, Remove-from-
+   browser line) takes its own natural height -- this is what keeps
+   the WHOLE panel pinned inside the viewport regardless of screen
+   height or how many of those siblings are visible at once, with only
+   this one element ever growing a scrollbar. min-height:0 is required
+   here because a flex child's default min-height is auto (= its
+   content size), which would otherwise let this list's real content
+   height push #filesScreen taller than its own max-height instead of
+   actually shrinking to scroll. */
+#fileList {
+  max-height: none;
+  flex: 1 1 auto;
+  min-height: 0;
+}
 /* COPY (2026-09-15, "tessera-web-look-v1"): the ":empty::after" rule that
    lived here never actually fired -- renderFileList() (web-ui.js) always
    inserts a real .empty-state child when files.length is 0, so
@@ -680,7 +700,39 @@ input:focus { border-color: var(--cyan); }
      of map state. ".files-narrow" is still toggled by JS as a state
      hook but carries no CSS rule of its own.
 
-     GUTTER FIX (operator, 2026-09-15): the base .column-screen rule
+     VIEWPORT-CLAMPED PANEL (2026-09-16, "tessera-web-handoff
+     adjustments" bug report): "the list extends beyond the bottom of
+     the visible page... The entire visible, scrollable list should be
+     contained within the files pane, which should not extend off the
+     page." Root cause: #filesScreen itself (breadcrumb, toolbar,
+     progress bar, #fileList, actions bar, Remove-from-browser line)
+     had no height cap at all -- only #fileList's OWN max-height:55vh
+     capped the list's internal scroll, but the outer panel was free
+     to grow past the viewport bottom as more rows/other content
+     stacked above it, which ALSO silently broke click hit-testing on
+     any row that ended up rendered below the visible fold (confirmed
+     live: dispatchMouseEvent at real screen coordinates on an
+     off-viewport row hit nothing, while .click() on the same detached
+     element still fired -- the row was never botched, it just was
+     never reachable by a real pointer). FIX: #filesScreen becomes a
+     column flexbox with #fileList (id selector, wins over the plain
+     .file-list 55vh rule below) as the ONE flex child that grows/
+     shrinks and owns the actual scrollbar -- every sibling
+     (breadcrumb, toolbar, progress, actions bar, Remove-from-browser)
+     keeps its natural height and is never clipped or pushed
+     off-screen. The actual max-height VALUE is set inline by
+     clampFilesPanelHeight() in web-ui.js (not a static calc() here --
+     the panel's real top offset depends on header wrap state/viewport
+     width, which only a real getBoundingClientRect() measurement can
+     answer correctly, same pattern this file already uses for the map
+     canvas's own ResizeObserver). This rule only establishes the flex
+     structure; max-height defaults to none until JS sets it, so the
+     unclamped page still renders correctly before that first
+     measurement runs. */
+  display: flex;
+  flex-direction: column;
+
+  /* GUTTER FIX (operator, 2026-09-15): the base .column-screen rule
      uses "margin: <top> auto <bottom>" -- those AUTO left/right
      margins, when this element is a flex item inside #filesLayout
      (display:flex), absorb free space in the flex row instead of
