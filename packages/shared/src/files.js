@@ -14,6 +14,46 @@ import { PinnedObject } from './sdk.js'
 import { proxyOrigin } from './utils.js'
 import { checkTunnelReachable } from './interceptor.js'
 
+// CONCURRENCY TUNABLES (2026-09-16, "tessera-web-inflight-v2" — REVISES
+// "tessera-web-inflight" 2026-09-14, whose own maxInflight fix never
+// actually worked; see that packet's own recon report for the full
+// trace). One-line-to-revert switches, deliberately kept as their own
+// named exported constants at the top of the file (same convention as
+// MAP_SHARDS_CAP below) rather than inlined at each call site, so a
+// bad real-world result can be undone by changing ONE number back, or
+// by setting either to `null` to fully restore stock SDK behavior
+// (both options are genuinely optional -- see UploadOptions/
+// DownloadOptions in sia_storage_wasm.d.ts -- so `null` here always
+// means "don't pass this key at all", never "pass zero").
+//
+// UPLOAD_MAX_BUFFERED_SLABS: replaces the dead `maxInflight: 10` (that
+// option was removed from the SDK before our installed version --
+// silently ignored, never had any effect). This is the REAL, still-
+// live knob: it raises the ceiling the SDK's own adaptive inflight
+// controller (congestion.rs, stock, untouched by us) is allowed to
+// climb toward -- we are NOT hardcoding a fixed concurrency number,
+// only raising the ceiling that existing adaptive logic already
+// climbs toward on its own. Cap in shard-slots = value * 30 (Tessera's
+// fixed 10+20 shard layout); cap in bytes = value * 120 MiB (30 shards
+// * 4 MiB SECTOR_SIZE per shard). 4 -> 480 MiB peak buffer, comfortably
+// above the controller's own doubling path (8 -> 16 -> 32 -> 64 ->
+// clamped at 120) without over-committing a browser tab's memory.
+// Stock WASM default (used when this is `null`) is a hardcoded `2`
+// (60 slots / 240 MiB) -- see sia_storage/src/upload.rs's own
+// #[cfg(target_arch = "wasm32")] default_slabs_in_memory().
+export const UPLOAD_MAX_BUFFERED_SLABS = 4   // null = stock WASM default (2)
+
+// DOWNLOAD_MAX_BUFFERED_CHUNKS: the operator's own stated intent was
+// "concurrency on downloads was intended to be 10" -- stock WASM
+// default is already 32 (see sia_storage/src/download.rs's own
+// default_chunks_in_memory(), #[cfg(target_arch = "wasm32")] branch),
+// which already comfortably exceeds 10, so nothing was ever actually
+// capping downloads below the intended value. Set explicitly anyway
+// (matching, not raising, the current default) purely so the intent
+// is self-documented in OUR code instead of relying silently on a
+// value we don't control living upstream.
+export const DOWNLOAD_MAX_BUFFERED_CHUNKS = 32   // null = stock WASM default (32) -- explicit here only to document intent, not to change behavior
+
 // FOLDERS (2026-09-15, "tessera-web-folders-v1", REVISED 2026-09-15
 // "tessera-web-folder-create-fail"): "The SDK has no directories. A
 // folder is a prefix on the object's existing metadata name." Forward
@@ -868,19 +908,31 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
   }
 
   const uploadOptions = { dataShards, parityShards, onShardUploaded }
-  // FIX (2026-09-14, "tessera-web-inflight"): "Faster shard writes."
-  // maxInflight is the stock SDK's own documented upload option (see
-  // node_modules/@siafoundation/sia-storage/README.md's own Uploading
-  // example: `{ maxInflight: 10 }`) -- not invented here. Gated on
-  // window.___wtpoly___ exactly like the tunnel-preflight gate above:
-  // false only for Tessera Web's native-WebTransport path (initSia('idx')
-  // skipped the shim), true for Drop's default shimmed/tunnel path. Per
-  // packet law ("default maxInflight only when the Web prefix path
-  // runs"), Drop's call site through this same shared function is
-  // unchanged -- it still gets plain { dataShards, parityShards,
-  // onShardUploaded } with no maxInflight key at all, identical to
-  // before this task.
-  if (!window.___wtpoly___) uploadOptions.maxInflight = 10
+  // FIX (2026-09-16, "tessera-web-inflight-v2" — REVISES/CORRECTS
+  // "tessera-web-inflight" 2026-09-14): the OLD `maxInflight: 10` line
+  // that used to sit here has been REMOVED, not just renamed --
+  // confirmed via a live recon (2026-09-16) that `maxInflight` was
+  // dropped from the SDK's UploadOptions before our installed version
+  // (@siafoundation/sia-storage 0.0.14 / wasm crate v0.5.0): absent
+  // from the shipped .d.ts, absent from the compiled .wasm's own
+  // option-key string table, and confirmed via SiaFoundation's own
+  // create-sia-app PR #8 ("drop the maxInflight option it no longer
+  // accepts"). It was a silent no-op the entire time it existed here --
+  // never threw, never logged, just discarded by the wasm boundary.
+  // maxBufferedSlabs (below) is the REAL replacement: it raises the
+  // ceiling the SDK's own stock adaptive inflight controller climbs
+  // toward, rather than setting any fixed concurrency number ourselves
+  // -- see UPLOAD_MAX_BUFFERED_SLABS's own top-of-file comment for the
+  // full memory-budget math and revert instructions. Gated on
+  // window.___wtpoly___ exactly like the old line was: false only for
+  // Tessera Web's native-WebTransport path (initSia('idx') skipped the
+  // shim), true for Drop's default shimmed/tunnel path -- Drop's call
+  // site through this same shared function is unchanged, still gets
+  // plain { dataShards, parityShards, onShardUploaded } with no extra
+  // key at all, identical to before this task.
+  if (!window.___wtpoly___ && UPLOAD_MAX_BUFFERED_SLABS != null) {
+    uploadOptions.maxBufferedSlabs = UPLOAD_MAX_BUFFERED_SLABS
+  }
 
   // FIX (2026-09-15, "tessera-web-folder-create-fail"): "Add must not
   // hang with no error... No 5-minute bar. No silent freeze." The OLD
@@ -1016,8 +1068,19 @@ export async function downloadToDisk(sdk, objOrId, filename, onProgress) {
   // fallback path below can light up cyan arcs this packet.
   const downloadOptions = onProgress
     ? { onShardDownloaded: (ev) => onProgress({ hostKey: ev && ev.hostKey, direction: 'download', transferMs: ev && ev.elapsedMs }) }
-    : undefined
-  const stream = sdk.download(obj, downloadOptions)
+    : {}
+  // FIX (2026-09-16, "tessera-web-inflight-v2"): operator's stated
+  // intent was "concurrency on downloads was intended to be 10" --
+  // stock WASM default (DOWNLOAD_MAX_BUFFERED_CHUNKS's own top-of-file
+  // comment has the full citation) is already 32, comfortably above
+  // 10, so nothing was ever actually capping this below the intended
+  // value. Set explicitly anyway so the intent lives in OUR code, not
+  // silently in an upstream default we don't control the value of --
+  // this line is a documentation/safety net, not a behavior change.
+  if (DOWNLOAD_MAX_BUFFERED_CHUNKS != null) {
+    downloadOptions.maxBufferedChunks = DOWNLOAD_MAX_BUFFERED_CHUNKS
+  }
+  const stream = sdk.download(obj, Object.keys(downloadOptions).length ? downloadOptions : undefined)
   const blob = await new Response(stream).blob()
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
