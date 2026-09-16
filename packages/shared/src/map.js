@@ -577,31 +577,37 @@ export function createUploadMap(canvas, captionEl, onLanded) {
   // shardLanded: the per-shard entry point (2026-09-15, "tessera-web-
   // map-follow"). Draws one trip (arc + DOTS_PER_ARC traveling dots).
   //
-  // FLOOR (2026-09-16, "tessera-web-encode-hold", FIXED same day per
-  // operator bug report): `transferMs` is the shard's own real
-  // send->finish duration (ShardProgress.elapsedMs, the SDK's OWN
-  // field, per sia_storage_wasm.d.ts -- not invented here). The line
-  // is only ever DRAWN starting at `now` (shard landing/completion --
-  // there is no earlier SDK event to draw it from), but the shard
-  // already spent `transferMs` invisibly in flight BEFORE that. So
-  // "each line lasts max(5s, real transfer), per individual line" means
-  // the line's TOTAL lifetime -- counted from when the shard's transfer
-  // actually started, not from when we started drawing it -- must equal
-  // max(LINE_FLOOR_MS, transferMs). Since transferMs of that lifetime
-  // already elapsed invisibly, the line only needs to stay opaque AFTER
-  // landing for the remainder: max(0, LINE_FLOOR_MS - transferMs).
-  //   - transferMs = 2000 (2s write): extra = 5000-2000 = 3000ms visible
-  //     after landing -- total lifetime (2000 invisible + 3000 visible)
-  //     = 5000ms = the 5s floor. Matches "a 2-second write shows for 5
-  //     seconds total."
-  //   - transferMs = 8000 (8s write): extra = max(0, 5000-8000) = 0 --
-  //     the line starts fading THE INSTANT it lands. Total lifetime (8000
-  //     invisible + 0 visible-before-fade) = 8000ms = the write's own
-  //     time. Matches "an 8-second write begins fade at 8 seconds."
-  // The OLD formula (`now + max(floor, transferMs)`) double-counted
-  // transferMs -- an 8s write got 8s floor-extra ON TOP of its already-
-  // elapsed 8s, i.e. stayed opaque until 16s post-landing instead of
-  // fading immediately. This is the bug the operator reported.
+  // FLOOR (2026-09-16, "tessera-web-encode-hold", CORRECTED again same
+  // day per third operator report): `transferMs` is the shard's own
+  // real send->finish duration (ShardProgress.elapsedMs, the SDK's OWN
+  // field, per sia_storage_wasm.d.ts -- not invented here).
+  //
+  // The line can ONLY ever be drawn starting at `now` (shard landing --
+  // there is no earlier SDK event to draw it from, confirmed by
+  // grepping onShardUploaded/onShardDownloaded's own signature). A
+  // PRIOR version of this function tried to compensate for that by
+  // subtracting transferMs from the floor (`extra = max(0, 5000 -
+  // transferMs)`), reasoning the shard had already "used up" some of
+  // its 5s allotment invisibly in flight. That was wrong and caused the
+  // reported "lines disappearing at ~1 second" bug: for any write whose
+  // transferMs was close to (but under) LINE_FLOOR_MS, the remaining
+  // hold time shrank toward zero, so the line barely held before
+  // fading. The operator's restated rule, read strictly from the line's
+  // own visible lifetime (landing onward, since that's all a viewer
+  // ever sees): "write ends in under 5s -> line persists, outliving
+  // the write by a few seconds [i.e. holds a FLAT 5s post-landing].
+  // write ends past 5s -> fade starts immediately [no extra hold]."
+  // So this is a binary choice, not a subtraction:
+  //   - transferMs < LINE_FLOOR_MS: hold opaque for the FULL
+  //     LINE_FLOOR_MS after landing, then fade -- matches "a 2-second
+  //     write shows for [a full] 5 seconds [after landing], then
+  //     fades."
+  //   - transferMs >= LINE_FLOOR_MS: no extra hold -- fade starts the
+  //     instant the line is drawn -- matches "an 8-second write begins
+  //     fade at 8 seconds [i.e. right when it lands, with zero hold]."
+  // `transferMs` missing/invalid (undefined, NaN, <=0) is treated as
+  // "under the floor" (gets the full hold) -- a caller with no real
+  // number to report should never accidentally get the zero-hold path.
   function shardLanded(hostKey, dir, transferMs) {
     if (!hostKey) return
     const geo = geoLookup(hostKey)
@@ -610,7 +616,7 @@ export function createUploadMap(canvas, captionEl, onLanded) {
     if (!geo) return
     const now = Date.now()
     const realTransferMs = (typeof transferMs === 'number' && transferMs > 0) ? transferMs : 0
-    const extraAfterLanding = Math.max(0, LINE_FLOOR_MS - realTransferMs)
+    const extraAfterLanding = (realTransferMs >= LINE_FLOOR_MS) ? 0 : LINE_FLOOR_MS
     trips.push({ lat: geo.lat, lon: geo.lon, hostKey, dir: dir || 'upload', startedAt: now, visibleUntil: now + extraAfterLanding, fadeAt: now })
 
     // Dispersed pin (law #5): index is this host's shard count BEFORE
