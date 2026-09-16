@@ -257,20 +257,22 @@ function drawGlow(ctx, x, y, r, color) {
   ctx.fill()
 }
 
-// FIXED-DOT LOOK (2026-09-16, "sharper fixed dots"): "make them 2x2
-// pixels, as bright as the system enables, then a modest halo around
-// each." Used for the origin mark and landed-shard pins only -- the
-// old wide drawGlow() core (radius = PIN_RADIUS, soft radial falloff
-// from center) read as a blur with no crisp point. This keeps a halo
-// (still a radialGradient, just tighter/dimmer than before) but adds a
-// genuinely sharp core: a solid, non-antialiased-looking 2x2 device-
-// pixel square at full alpha (1), drawn with fillRect (not arc/fill,
-// which always antialiases a circle's edge at this size) so the core
-// itself reads as sharp rather than a blurred nub. Halo radius is
-// deliberately modest (6px) vs. the fixed dot's old PIN_RADIUS-based
-// glow -- "modest," not the previous wide wash.
+// FIXED-DOT LOOK (2026-09-16, "sharper fixed dots", refined same day
+// per operator reaction to the 2x2 version -- "try one pixel, halo a
+// little dimmer"): "make them 2x2 pixels, as bright as the system
+// enables, then a modest halo around each." Used for the origin mark
+// and landed-shard pins only -- the old wide drawGlow() core (radius =
+// PIN_RADIUS, soft radial falloff from center) read as a blur with no
+// crisp point. This keeps a halo (still a radialGradient, just
+// tighter/dimmer than before) but adds a genuinely sharp core: a
+// solid, non-antialiased-looking 1x1 device-pixel square at full alpha
+// (1), drawn with fillRect (not arc/fill, which always antialiases a
+// circle's edge at this size) so the core itself reads as sharp rather
+// than a blurred nub. Halo radius is deliberately modest (6px) vs. the
+// fixed dot's old PIN_RADIUS-based glow -- "modest," not the previous
+// wide wash; halo alpha dimmed further (0.45 -> 0.3) same day.
 const FIXED_DOT_HALO_RADIUS = 6
-const FIXED_DOT_HALO_ALPHA = 0.45  // halo peak alpha; core is always 1 (opaque)
+const FIXED_DOT_HALO_ALPHA = 0.3  // halo peak alpha; core is always 1 (opaque)
 
 function drawSharpDot(ctx, x, y, color) {
   // Modest halo first (so the core paints on top, not underneath it).
@@ -282,11 +284,11 @@ function drawSharpDot(ctx, x, y, color) {
   ctx.arc(x, y, FIXED_DOT_HALO_RADIUS, 0, Math.PI * 2)
   ctx.fill()
 
-  // Sharp 2x2 core, full brightness -- device pixels, not CSS px, so
+  // Sharp 1x1 core, full brightness -- device pixels, not CSS px, so
   // it stays crisp under devicePixelRatio scaling the canvas already
   // applies elsewhere in this file.
   ctx.fillStyle = color
-  ctx.fillRect(Math.round(x) - 1, Math.round(y) - 1, 2, 2)
+  ctx.fillRect(Math.round(x), Math.round(y), 1, 1)
 }
 
 function bezierPoint(t, ox, oy, midX, midY, x, y) {
