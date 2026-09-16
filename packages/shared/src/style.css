@@ -376,6 +376,46 @@ input:focus { border-color: var(--cyan); }
   align-self: center;
 }
 
+/* ── new folder inline field (Apple A, 2026-09-16) ────── */
+.new-folder-inline {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 14px;
+}
+.new-folder-inline input {
+  flex: 1;
+}
+
+/* ── folder drop target (Apple A, 2026-09-16) ──────────── */
+.folder-drop-target {
+  background: rgba(6, 182, 212, 0.12);
+  border-color: var(--cyan-dim);
+}
+
+/* ── move modal list (Apple A, 2026-09-16) ─────────────── */
+.move-modal-list {
+  max-height: 300px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 10px 0;
+}
+.move-modal-row {
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  text-align: left;
+  font-size: 14px;
+  color: var(--ink);
+  border: 1px solid transparent;
+}
+.move-modal-row:hover {
+  background: var(--surface2);
+  border-color: var(--border2);
+}
+
 /* ── drag & drop zone ─────────────────────────────────── */
 .dropzone {
   border: 2px dashed var(--border2);

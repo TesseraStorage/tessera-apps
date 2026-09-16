@@ -30,6 +30,8 @@ import {
   buildPath, folderMarkerName, validateFolderName, computeFolderView,
   isNonEmptyFolder, findFolderMarkerId,
   getVirtualFolders, addVirtualFolder, removeVirtualFolder,
+  computeAllFolderPaths, existingBasenamesInFolder, resolveCollisionName,
+  validateRenameName, renameObjectPath,
 } from './files.js'
 import { createUploadMap } from './map.js'
 import {
@@ -58,10 +60,14 @@ function cacheRefs() {
     'unlockScreen', 'unlockPassword', 'btnUnlock', 'unlockStatus', 'btnForgotPassword',
     'filesScreen', 'dropzone', 'fileInput', 'fileList', 'fileActions',
     'btnDownload', 'btnShare', 'btnDelete', 'btnRemoveBrowser',
+    'btnMove', 'btnRename',
     'btnNewFolder', 'breadcrumb',
     'filesLayout', 'btnShowMap', 'mapPane', 'btnHideMap', 'mapCanvas',
     'statusText', 'progressWrap', 'progressFill', 'progressLabel',
     'shareModal', 'shareLink', 'btnCopyLink', 'btnCloseModal',
+    'textInputModal', 'textInputTitle', 'textInputField', 'textInputError',
+    'btnTextInputConfirm', 'btnTextInputCancel',
+    'moveModal', 'moveModalList', 'btnMoveCancel',
     'toast',
   ]
   for (const id of ids) r[id] = $(id)
@@ -208,6 +214,17 @@ const SKELETON = /*html*/`
         </div>
         <button id="btnNewFolder" class="btn btn-outline btn-new-folder">New folder</button>
       </div>
+      <!-- NEW FOLDER INLINE FIELD (Apple A, 2026-09-16): "In-page name
+           field in the current place. Not window.prompt." Hidden by
+           default; onNewFolder() shows it and focuses the input instead
+           of calling prompt(). Same look family as other inline inputs
+           (.new-folder-inline reuses the standard input[type=text] +
+           .btn styles, no new component). -->
+      <div id="newFolderInline" class="new-folder-inline hidden">
+        <input type="text" id="newFolderInput" placeholder="Folder name" autocomplete="off" maxlength="64">
+        <button id="btnNewFolderConfirm" class="btn btn-primary">Create</button>
+        <button id="btnNewFolderCancel" class="btn btn-ghost">Cancel</button>
+      </div>
       <input type="file" id="fileInput" hidden>
 
       <div id="progressWrap" class="progress-wrap hidden">
@@ -220,6 +237,8 @@ const SKELETON = /*html*/`
       <div id="fileActions" class="actions-bar hidden">
         <button id="btnDownload" class="btn" disabled>Download</button>
         <button id="btnShare" class="btn" disabled>Share</button>
+        <button id="btnMove" class="btn" disabled>Move</button>
+        <button id="btnRename" class="btn" disabled>Rename</button>
         <button id="btnDelete" class="btn btn-danger" disabled>Delete</button>
       </div>
       <p id="statusText" class="status-text"></p>
@@ -248,6 +267,36 @@ const SKELETON = /*html*/`
       <div class="modal-buttons">
         <button id="btnCopyLink" class="btn btn-primary">Copy link</button>
         <button id="btnCloseModal" class="btn btn-ghost">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- RENAME MODAL (Apple A, 2026-09-16): "In-page name. Same collision
+       rule in the current folder. Metadata only. No re-upload." Reuses
+       the same modal-card look as Share -- no new component family. -->
+  <div id="textInputModal" class="modal-overlay hidden">
+    <div class="modal-card">
+      <h3 id="textInputTitle">Rename</h3>
+      <input type="text" id="textInputField" autocomplete="off">
+      <p id="textInputError" class="status-text"></p>
+      <div class="modal-buttons">
+        <button id="btnTextInputConfirm" class="btn btn-primary">Rename</button>
+        <button id="btnTextInputCancel" class="btn btn-ghost">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MOVE MODAL (Apple A, 2026-09-16): "Move -> pick Root or a folder
+       that already exists (virtual or inferred)." A flat list of every
+       known folder path plus Root -- no tree widget invented, matching
+       the packet's own "existing row select is fine" framing for the
+       source file. -->
+  <div id="moveModal" class="modal-overlay hidden">
+    <div class="modal-card">
+      <h3>Move to&hellip;</h3>
+      <div id="moveModalList" class="move-modal-list"></div>
+      <div class="modal-buttons">
+        <button id="btnMoveCancel" class="btn btn-ghost">Cancel</button>
       </div>
     </div>
   </div>
@@ -284,6 +333,15 @@ export async function mountApp(container) {
   r.btnHideMap.addEventListener('click', hideMap)
   r.btnShowMap.addEventListener('click', showMap)
   r.btnNewFolder.addEventListener('click', onNewFolder)
+  r.btnNewFolderConfirm.addEventListener('click', onNewFolderConfirm)
+  r.btnNewFolderCancel.addEventListener('click', onNewFolderCancel)
+  r.newFolderInput.addEventListener('keydown', e => { if (e.key === 'Enter') onNewFolderConfirm() })
+  r.btnMove.addEventListener('click', onMove)
+  r.btnMoveCancel.addEventListener('click', closeMoveModal)
+  r.btnRename.addEventListener('click', onRename)
+  r.btnTextInputConfirm.addEventListener('click', onTextInputConfirm)
+  r.btnTextInputCancel.addEventListener('click', closeTextInputModal)
+  r.textInputField.addEventListener('keydown', e => { if (e.key === 'Enter') onTextInputConfirm() })
   r.breadcrumb.addEventListener('click', onBreadcrumbClick)
 
   r.dropzone.addEventListener('click', () => r.fileInput.click())
@@ -337,6 +395,8 @@ export async function mountApp(container) {
     const sf = selectedFile()
     r.btnDownload.disabled = v || !sf
     r.btnShare.disabled = v || !sf
+    r.btnMove.disabled = v || !sf
+    r.btnRename.disabled = v || !sf
     r.btnDelete.disabled = v || !sf
   })
   subscribe('files', () => { renderFileList(); updateTotals() })
@@ -346,6 +406,8 @@ export async function mountApp(container) {
     const sf = selectedFile()
     r.btnDownload.disabled = !sf || getState().busy
     r.btnShare.disabled = !sf || getState().busy
+    r.btnMove.disabled = !sf || getState().busy
+    r.btnRename.disabled = !sf || getState().busy
     r.btnDelete.disabled = !sf || getState().busy
     r.fileActions.classList.toggle('hidden', !sf)
   })
@@ -795,6 +857,35 @@ function renderFileList() {
       e.stopPropagation()
       onDeleteFolder(folder.path, folder.name)
     })
+    // DROP TARGET (Apple A, 2026-09-16): "Drop an already-listed file
+    // onto a folder row: same move, not a new upload." AND "Drop a
+    // desktop File onto a folder row: Add into that folder." Both
+    // land on this same row -- the drop handler below distinguishes
+    // by dataTransfer contents (internal drag carries our own
+    // text/x-tessera-file-id type; an OS drop carries real
+    // e.dataTransfer.files).
+    row.addEventListener('dragover', (e) => {
+      e.preventDefault()
+      row.classList.add('folder-drop-target')
+    })
+    row.addEventListener('dragleave', () => row.classList.remove('folder-drop-target'))
+    row.addEventListener('drop', (e) => {
+      e.preventDefault()
+      row.classList.remove('folder-drop-target')
+      const osFiles = e.dataTransfer.files
+      if (osFiles && osFiles.length) {
+        // Desktop File dropped on a folder row: Add into that folder --
+        // one occupy, same as Add, per law. enqueueUpload's own
+        // metaName resolution already reads getState().currentPath at
+        // upload time, so temporarily targeting this folder for the
+        // single queued upload reuses the exact same Add path (no
+        // second upload mechanism invented here).
+        enqueueUploadIntoFolder(osFiles[0], folder.path)
+        return
+      }
+      const draggedId = e.dataTransfer.getData('text/x-tessera-file-id')
+      if (draggedId) moveFileTo(draggedId, folder.path)
+    })
     r.fileList.appendChild(row)
   }
 
@@ -802,6 +893,7 @@ function renderFileList() {
     const realIdx = files.findIndex(x => x.id === f.id)
     const row = document.createElement('div')
     row.className = 'file-row' + (realIdx === selectedIdx ? ' selected' : '')
+    row.draggable = true
     row.innerHTML =
       '<div class="file-info">' +
         '<span class="file-name">' + esc(f.displayName) + '</span>' +
@@ -809,6 +901,17 @@ function renderFileList() {
       '</div>' +
       '<span class="file-size">' + esc(formatBytes(f.size)) + '</span>'
     row.addEventListener('click', () => patchState({ selectedIdx: realIdx }))
+    // DRAG SOURCE (Apple A, 2026-09-16): "Drop an already-listed file
+    // onto a folder row: same move." Carries only the file's real id
+    // (its own metadata.name full path is looked up fresh from state
+    // in moveFileTo() at drop time, never trusted from a stale drag
+    // payload) via a custom MIME type that no OS drag ever produces,
+    // so the drop handler above can tell "our own row" apart from a
+    // real desktop-file drop unambiguously.
+    row.addEventListener('dragstart', (e) => {
+      e.dataTransfer.setData('text/x-tessera-file-id', f.id)
+      e.dataTransfer.effectAllowed = 'move'
+    })
     r.fileList.appendChild(row)
   }
 }
@@ -837,10 +940,14 @@ function onBreadcrumbClick(e) {
   gotoFolder(path)
 }
 
-// onNewFolder(): "Control: New folder next to Add... Prompt for a
-// name. Reject empty, /, ., ... Trim. Max 64 characters." Uses the
-// native prompt() (same UI family as onDelete's confirm() below --
-// look-v1 law: "no new icon font," no custom modal invented here).
+// onNewFolder(): "Control: New folder next to Add... In-page name
+// field in the current place. Not window.prompt. Reject empty, /, .,
+// .. . Trim. Max 64 characters." (Apple A, 2026-09-16, REVISED from
+// this packet's own "Homegrown 'folder is a label' is done" law --
+// the prior window.prompt()-based implementation is exactly the thing
+// this packet asks to stop doing.) Shows the inline field next to the
+// New folder button instead of a native prompt; Cancel/blur/Escape
+// close it with no side effect.
 //
 // FOLDER-CREATE-FAIL FIX (2026-09-15, "tessera-web-folder-create-fail"):
 // no longer calls the SDK at all. The original design pinned a
@@ -853,8 +960,18 @@ function onBreadcrumbClick(e) {
 // sdk needed at all (removed the sdk-missing early-return since
 // there's no SDK call left to guard).
 function onNewFolder() {
-  const raw = prompt('New folder name:')
-  if (raw === null) return  // cancelled
+  r.newFolderInput.value = ''
+  r.newFolderInline.classList.remove('hidden')
+  r.newFolderInput.focus()
+}
+
+function onNewFolderCancel() {
+  r.newFolderInline.classList.add('hidden')
+  r.newFolderInput.value = ''
+}
+
+function onNewFolderConfirm() {
+  const raw = r.newFolderInput.value
   const { ok, error, name } = validateFolderName(raw)
   if (!ok) { showToast(error); return }
   const { currentPath, files } = getState()
@@ -869,6 +986,7 @@ function onNewFolder() {
     return
   }
   addVirtualFolder(path)
+  onNewFolderCancel()
   renderFileList()
   showToast('\u{1F4C1} Folder created: ' + name)
 }
@@ -877,6 +995,145 @@ function onFilePicked() {
   const f = r.fileInput.files && r.fileInput.files[0]
   r.fileInput.value = ''
   if (f) enqueueUpload(f)
+}
+
+// ── move / rename (Apple A, 2026-09-16) ──────────────────
+//
+// LAW: "Move is metadata only (updateMetadata + updateObjectMetadata).
+// No second 10+20. No sdk.upload." renameObjectPath() in files.js
+// makes exactly those two calls -- no hosts(), no upload(). Both Move
+// and Rename funnel through the same collision-resolution +
+// renameObjectPath() pair; they differ only in which piece of the
+// full path changes (destination directory vs. basename).
+
+let _moveTargetId = null  // file id the open Move modal is acting on
+
+function onMove() {
+  const sf = selectedFile(); if (!sf) return
+  _moveTargetId = sf.id
+  const { files } = getState()
+  const allFolders = computeAllFolderPaths(files, getVirtualFolders())
+  r.moveModalList.innerHTML = ''
+  const rootRow = document.createElement('div')
+  rootRow.className = 'move-modal-row'
+  rootRow.textContent = 'Root'
+  rootRow.addEventListener('click', () => { closeMoveModal(); moveFileTo(sf.id, '') })
+  r.moveModalList.appendChild(rootRow)
+  for (const path of allFolders) {
+    const row = document.createElement('div')
+    row.className = 'move-modal-row'
+    row.textContent = path
+    row.addEventListener('click', () => { closeMoveModal(); moveFileTo(sf.id, path) })
+    r.moveModalList.appendChild(row)
+  }
+  r.moveModal.classList.remove('hidden')
+}
+
+function closeMoveModal() {
+  r.moveModal.classList.add('hidden')
+  _moveTargetId = null
+}
+
+// moveFileTo(objectId, destPath): "Rewrite metadata.name to
+// dest/basename (or basename at Root). Then sdk.updateObjectMetadata.
+// Stay in the current list after move (file disappears from here if
+// dest is elsewhere)." No hosts() call (law: "hosts() on move: no").
+// Collision rule applies at the DESTINATION, per "Applies to Move and
+// to Add-into-folder and to Add at Root."
+async function moveFileTo(objectId, destPath) {
+  const sdk = getState().sdk; if (!sdk) return
+  const { files } = getState()
+  const src = files.find(f => f.id === objectId)
+  if (!src) return
+  const slashIdx = src.name.lastIndexOf('/')
+  const basename = slashIdx === -1 ? src.name : src.name.slice(slashIdx + 1)
+  const siblingNames = existingBasenamesInFolder(files, destPath, objectId)
+  const finalBasename = resolveCollisionName(siblingNames, basename)
+  const newFullName = buildPath(destPath, finalBasename)
+  if (newFullName === src.name) return  // no-op move (same folder, same name)
+  setBusy(true); patchState({ status: 'Moving\u2026' })
+  try {
+    await renameObjectPath(sdk, objectId, newFullName)
+    await refreshFiles()
+    patchState({ status: '' })
+    showToast('\u{1F4C1} Moved: ' + finalBasename)
+  } catch (e) {
+    patchState({ status: 'Could not move this file. Try again.' })
+    console.error(e)
+  } finally { setBusy(false) }
+}
+
+// enqueueUploadIntoFolder(file, destPath): "Drop a desktop File onto a
+// folder row: that is Add into that folder (prefix + existing upload
+// path). One occupy, same as Add." Queued the same way as a normal
+// Add drop, but tagging this entry with its own destPath so
+// processUploadQueue()/doUpload() compute metaName against the
+// FOLDER the file was dropped on, not whatever folder happens to be
+// open in the list at the time its turn comes up.
+function enqueueUploadIntoFolder(file, destPath) {
+  _uploadQueue.push({ file, destPath })
+  if (_uploadQueue.length > 1) {
+    showToast('\u23F3 Queued: ' + file.name + ' (waiting for current upload)')
+  }
+  processUploadQueue()
+}
+
+function onRename() {
+  const sf = selectedFile(); if (!sf) return
+  const slashIdx = sf.name.lastIndexOf('/')
+  const basename = slashIdx === -1 ? sf.name : sf.name.slice(slashIdx + 1)
+  r.textInputTitle.textContent = 'Rename'
+  r.btnTextInputConfirm.textContent = 'Rename'
+  r.textInputField.value = basename
+  r.textInputError.textContent = ''
+  r.textInputModal.classList.remove('hidden')
+  r.textInputField.focus()
+  r.textInputField.select()
+  _textInputMode = 'rename'
+  _textInputTargetId = sf.id
+}
+
+let _textInputMode = null
+let _textInputTargetId = null
+
+function closeTextInputModal() {
+  r.textInputModal.classList.add('hidden')
+  _textInputMode = null
+  _textInputTargetId = null
+}
+
+// onTextInputConfirm(): shared confirm handler for the Rename modal.
+// "Same collision rule in the current folder. Metadata only. No
+// re-upload." -- collision is checked against the file's OWN current
+// folder (dirname of its existing metadata.name), never a typed path;
+// the input field only ever edits the basename (validateRenameName
+// rejects any "/" outright, same as New folder's segment rule).
+async function onTextInputConfirm() {
+  if (_textInputMode !== 'rename' || !_textInputTargetId) { closeTextInputModal(); return }
+  const raw = r.textInputField.value
+  const { ok, error, name } = validateRenameName(raw)
+  if (!ok) { r.textInputError.textContent = error; return }
+  const sdk = getState().sdk; if (!sdk) { closeTextInputModal(); return }
+  const { files } = getState()
+  const src = files.find(f => f.id === _textInputTargetId)
+  if (!src) { closeTextInputModal(); return }
+  const slashIdx = src.name.lastIndexOf('/')
+  const dir = slashIdx === -1 ? '' : src.name.slice(0, slashIdx)
+  const siblingNames = existingBasenamesInFolder(files, dir, src.id)
+  const finalBasename = resolveCollisionName(siblingNames, name)
+  const newFullName = buildPath(dir, finalBasename)
+  closeTextInputModal()
+  if (newFullName === src.name) return  // no-op rename
+  setBusy(true); patchState({ status: 'Renaming\u2026' })
+  try {
+    await renameObjectPath(sdk, src.id, newFullName)
+    await refreshFiles()
+    patchState({ status: '' })
+    showToast('\u270F\uFE0F Renamed: ' + finalBasename)
+  } catch (e) {
+    patchState({ status: 'Could not rename this file. Try again.' })
+    console.error(e)
+  } finally { setBusy(false) }
 }
 
 // FIX (2026-09-14, "tessera-web-upload-hang"): "Files are a queue. One
@@ -891,7 +1148,7 @@ let _uploadQueue = []
 let _uploadActive = false
 
 function enqueueUpload(file) {
-  _uploadQueue.push(file)
+  _uploadQueue.push({ file, destPath: undefined })
   if (_uploadQueue.length > 1) {
     showToast('\u23F3 Queued: ' + file.name + ' (waiting for current upload)')
   }
@@ -900,11 +1157,11 @@ function enqueueUpload(file) {
 
 async function processUploadQueue() {
   if (_uploadActive) return
-  const file = _uploadQueue.shift()
-  if (!file) return
+  const item = _uploadQueue.shift()
+  if (!item) return
   _uploadActive = true
   try {
-    await doUpload(file)
+    await doUpload(item.file, item.destPath)
   } finally {
     _uploadActive = false
     // Next queued file (if any) only starts now -- no parallel uploads,
@@ -993,7 +1250,7 @@ function setProgressTarget(pct) {
   }, 80)
 }
 
-async function doUpload(file) {
+async function doUpload(file, destPathOverride) {
   const sdk = getState().sdk; if (!sdk) return
   setBusy(true)
   if (mapController) mapController.reset()
@@ -1056,8 +1313,20 @@ async function doUpload(file) {
     // a folder writes currentPath + file.name into metadata." The 4th
     // arg is uploadFile()'s new optional metaName -- omitted (root)
     // means the exact same call shape as before this packet.
-    const { currentPath } = getState()
-    const metaName = currentPath ? buildPath(currentPath, file.name) : undefined
+    //
+    // COLLISION (Apple A, 2026-09-16): "Never overwrite. Never two
+    // visible names that match... Applies to Move and to Add-into-
+    // folder and to Add at Root." destPathOverride (set only by
+    // enqueueUploadIntoFolder's folder-row drop) takes priority over
+    // getState().currentPath so a drop onto a DIFFERENT folder than
+    // the one currently open still targets the folder it was actually
+    // dropped on; a plain Add (dropzone/file input, no override) keeps
+    // using currentPath exactly as before.
+    const { currentPath, files } = getState()
+    const destPath = destPathOverride !== undefined ? destPathOverride : currentPath
+    const siblingNames = existingBasenamesInFolder(files, destPath)
+    const finalBasename = resolveCollisionName(siblingNames, file.name)
+    const metaName = destPath ? buildPath(destPath, finalBasename) : (finalBasename !== file.name ? finalBasename : undefined)
     await uploadFile(sdk, file, ({ stage, percent, elapsed, hostKey }) => {
       // Real target only -- setProgressTarget's own ease-out never passes
       // this value (see EASE_MS comment above). The 'done' tick still

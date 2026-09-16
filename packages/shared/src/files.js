@@ -215,6 +215,110 @@ export function findFolderMarkerId(files, path) {
   return hit ? hit.id : null
 }
 
+// computeAllFolderPaths(files, virtualFolders): every folder path that
+// exists at ANY depth -- used by Move's destination picker ("pick Root
+// or a folder that already exists (virtual or inferred)"), unlike
+// computeFolderView() which only returns the ONE level directly under
+// currentPath. Ancestors are always included even if only a deeper
+// descendant path was ever recorded (e.g. a file at "Photos/Italy/x.jpg"
+// implies both "Photos" and "Photos/Italy" exist as destinations).
+export function computeAllFolderPaths(files, virtualFolders) {
+  const set = new Set()
+  const addAncestors = (path) => {
+    const segs = path.split('/')
+    let acc = ''
+    for (let i = 0; i < segs.length; i++) {
+      acc = acc ? acc + '/' + segs[i] : segs[i]
+      set.add(acc)
+    }
+  }
+  for (const f of files) {
+    if (f.mime === FOLDER_MARKER_MIME) continue
+    const idx = f.name.lastIndexOf('/')
+    if (idx === -1) continue  // root-level file, no folder implied
+    addAncestors(f.name.slice(0, idx))
+  }
+  for (const vPath of (virtualFolders || [])) {
+    if (vPath) addAncestors(vPath)
+  }
+  return Array.from(set).sort()
+}
+
+// existingBasenamesInFolder(files, destPath, excludeId): the basenames
+// of every real file that is a DIRECT child of destPath ('' = root) --
+// the sibling set a new/moved/renamed name must not collide with.
+// excludeId lets Move/Rename check against every sibling EXCEPT the
+// file being acted on itself (its own current name must never count as
+// a collision against itself).
+export function existingBasenamesInFolder(files, destPath, excludeId) {
+  const prefix = destPath ? destPath + '/' : ''
+  const names = []
+  for (const f of files) {
+    if (excludeId && f.id === excludeId) continue
+    if (f.mime === FOLDER_MARKER_MIME) continue
+    if (prefix && !f.name.startsWith(prefix)) continue
+    const rel = prefix ? f.name.slice(prefix.length) : f.name
+    if (!rel || rel.includes('/')) continue  // not a direct child of destPath
+    names.push(rel)
+  }
+  return names
+}
+
+// resolveCollisionName(existingBasenames, basename): "Never overwrite.
+// Never two visible names that match. vacation.jpg exists -> vacation
+// (1).jpg. That exists -> vacation (2).jpg. Keep the extension. Space
+// before the paren." Applies identically to Move, Add-into-folder, and
+// Add at Root -- callers just pass the right sibling set.
+export function resolveCollisionName(existingBasenames, basename) {
+  if (!existingBasenames.includes(basename)) return basename
+  const dotIdx = basename.lastIndexOf('.')
+  const hasExt = dotIdx > 0  // dotIdx === 0 means a leading-dot name with no real extension (e.g. ".bashrc")
+  const stem = hasExt ? basename.slice(0, dotIdx) : basename
+  const ext = hasExt ? basename.slice(dotIdx) : ''
+  let n = 1
+  let candidate
+  do {
+    candidate = stem + ' (' + n + ')' + ext
+    n++
+  } while (existingBasenames.includes(candidate))
+  return candidate
+}
+
+// validateRenameName(raw): lighter than validateFolderName() -- file
+// basenames are not capped at 64 chars (folders are; files routinely
+// carry long real-world names) and there is no "." / ".." special case
+// beyond the same slash ban (a file can legitimately be named
+// "v2.1.tar.gz" etc., so dots themselves are fine).
+export function validateRenameName(raw) {
+  const name = (raw || '').trim()
+  if (!name) return { ok: false, error: 'Please enter a name.' }
+  if (name.includes('/')) return { ok: false, error: 'Names cannot contain "/".' }
+  return { ok: true, name }
+}
+
+// renameObjectPath(sdk, objectId, newFullName): "Move is metadata only
+// (updateMetadata + updateObjectMetadata). No second 10+20. No
+// sdk.upload." Fetches the PinnedObject handle for objectId, rewrites
+// ONLY its metadata.name (mime is read back off the existing metadata
+// and preserved untouched), then pushes the new metadata to the
+// indexer. No upload(), no hosts() -- this function makes exactly the
+// two calls the law names, nothing else. Used by both Move (destPath
+// changes) and Rename (basename changes, same folder) -- the caller
+// computes the full new path/name; this function just writes it.
+export async function renameObjectPath(sdk, objectId, newFullName) {
+  const obj = await sdk.object(objectId)
+  const metaBytes = obj.metadata()
+  let mime = 'application/octet-stream'
+  try {
+    const m = JSON.parse(new TextDecoder().decode(metaBytes))
+    if (m.mime) mime = m.mime
+  } catch (_) {}
+  const newMeta = new TextEncoder().encode(JSON.stringify({ name: newFullName, mime }))
+  obj.updateMetadata(newMeta)
+  await sdk.updateObjectMetadata(obj)
+  return obj
+}
+
 // ── helpers ──────────────────────────────────────────────
 
 function isDesktop() {
