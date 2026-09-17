@@ -376,6 +376,33 @@ input:focus { border-color: var(--cyan); }
   align-self: center;
 }
 
+/* ── select many (Apple C, 2026-09-17) ─────────────────── */
+.btn-select-many {
+  flex-shrink: 0;
+  align-self: center;
+}
+.select-many-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--surface2);
+  border: 1px solid var(--border2);
+}
+.select-many-count {
+  font-size: 13px;
+  color: var(--ink2);
+  margin-right: auto;
+}
+.row-checkbox {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
+
 /* ── new folder inline field (Apple A, 2026-09-16) ────── */
 .new-folder-inline {
   display: flex;

@@ -28,6 +28,16 @@ let state = {
   // ever read/written by web-ui.js -- Drop's ui.js never touches this
   // key, so it has zero effect on Drop's own flat file list.
   currentPath: '',
+  // SELECT MANY (2026-09-17, "tessera-web-folders-apple-c"): a SEPARATE
+  // selection model from selectedIdx above (that one stays exactly as-is,
+  // still drives the single-item Download/Share/Move/Rename/Delete bar).
+  // selectMode toggles a distinct multi-checkbox UI; selectedIds is an
+  // array of { type: 'file', id } | { type: 'folder', path, name } for
+  // whatever is currently checked in THIS place. Always replaced with a
+  // new array on every change (never mutated in place) so patchState's
+  // `state[k] !== v` reference check fires correctly.
+  selectMode: false,
+  selectedIds: [],
 
   // Busy / status
   busy: false,

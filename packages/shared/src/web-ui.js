@@ -67,6 +67,8 @@ function cacheRefs() {
     'btnMove', 'btnRename', 'btnCancelSelection',
     'btnNewFolder', 'breadcrumb', 'newFolderInline', 'newFolderInput',
     'btnNewFolderConfirm', 'btnNewFolderCancel',
+    'btnSelectMany', 'selectManyBar', 'selectManyCount', 'btnSelectAll',
+    'btnSelectManyMove', 'btnSelectManyDelete', 'btnSelectManyDone',
     'filesLayout', 'btnShowMap', 'mapPane', 'btnHideMap', 'mapCanvas',
     'statusText', 'progressWrap', 'progressFill', 'progressLabel',
     'shareModal', 'shareLink', 'btnCopyLink', 'btnCloseModal',
@@ -223,9 +225,27 @@ const SKELETON = /*html*/`
         <div id="dropzone" class="dropzone">
           <div class="dz-icon">\u{1F4C1}</div>
           <div class="dz-text">Add a file</div>
-          <div class="dz-hint">or click to browse</div>
+          <div class="dz-hint">or click to browse, or drop a folder</div>
         </div>
         <button id="btnNewFolder" class="btn btn-outline btn-new-folder">New folder</button>
+        <!-- SELECT MANY (Apple C, 2026-09-17): "A Select control on the
+             Files list (Apple: Select, tap items, action at the
+             bottom)." Toggles selectMode -- renderFileList() below then
+             switches every visible row into checkbox mode. Sits next to
+             New folder, same toolbar row, no new layout invented. -->
+        <button id="btnSelectMany" class="btn btn-outline btn-select-many">Select</button>
+      </div>
+      <!-- SELECT-MANY TOOLBAR (Apple C, 2026-09-17): only visible while
+           selectMode is on. "Select all in this place is allowed."
+           Done exits select mode (does not clear the underlying single-
+           item selectedIdx model -- the two selection systems are
+           independent, see store.js's own comment). -->
+      <div id="selectManyBar" class="select-many-bar hidden">
+        <span id="selectManyCount" class="select-many-count"></span>
+        <button id="btnSelectAll" class="btn btn-ghost">Select all</button>
+        <button id="btnSelectManyMove" class="btn" disabled>Move</button>
+        <button id="btnSelectManyDelete" class="btn btn-danger" disabled>Delete</button>
+        <button id="btnSelectManyDone" class="btn btn-ghost">Done</button>
       </div>
       <!-- NEW FOLDER INLINE FIELD (Apple A, 2026-09-16): "In-page name
            field in the current place. Not window.prompt." Hidden by
@@ -347,6 +367,14 @@ export async function mountApp(container) {
   r.btnNewFolderCancel.addEventListener('click', onNewFolderCancel)
   r.newFolderInput.addEventListener('keydown', e => { if (e.key === 'Enter') onNewFolderConfirm() })
   r.btnMove.addEventListener('click', onMove)
+  // SELECT MANY (Apple C, 2026-09-17): wired the same way New folder's
+  // own inline toggle is -- a plain click handler flipping selectMode,
+  // no new modal/component family.
+  r.btnSelectMany.addEventListener('click', onEnterSelectMode)
+  r.btnSelectManyDone.addEventListener('click', onExitSelectMode)
+  r.btnSelectAll.addEventListener('click', onSelectAllInPlace)
+  r.btnSelectManyMove.addEventListener('click', onSelectManyMove)
+  r.btnSelectManyDelete.addEventListener('click', onSelectManyDelete)
   r.btnMoveCancel.addEventListener('click', closeMoveModal)
   r.btnRename.addEventListener('click', onRename)
   r.btnTextInputConfirm.addEventListener('click', onTextInputConfirm)
@@ -392,7 +420,40 @@ export async function mountApp(container) {
   r.dropzone.addEventListener('dragleave', () => r.dropzone.classList.remove('dragover'))
   r.dropzone.addEventListener('drop', e => {
     e.preventDefault(); r.dropzone.classList.remove('dragover')
+    // OS FOLDER DROP (Apple C, 2026-09-17): "Drop an OS folder onto Add
+    // (or onto the list). DataTransferItem.webkitGetAsEntry / directory
+    // entries, or webkitdirectory. Not a zip." Checked FIRST, before the
+    // plain-Files fallback below -- a directory entry has no `.files`
+    // Blob of its own (dataTransfer.files for a dropped folder is either
+    // empty or browser-dependent), so enqueueOsEntries() must get first
+    // look at dataTransfer.items to recognize a real directory drop at
+    // all. Returns false (falls through to the unchanged loose-file
+    // path below) when nothing in the drop was a directory -- "Dropping
+    // loose files onto Add stays as today."
+    if (e.dataTransfer.items && e.dataTransfer.items.length && enqueueOsEntries(e.dataTransfer.items, getState().currentPath)) return
     const f = e.dataTransfer.files; if (f && f.length) enqueueUpload(f[0])
+  })
+
+  // OS FOLDER DROP ONTO THE LIST (Apple C, 2026-09-17): "Drop an OS
+  // folder onto Add (OR ONTO THE LIST)." r.fileList itself is a second
+  // valid drop target for the SAME directory-drop path -- reuses
+  // enqueueOsEntries()/getState().currentPath exactly like the dropzone
+  // above; a plain loose-file drop onto the list (never supported
+  // before this packet either) is intentionally NOT wired here, only
+  // directory drops -- the packet's own scope is "an OS folder," not a
+  // general second dropzone for single files.
+  r.fileList.addEventListener('dragover', e => { if (e.dataTransfer.types.includes('Files')) e.preventDefault() })
+  r.fileList.addEventListener('drop', e => {
+    if (!e.dataTransfer.items || !e.dataTransfer.items.length) return
+    // A drop that landed on a folder row itself already has its OWN
+    // drop handler (renderFileList()'s per-row listener) which calls
+    // stopPropagation... it does not -- guard here defensively by
+    // checking the target is the list surface, not a row, so a folder
+    // row drop is never double-handled by both this listener and the
+    // row's own.
+    if (e.target.closest('.file-row')) return
+    e.preventDefault()
+    enqueueOsEntries(e.dataTransfer.items, getState().currentPath)
   })
 
   // Browser Back (2026-09-14, "tessera-web-column-back-invite"): real History
@@ -436,7 +497,19 @@ export async function mountApp(container) {
     r.btnDelete.disabled = v || !sf
   })
   subscribe('files', () => { renderFileList(); updateTotals() })
-  subscribe('currentPath', () => { renderFileList(); renderBreadcrumb() })
+  subscribe('currentPath', () => {
+    // SELECT MANY (Apple C, 2026-09-17): navigating to a different place
+    // (breadcrumb tap, folder enter, Back) clears any in-progress
+    // selection -- a checked file from "Photos" has no meaning once the
+    // view has moved to "Files" or "Travel". Exiting select mode itself
+    // is NOT forced here (only the checked SET is cleared) so tapping
+    // into a folder while still in Select mode keeps the toolbar up,
+    // ready to check items in the new place -- matching "current place"
+    // scoping from the packet's own wording without inventing a second
+    // per-folder selection cache.
+    if (getState().selectedIds.length) patchState({ selectedIds: [] })
+    renderFileList(); renderBreadcrumb()
+  })
   subscribe('selectedIdx', () => {
     renderFileList()
     const sf = selectedFile()
@@ -446,6 +519,23 @@ export async function mountApp(container) {
     r.btnRename.disabled = !sf || getState().busy
     r.btnDelete.disabled = !sf || getState().busy
     r.fileActions.classList.toggle('hidden', !sf)
+  })
+  // SELECT MANY (Apple C, 2026-09-17): a SEPARATE toolbar/state from the
+  // single-item fileActions bar above -- both can exist in the DOM at
+  // once (selectMode simply hides fileActions' row-click-to-select
+  // behavior in favor of checkboxes; see renderFileList()'s own branch).
+  subscribe('selectMode', v => {
+    r.selectManyBar.classList.toggle('hidden', !v)
+    r.btnSelectMany.textContent = v ? 'Cancel' : 'Select'
+    renderFileList()
+  })
+  subscribe('selectedIds', v => {
+    r.selectManyCount.textContent = v.length ? v.length + ' selected' : ''
+    // Rename stays one item (packet's own law) -- Move/Delete are the
+    // only two actions this toolbar exposes, both no-ops on an empty
+    // selection per "Empty selection: Move/Delete do nothing."
+    r.btnSelectManyMove.disabled = v.length === 0 || getState().busy
+    r.btnSelectManyDelete.disabled = v.length === 0 || getState().busy
   })
   subscribe('progress', v => {
     if (v) {
@@ -916,7 +1006,7 @@ function updateTotals() {
 // Download/Share/Delete keep working exactly as before -- folders add
 // a filtering layer on top, not a second selection model.
 function renderFileList() {
-  const { files, selectedIdx, currentPath } = getState()
+  const { files, selectedIdx, currentPath, selectMode, selectedIds } = getState()
   r.fileList.innerHTML = ''
   // FOLDER-CREATE-FAIL FIX (2026-09-15): empty folders are now tracked
   // virtually (localStorage), not a pinned marker object -- see
@@ -939,16 +1029,48 @@ function renderFileList() {
     return
   }
 
+  // SELECT MANY (Apple C, 2026-09-17): a folder/file entry's checked
+  // state is looked up by identity -- folders by path, files by id --
+  // against the single flat selectedIds array (see store.js's own
+  // shape comment). isChecked()/toggleChecked() are the only two
+  // places that array is read/written from inside row rendering, so
+  // there is exactly one code path for "is this row checked."
+  const isChecked = (entry) => selectedIds.some(s =>
+    entry.type === 'folder' ? (s.type === 'folder' && s.path === entry.path) : (s.type === 'file' && s.id === entry.id))
+  const toggleChecked = (entry) => {
+    const exists = isChecked(entry)
+    const next = exists
+      ? selectedIds.filter(s => entry.type === 'folder' ? !(s.type === 'folder' && s.path === entry.path) : !(s.type === 'file' && s.id === entry.id))
+      : [...selectedIds, entry]
+    patchState({ selectedIds: next })
+  }
+
   for (const folder of folders) {
     const row = document.createElement('div')
     row.className = 'file-row folder-row'
+    const folderEntry = { type: 'folder', path: folder.path, name: folder.name }
+    // SELECT MANY (Apple C, 2026-09-17): "Files and folders in the
+    // current place can be checked." In select mode, a checkbox
+    // replaces the row's normal navigate-in click target for the
+    // checkbox itself only -- the row's OWN name/icon area still
+    // navigates in on click (checking a folder for a bulk Move/Delete
+    // and entering it are two different intents; Apple's Photos app
+    // keeps both live at once in Select mode the same way).
+    const checkboxHtml = selectMode
+      ? '<input type="checkbox" class="row-checkbox" ' + (isChecked(folderEntry) ? 'checked' : '') + '>'
+      : ''
     row.innerHTML =
+      checkboxHtml +
       '<div class="file-info">' +
         '<span class="folder-icon">\u{1F4C1}</span>' +
         '<span class="file-name">' + esc(folder.name) + '</span>' +
       '</div>' +
-      '<button class="btn btn-ghost btn-folder-rename" title="Rename folder" data-path="' + esc(folder.path) + '">\u270F\uFE0F</button>' +
-      '<button class="btn btn-ghost btn-folder-delete" title="Delete folder" data-path="' + esc(folder.path) + '">\u{1F5D1}\uFE0F</button>'
+      (selectMode ? '' :
+        '<button class="btn btn-ghost btn-folder-rename" title="Rename folder" data-path="' + esc(folder.path) + '">\u270F\uFE0F</button>' +
+        '<button class="btn btn-ghost btn-folder-delete" title="Delete folder" data-path="' + esc(folder.path) + '">\u{1F5D1}\uFE0F</button>')
+    if (selectMode) {
+      row.querySelector('.row-checkbox').addEventListener('click', (e) => { e.stopPropagation(); toggleChecked(folderEntry) })
+    }
     row.querySelector('.file-info').addEventListener('click', () => gotoFolder(folder.path))
     // FOLDERS (2026-09-15, "tessera-web-folders-v1"): folder rows are
     // never "selected" the way file rows are (clicking a folder row's
@@ -960,14 +1082,22 @@ function renderFileList() {
     // RENAME (Apple B, 2026-09-16): same own-affordance pattern as
     // Delete, right next to it -- folder rows have no "selected" state
     // to hang a shared bottom-bar Rename button off of.
-    row.querySelector('.btn-folder-rename').addEventListener('click', (e) => {
-      e.stopPropagation()
-      onRenameFolder(folder.path, folder.name)
-    })
-    row.querySelector('.btn-folder-delete').addEventListener('click', (e) => {
-      e.stopPropagation()
-      onDeleteFolder(folder.path, folder.name)
-    })
+    // SELECT MANY (Apple C, 2026-09-17): these two per-row buttons are
+    // simply not rendered at all in select mode (see checkboxHtml
+    // branch above) -- "Rename stays one item," so a folder's own
+    // rename affordance staying single-item-only outside select mode
+    // is unchanged; querySelector calls below are skipped entirely
+    // when selectMode hid the buttons.
+    if (!selectMode) {
+      row.querySelector('.btn-folder-rename').addEventListener('click', (e) => {
+        e.stopPropagation()
+        onRenameFolder(folder.path, folder.name)
+      })
+      row.querySelector('.btn-folder-delete').addEventListener('click', (e) => {
+        e.stopPropagation()
+        onDeleteFolder(folder.path, folder.name)
+      })
+    }
     // DROP TARGET (Apple A, 2026-09-16): "Drop an already-listed file
     // onto a folder row: same move, not a new upload." AND "Drop a
     // desktop File onto a folder row: Add into that folder." Both
@@ -975,6 +1105,12 @@ function renderFileList() {
     // by dataTransfer contents (internal drag carries our own
     // text/x-tessera-file-id type; an OS drop carries real
     // e.dataTransfer.files).
+    // OS FOLDER DROP (Apple C, 2026-09-17): a directory dropped onto a
+    // folder row is handled by the SAME entry point as a directory
+    // dropped onto the main dropzone -- enqueueOsEntries() below reads
+    // e.dataTransfer.items via webkitGetAsEntry itself and only falls
+    // back to the plain-Files branches here when the browser has no
+    // directory-entry API at all (see that function's own comment).
     row.addEventListener('dragover', (e) => {
       e.preventDefault()
       row.classList.add('folder-drop-target')
@@ -983,6 +1119,7 @@ function renderFileList() {
     row.addEventListener('drop', (e) => {
       e.preventDefault()
       row.classList.remove('folder-drop-target')
+      if (e.dataTransfer.items && e.dataTransfer.items.length && enqueueOsEntries(e.dataTransfer.items, folder.path)) return
       const osFiles = e.dataTransfer.files
       if (osFiles && osFiles.length) {
         // Desktop File dropped on a folder row: Add into that folder --
@@ -1003,26 +1140,41 @@ function renderFileList() {
   for (const f of fileRows) {
     const realIdx = files.findIndex(x => x.id === f.id)
     const row = document.createElement('div')
-    row.className = 'file-row' + (realIdx === selectedIdx ? ' selected' : '')
-    row.draggable = true
+    const fileEntry = { type: 'file', id: f.id }
+    row.className = 'file-row' + (!selectMode && realIdx === selectedIdx ? ' selected' : '') + (selectMode && isChecked(fileEntry) ? ' selected' : '')
+    row.draggable = !selectMode
+    const checkboxHtml = selectMode
+      ? '<input type="checkbox" class="row-checkbox" ' + (isChecked(fileEntry) ? 'checked' : '') + '>'
+      : ''
     row.innerHTML =
+      checkboxHtml +
       '<div class="file-info">' +
         '<span class="file-name">' + esc(f.displayName) + '</span>' +
         '<span class="file-meta">' + esc(fmtDateTime(f.updatedAt)) + '</span>' +
       '</div>' +
       '<span class="file-size">' + esc(formatBytes(f.size)) + '</span>'
-    row.addEventListener('click', () => patchState({ selectedIdx: realIdx }))
-    // DRAG SOURCE (Apple A, 2026-09-16): "Drop an already-listed file
-    // onto a folder row: same move." Carries only the file's real id
-    // (its own metadata.name full path is looked up fresh from state
-    // in moveFileTo() at drop time, never trusted from a stale drag
-    // payload) via a custom MIME type that no OS drag ever produces,
-    // so the drop handler above can tell "our own row" apart from a
-    // real desktop-file drop unambiguously.
-    row.addEventListener('dragstart', (e) => {
-      e.dataTransfer.setData('text/x-tessera-file-id', f.id)
-      e.dataTransfer.effectAllowed = 'move'
-    })
+    if (selectMode) {
+      // SELECT MANY (Apple C, 2026-09-17): the WHOLE row toggles the
+      // checkbox in select mode (not just the tiny checkbox target) --
+      // same "tap items" affordance Apple's own Select mode uses,
+      // rather than forcing a precise tap on an 18px box.
+      row.addEventListener('click', () => toggleChecked(fileEntry))
+    } else {
+      row.addEventListener('click', () => patchState({ selectedIdx: realIdx }))
+      // DRAG SOURCE (Apple A, 2026-09-16): "Drop an already-listed file
+      // onto a folder row: same move." Carries only the file's real id
+      // (its own metadata.name full path is looked up fresh from state
+      // in moveFileTo() at drop time, never trusted from a stale drag
+      // payload) via a custom MIME type that no OS drag ever produces,
+      // so the drop handler above can tell "our own row" apart from a
+      // real desktop-file drop unambiguously. Draggable is off in
+      // select mode (row.draggable above) so a checkbox tap can never
+      // be misread as a drag start.
+      row.addEventListener('dragstart', (e) => {
+        e.dataTransfer.setData('text/x-tessera-file-id', f.id)
+        e.dataTransfer.effectAllowed = 'move'
+      })
+    }
     r.fileList.appendChild(row)
   }
 }
@@ -1108,6 +1260,212 @@ function onFilePicked() {
   if (f) enqueueUpload(f)
 }
 
+// ── select many (Apple C, 2026-09-17) ────────────────────
+//
+// LAW: "A Select control on the Files list (Apple: Select, tap items,
+// action at the bottom). Files and folders in the current place can be
+// checked. Select all in this place is allowed. With a selection: Move
+// and Delete work on the set. Rename stays one item." A SEPARATE
+// selection model from selectedIdx/fileActions (store.js's own comment
+// on selectMode/selectedIds explains why) -- entering select mode does
+// not touch or clear the single-item selection underneath it.
+
+function onEnterSelectMode() {
+  patchState({ selectMode: true, selectedIds: [] })
+}
+
+function onExitSelectMode() {
+  patchState({ selectMode: false, selectedIds: [] })
+}
+
+// onSelectAllInPlace(): "Select all in this place is allowed." Checks
+// every folder AND file currently visible in computeFolderView()'s
+// result for currentPath -- the exact same query renderFileList() just
+// used to paint the rows being selected, so "all" can never mean a
+// different set than what's on screen.
+function onSelectAllInPlace() {
+  const { files, currentPath } = getState()
+  const { folders, files: fileRows } = computeFolderView(files, currentPath, getVirtualFolders())
+  const all = [
+    ...folders.map(f => ({ type: 'folder', path: f.path, name: f.name })),
+    ...fileRows.map(f => ({ type: 'file', id: f.id })),
+  ]
+  patchState({ selectedIds: all })
+}
+
+// onSelectManyMove(): reuses the EXACT same Move modal Apple A built
+// (r.moveModal/r.moveModalList) -- no second destination picker
+// invented. "Each file is metadata rewrite. A selected folder moves by
+// rewriting every object under it (same prefix swap as rename)."
+// "Collision at dest: name (1).ext on files. Sibling folder name
+// clash: refuse that folder with one sentence, do not invent
+// Photos (1)." -- checked PER TARGET at move time (fresh file list
+// after each step), matching how onMove/moveFileTo already do single-
+// file collision checks one at a time rather than pre-computing a
+// batch plan that could go stale mid-move.
+function onSelectManyMove() {
+  const { selectedIds } = getState()
+  if (!selectedIds.length) return  // "Empty selection: Move/Delete do nothing."
+  const { files } = getState()
+  const allFolders = computeAllFolderPaths(files, getVirtualFolders())
+  r.moveModalList.innerHTML = ''
+  const rootRow = document.createElement('div')
+  rootRow.className = 'move-modal-row'
+  rootRow.textContent = 'Root'
+  rootRow.addEventListener('click', () => { closeMoveModal(); moveSelectedTo('') })
+  r.moveModalList.appendChild(rootRow)
+  for (const path of allFolders) {
+    const row = document.createElement('div')
+    row.className = 'move-modal-row'
+    row.textContent = path
+    row.addEventListener('click', () => { closeMoveModal(); moveSelectedTo(path) })
+    r.moveModalList.appendChild(row)
+  }
+  r.moveModal.classList.remove('hidden')
+}
+
+// moveSelectedTo(destPath): moves the whole current selectedIds set to
+// destPath, one target at a time. Files go through moveFileToQuiet()
+// (moveFileTo()'s own logic, split so it can run in a loop without
+// each step's own toast/refresh firing mid-batch). A selected FOLDER
+// moves by rewriting every real object under it, same prefix-swap
+// renameObjectPath() already uses for folder Rename (Apple B) -- reuses
+// renameFilePath()'s own path-swap helper, not a new rewrite mechanism.
+// "Sibling folder name clash: refuse that folder with one sentence, do
+// not invent Photos (1)" -- checked against the DESTINATION's existing
+// folders before touching any object for that folder; a refused folder
+// is skipped (its files untouched) while every OTHER item in the
+// selection still proceeds, and the one sentence names which folder was
+// skipped and why.
+async function moveSelectedTo(destPath) {
+  const sdk = getState().sdk; if (!sdk) return
+  const { selectedIds } = getState()
+  if (!selectedIds.length) return
+  setBusy(true); patchState({ status: 'Moving\u2026' })
+  const skippedFolders = []
+  try {
+    for (const entry of selectedIds) {
+      if (entry.type === 'file') {
+        await moveFileToQuiet(entry.id, destPath)
+        continue
+      }
+      // entry.type === 'folder'
+      const { files: curFiles } = getState()
+      const { folders: destFolders } = computeFolderView(curFiles, destPath, getVirtualFolders())
+      if (destFolders.some(f => f.name === entry.name)) {
+        skippedFolders.push(entry.name)
+        continue
+      }
+      const newPath = buildPath(destPath, entry.name)
+      if (newPath === entry.path) continue  // no-op move (already there)
+      const targets = filesUnderFolder(curFiles, entry.path)
+      for (const f of targets) {
+        const newFullName = renameFilePath(f.name, entry.path, newPath)
+        await renameObjectPath(sdk, f.id, newFullName)
+      }
+      renameVirtualFolderPrefix(entry.path, newPath)
+      await refreshFiles()
+    }
+    await refreshFiles()
+    patchState({ status: '', selectedIds: [], selectMode: false })
+    renderBreadcrumb()
+    if (skippedFolders.length) {
+      showToast('\u26A0\uFE0F Moved, but skipped: ' + skippedFolders.join(', ') + ' (already exists there)')
+    } else {
+      showToast('\u{1F4C1} Moved ' + selectedIds.length + ' item' + (selectedIds.length === 1 ? '' : 's'))
+    }
+  } catch (e) {
+    patchState({ status: 'Could not move everything. Try again.' })
+    console.error(e)
+  } finally { setBusy(false) }
+}
+
+// moveFileToQuiet(objectId, destPath): moveFileTo()'s own rename-with-
+// collision logic, split out so a batch move (moveSelectedTo above)
+// can call it in a loop without each individual file firing its own
+// toast/status/refresh mid-batch -- the caller does exactly one status
+// line and one refresh for the whole set instead, per the packet's own
+// "one status sentence" convention used elsewhere (folder rename,
+// folder delete).
+async function moveFileToQuiet(objectId, destPath) {
+  const sdk = getState().sdk; if (!sdk) return
+  const { files } = getState()
+  const src = files.find(f => f.id === objectId)
+  if (!src) return
+  const slashIdx = src.name.lastIndexOf('/')
+  const basename = slashIdx === -1 ? src.name : src.name.slice(slashIdx + 1)
+  const siblingNames = existingBasenamesInFolder(files, destPath, objectId)
+  const finalBasename = resolveCollisionName(siblingNames, basename)
+  const newFullName = buildPath(destPath, finalBasename)
+  if (newFullName === src.name) return  // no-op move (same folder, same name)
+  await renameObjectPath(sdk, objectId, newFullName)
+}
+
+// onSelectManyDelete(): "One confirm that names the damage. 'Delete N
+// items?' is enough if only files. If folders are in the set: 'Delete N
+// items including folders and their files?' Cancel keeps everything."
+// N here is the SELECTED ENTRY count (folders count as 1 entry each in
+// N, matching the packet's own "Delete N items" wording -- distinct
+// from onDeleteFolder's single-folder confirm, which counts the files
+// INSIDE that one folder instead; this is the top-level "how many things
+// did you check" number).
+function onSelectManyDelete() {
+  const { selectedIds } = getState()
+  if (!selectedIds.length) return  // "Empty selection: Move/Delete do nothing."
+  const n = selectedIds.length
+  const hasFolders = selectedIds.some(s => s.type === 'folder')
+  const question = hasFolders
+    ? 'Delete ' + n + ' item' + (n === 1 ? '' : 's') + ' including folders and their files?\n\nThis cannot be undone.'
+    : 'Delete ' + n + ' item' + (n === 1 ? '' : 's') + '?\n\nThis cannot be undone.'
+  if (!confirm(question)) return  // Cancel keeps everything -- no state touched above this line
+  deleteSelected()
+}
+
+// deleteSelected(): "Confirm: deleteObject each file under each
+// selected folder, then the selected files, then drop virtual paths.
+// Gone is gone." Folders first (each folder's own files, via the same
+// filesUnderFolder() query onDeleteFolder uses), then the directly
+// selected files, then every virtual (empty) folder path is dropped in
+// one pass at the end -- matching onDeleteFolder's own ordering,
+// applied across the whole set instead of one folder at a time.
+async function deleteSelected() {
+  const sdk = getState().sdk; if (!sdk) return
+  const { selectedIds } = getState()
+  setBusy(true); patchState({ status: 'Deleting\u2026' })
+  try {
+    const { files } = getState()
+    for (const entry of selectedIds) {
+      if (entry.type !== 'folder') continue
+      const targets = filesUnderFolder(files, entry.path)
+      for (const f of targets) {
+        await deleteFile(sdk, f.id)
+      }
+      const markerId = findFolderMarkerId(files, entry.path)
+      if (markerId) await deleteFile(sdk, markerId)
+    }
+    for (const entry of selectedIds) {
+      if (entry.type !== 'file') continue
+      // A file already deleted as part of a selected folder's own
+      // filesUnderFolder() sweep above would 404 here if it were also
+      // independently checked -- not possible in practice (a file row
+      // only ever renders once, under either its folder OR a listing
+      // that already excludes folder-nested files per computeFolderView),
+      // but deleteFile() failures are per-item and do not abort the
+      // whole batch below regardless.
+      await deleteFile(sdk, entry.id)
+    }
+    for (const entry of selectedIds) {
+      if (entry.type === 'folder') removeVirtualFolderPrefix(entry.path)
+    }
+    await refreshFiles()
+    patchState({ status: '', selectedIds: [], selectMode: false })
+    showToast('\u{1F5D1}\uFE0F Deleted ' + selectedIds.length + ' item' + (selectedIds.length === 1 ? '' : 's'))
+  } catch (e) {
+    patchState({ status: 'Delete failed: ' + (e.message || 'error') })
+    console.error(e)
+  } finally { setBusy(false) }
+}
+
 // ── move / rename (Apple A, 2026-09-16) ──────────────────
 //
 // LAW: "Move is metadata only (updateMetadata + updateObjectMetadata).
@@ -1174,19 +1532,176 @@ async function moveFileTo(objectId, destPath) {
   } finally { setBusy(false) }
 }
 
-// enqueueUploadIntoFolder(file, destPath): "Drop a desktop File onto a
-// folder row: that is Add into that folder (prefix + existing upload
-// path). One occupy, same as Add." Queued the same way as a normal
-// Add drop, but tagging this entry with its own destPath so
+// enqueueUploadIntoFolder(file, destPath, silent): "Drop a desktop File
+// onto a folder row: that is Add into that folder (prefix + existing
+// upload path). One occupy, same as Add." Queued the same way as a
+// normal Add drop, but tagging this entry with its own destPath so
 // processUploadQueue()/doUpload() compute metaName against the
 // FOLDER the file was dropped on, not whatever folder happens to be
 // open in the list at the time its turn comes up.
-function enqueueUploadIntoFolder(file, destPath) {
+//
+// silent (Apple C, 2026-09-17, OS folder drop): a bulk OS-folder drop
+// queues many files back-to-back through this same function --
+// without this flag, every single one past the first would fire its
+// own "Queued: X (waiting for current upload)" toast, burying the
+// batch's own single "Adding K files..." announcement (see
+// enqueueBulkFiles below) under a toast storm. A plain one-file drop
+// onto a folder row (the ORIGINAL Apple A behavior) is completely
+// unaffected -- silent defaults to false/undefined, same toast as
+// before this packet.
+function enqueueUploadIntoFolder(file, destPath, silent) {
   _uploadQueue.push({ file, destPath })
-  if (_uploadQueue.length > 1) {
+  if (!silent && _uploadQueue.length > 1) {
     showToast('\u23F3 Queued: ' + file.name + ' (waiting for current upload)')
   }
   processUploadQueue()
+}
+
+// ── OS folder drop (Apple C, 2026-09-17) ──────────────────
+//
+// LAW: "Browser DataTransferItem.webkitGetAsEntry / directory entries,
+// or webkitdirectory. Not a zip." "Create virtual paths for every
+// folder in the drop that has no file yet. Queue each file as Add with
+// destPath = currentFolder + relative path." "Status: 'Adding K
+// files...' then the normal per-file encoding.../uploading (N/M) on
+// the one that is shipping. Queue already serial." "Collision at dest:
+// same (1) rule." "Ignore .DS_Store and Thumbs.db." "Cap this packet:
+// 200 files in one drop. Over that: one sentence, add none."
+
+const OS_DROP_MAX_FILES = 200
+const OS_DROP_IGNORE_NAMES = new Set(['.DS_Store', 'Thumbs.db'])
+
+// enqueueOsEntries(items, baseDestPath): entry point for BOTH the main
+// dropzone and a folder-row drop (same function, different baseDestPath
+// -- see both call sites). Returns true if it recognized at least one
+// DIRECTORY entry in the drop and took over handling it (caller must
+// not also run its own plain-Files fallback); returns false if nothing
+// in the drop was a directory, so the caller's existing loose-file path
+// runs completely unchanged -- "Dropping loose files onto Add stays as
+// today."
+function enqueueOsEntries(items, baseDestPath) {
+  // webkitGetAsEntry() must be called synchronously, inside the
+  // original drop event's own call stack -- browsers invalidate
+  // DataTransferItem access on the next tick. Collect every top-level
+  // entry FIRST (sync), then walk the tree async afterward.
+  const topEntries = []
+  let sawAnyEntry = false
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i]
+    if (typeof item.webkitGetAsEntry !== 'function') continue
+    const entry = item.webkitGetAsEntry()
+    if (entry) { sawAnyEntry = true; topEntries.push(entry) }
+  }
+  if (!sawAnyEntry) return false
+  const hasDirectory = topEntries.some(e => e.isDirectory)
+  if (!hasDirectory) return false  // every entry was a plain file -- let the caller's normal Files path handle it, unchanged
+  walkAndQueueEntries(topEntries, baseDestPath)
+  return true
+}
+
+// walkAndQueueEntries(topEntries, baseDestPath): recursively reads every
+// directory entry (FileSystemDirectoryReader.readEntries() -- must be
+// called repeatedly until it returns an empty array; a single call is
+// NOT guaranteed to return everything, this is the browser API's own
+// documented contract) and collects a flat list of
+// { file, destPath } pairs before queuing anything, so the 200-file cap
+// and "add none" refusal can be enforced BEFORE any upload starts.
+async function walkAndQueueEntries(topEntries, baseDestPath) {
+  const collected = []  // { file, destPath }
+  const emptyDirPaths = []  // destPath strings with no files directly in them (candidates for virtual folder rows)
+  let overCap = false
+
+  function relDestPath(entry) {
+    // entry.fullPath is like "/FolderName/sub/file.txt" (webkitGetAsEntry's
+    // own leading-slash convention) -- strip the leading slash and the
+    // entry's own basename to get the RELATIVE directory portion, then
+    // prefix with baseDestPath ("currentFolder + relative path").
+    const full = entry.fullPath.replace(/^\/+/, '')
+    const slashIdx = full.lastIndexOf('/')
+    const relDir = slashIdx === -1 ? '' : full.slice(0, slashIdx)
+    return relDir ? buildPath(baseDestPath, relDir) : baseDestPath
+  }
+
+  async function readAllEntries(dirEntry) {
+    const reader = dirEntry.createReader()
+    const all = []
+    for (;;) {
+      const batch = await new Promise((resolve, reject) => reader.readEntries(resolve, reject))
+      if (!batch.length) break
+      all.push(...batch)
+    }
+    return all
+  }
+
+  async function walk(entry) {
+    if (overCap) return
+    if (entry.isFile) {
+      if (OS_DROP_IGNORE_NAMES.has(entry.name)) return
+      if (collected.length >= OS_DROP_MAX_FILES) { overCap = true; return }
+      const file = await new Promise((resolve, reject) => entry.file(resolve, reject))
+      collected.push({ file, destPath: relDestPath(entry) })
+      return
+    }
+    if (entry.isDirectory) {
+      // "Create virtual paths for every folder in the drop that has no
+      // file yet." Every directory gets recorded as a candidate here;
+      // after the whole walk finishes, any candidate that never
+      // received a file (still genuinely empty, e.g. a leaf folder
+      // containing only ignored .DS_Store entries) gets a real virtual
+      // folder row -- one that DID receive a file already gets a place
+      // to live via that file's own upload, per computeFolderView()'s
+      // real-object inference.
+      const dirDestPath = buildPath(baseDestPath, entry.fullPath.replace(/^\/+/, ''))
+      emptyDirPaths.push(dirDestPath)
+      const children = await readAllEntries(entry)
+      for (const child of children) {
+        await walk(child)
+        if (overCap) return
+      }
+    }
+  }
+
+  for (const entry of topEntries) {
+    await walk(entry)
+    if (overCap) break
+  }
+
+  if (overCap) {
+    // "Cap this packet: 200 files in one drop. Over that: one sentence,
+    // add none." -- nothing collected so far is queued; a partial add
+    // of an arbitrary prefix of the drop would be a worse outcome than
+    // a clean refusal.
+    showToast('\u26A0\uFE0F Too many files in that folder (limit ' + OS_DROP_MAX_FILES + '). Nothing was added.')
+    return
+  }
+  if (!collected.length) {
+    showToast('That folder has no files to add.')
+    return
+  }
+
+  // Virtual folder rows for genuinely empty directories only -- a path
+  // that DID get a file queued below will already resolve as a real
+  // folder once that file's own object exists (computeFolderView()'s
+  // inference), so creating a redundant virtual row for it would be
+  // harmless but pointless; skip it to keep tesseraweb.folders from
+  // accumulating rows a real object already covers.
+  const filedDestPaths = new Set(collected.map(c => c.destPath))
+  for (const path of emptyDirPaths) {
+    if (!filedDestPaths.has(path)) addVirtualFolder(path)
+  }
+
+  // "Status: 'Adding K files...' then the normal per-file
+  // encoding.../uploading (N/M) on the one that is shipping. Queue
+  // already serial." -- one status line announcing the whole batch,
+  // then every file queues through the EXACT same
+  // enqueueUploadIntoFolder()/processUploadQueue() path a single
+  // folder-row drop already uses (silent=true so 199 of them don't each
+  // fire their own "Queued: X" toast on top of this one announcement).
+  showToast('\u23F3 Adding ' + collected.length + ' file' + (collected.length === 1 ? '' : 's') + '\u2026')
+  for (const { file, destPath } of collected) {
+    enqueueUploadIntoFolder(file, destPath, true)
+  }
+  renderFileList()
 }
 
 function onRename() {
