@@ -10,9 +10,69 @@
 // without ever reading Drop's tessera.aid/tessera.akey. Set once via
 // setCredsPrefix() at app startup; defaults to 'tessera' (Drop, unchanged).
 
-import { PinnedObject } from './sdk.js'
+import { PinnedObject, encodedSize } from './sdk.js'
 import { proxyOrigin } from './utils.js'
 import { checkTunnelReachable } from './interceptor.js'
+
+// SECTOR_SIZE (2026-09-17, "tessera-web-progress-denom"): fixed by the RHP4
+// protocol itself (sia_core::rhp4::SECTOR_SIZE), not something either the
+// SDK or Tessera controls -- matches the handoff doc's own citation. No
+// exported constant for this exists in sia_storage_wasm.d.ts (checked), so
+// it's hardcoded here exactly like the rest of this codebase already does
+// (see UPLOAD_MAX_BUFFERED_SLABS's own comment above for the same 4 MiB
+// figure used in its byte-budget math).
+const SECTOR_SIZE = 4 * 1024 * 1024
+
+// PROGRESS DENOMINATOR (2026-09-17, "tessera-web-progress-denom"): "55/30 on
+// a 250 MiB file. 30 is one slab, not the object." 10 data + 20 parity = 30
+// shards per SLAB, not per file -- a slab's data side is
+// dataShards * SECTOR_SIZE = 40 MiB of user bytes, so any file over ~40 MiB
+// spans multiple slabs and the true total shard count is a multiple of 30,
+// not a hardcoded 30. Computed once at Add time, before sdk.upload() is
+// called, so the very first onShardUploaded tick already shows the right M.
+//
+// Path 1 (preferred): the SDK's own exported encodedSize(size, dataShards,
+// parityShards) -- confirmed present in sia_storage_wasm.d.ts's export
+// table, confirmed via source in sia-sdk-rs/sia_storage/src/lib.rs's
+// encoded_size(): `slabs = ceil(size / (dataShards * SECTOR_SIZE)); return
+// slabs * (dataShards + parityShards) * SECTOR_SIZE` -- i.e. it already
+// returns total ON-NETWORK bytes across every shard of every slab for the
+// whole object, exactly what this needs. Dividing by SECTOR_SIZE recovers
+// the shard COUNT (M), cleanly by construction since the SDK's own formula
+// is `slabs * totalShards * SECTOR_SIZE` -- always an exact multiple.
+//
+// Path 2 (fallback, if encodedSize ever throws/is unavailable): the same
+// formula reimplemented directly, cited inline below.
+function computeExpectedShards(fileSize, dataShards, parityShards) {
+  if (fileSize == null || fileSize < 0) return null
+  try {
+    // NOTE: the browser/WASM build's encodedSize(data_size, data_shards,
+    // parity_shards) takes a plain JS number (confirmed in
+    // sia_storage_wasm.d.ts: `data_size: number`) -- NOT a bigint. Only the
+    // separate Node native (napi) binding's encodedSize takes a bigint (see
+    // index.node.d.ts) -- this app is browser-only, so plain number is
+    // correct here. File sizes exceeding Number.MAX_SAFE_INTEGER (~9 PiB)
+    // are already outside anything this app or the SDK's own WASM number
+    // handling supports, so no precision concern in practice.
+    const bytes = encodedSize(fileSize, dataShards, parityShards)
+    const m = Number(bytes) / SECTOR_SIZE
+    if (Number.isFinite(m) && m > 0 && Number.isInteger(m)) return m
+    // Non-integer would mean encodedSize's own formula stopped being an
+    // exact multiple of SECTOR_SIZE -- fall through to path 2 rather than
+    // print a lying non-integer denominator.
+  } catch (e) {
+    console.warn('[tessera-web] encodedSize() unavailable, using manual slab formula:', e && e.message)
+  }
+  // Path 2: slabs = ceil(size / (dataShards * SECTOR_SIZE)); M = slabs * 30.
+  // The LAST slab of a file still ships a full dataShards+parityShards set
+  // (erasure coding pads the final slab, it doesn't ship a partial one) --
+  // same formula sia-sdk-rs's own encoded_size() uses, reimplemented here
+  // only as a fallback if the SDK export itself is ever unavailable.
+  const totalShards = dataShards + parityShards
+  const slabDataBytes = dataShards * SECTOR_SIZE
+  const slabs = Math.ceil(fileSize / slabDataBytes)
+  return slabs > 0 ? slabs * totalShards : null
+}
 
 // CONCURRENCY TUNABLES (2026-09-16, "tessera-web-inflight-v2" — REVISES
 // "tessera-web-inflight" 2026-09-14, whose own maxInflight fix never
@@ -870,21 +930,44 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
   // onShardUploaded option callback (confirmed present in the wasm
   // binary's own export table alongside dataShards/parityShards/
   // maxBufferedSlabs -- this is the SDK's own name, not invented here).
-  // Denominator is dataShards + parityShards = 10 + 20 = 30 unless the
-  // SDK's own event ever reports otherwise (defensive fallback below).
   // 5-90% is real shard-landed progress; 90-100% is the pin phase below.
+  //
+  // DENOMINATOR FIX (2026-09-17, "tessera-web-progress-denom"): "55/30 on a
+  // 250 MiB file. 30 is one slab, not the object." The OLD hardcoded
+  // `expectedShards = dataShards + parityShards` (= 30) was correct only
+  // for a single-slab file (<= dataShards*SECTOR_SIZE = 40 MiB of user
+  // bytes) -- any larger file spans multiple slabs and the true total
+  // shard count is a multiple of 30, not a flat 30. Computed ONCE here at
+  // Add time via computeExpectedShards() (see that function's own comment
+  // for the encodedSize()-based formula and its manual fallback), before
+  // sdk.upload() is even called, so the very FIRST onShardUploaded tick
+  // already shows the correct M -- not just a value that self-corrects
+  // partway through. `file` is null on the dropzone/folder-marker path
+  // (see the WASM-fallback stream construction above); computeExpectedShards
+  // already returns null for a null/negative size, so M silently falls back
+  // to the flat dataShards+parityShards in that case, unchanged from before.
   const dataShards = 10
   const parityShards = 20
-  let expectedShards = dataShards + parityShards
+  const computedM = file ? computeExpectedShards(file.size, dataShards, parityShards) : null
+  // hideDenominator (packet's own instruction 3): "If both [M] paths fail:
+  // hide N/M." -- only possible if file.size was somehow present but both
+  // encodedSize() AND the manual fallback produced nothing usable (fallback
+  // only returns null for a non-positive size, which computeExpectedShards
+  // already guards). Kept as an explicit flag rather than silently reusing
+  // the old flat-30 guess, matching the packet's "do not print N/30" rule.
+  const hideDenominator = !!file && computedM == null
+  let expectedShards = computedM != null ? computedM : (dataShards + parityShards)
   let shardsLanded = 0
   const onShardUploaded = (ev) => {
     // ev shape per the wasm binary's own field names: hostKey, shardSize,
-    // shardIndex, slabIndex, elapsedMs. Use slabIndex-aware count only if
-    // the SDK ever reports more than one slab; for a single-slab upload
-    // (everything under ~40 MiB, per uploadPacked's own doc comment)
-    // shardIndex 0..(expectedShards-1) covers the whole file.
+    // shardIndex, slabIndex, elapsedMs. computedM (above) is already the
+    // authoritative total for this file, computed once before upload
+    // started -- the SDK's own per-event expectedShards (if it ever
+    // reports one) is now only used as a defensive fallback when
+    // computedM itself was unavailable, never allowed to override a
+    // value we already know is correct.
     shardsLanded += 1
-    if (ev && typeof ev.expectedShards === 'number' && ev.expectedShards > 0) {
+    if (computedM == null && ev && typeof ev.expectedShards === 'number' && ev.expectedShards > 0) {
       expectedShards = ev.expectedShards
     }
     const pct = 5 + Math.min(85, Math.round((shardsLanded / expectedShards) * 85))
@@ -893,10 +976,13 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
     // it on the upload map -- this is the exact same live callback field
     // already used for the shard counter above, not a second signal or
     // an extra hosts() call.
-    // COPY (2026-09-15, "tessera-web-look-v1"): "Progress: N/30 -- do not
-    // say 'shards' next to the number. Quiet status: uploading (N/30)
-    // then pinning -- no 'shards'." Was 'uploading (N/M shards)' --
-    // matches the packet's own copy table exactly now.
+    // COPY (2026-09-15, "tessera-web-look-v1", DENOMINATOR FIX 2026-09-17):
+    // "Progress: N/M -- do not say 'shards' next to the number." Quiet
+    // status: `uploading (N/M)` then `pinning` -- no 'shards'. M is now the
+    // real per-file total (see computedM above), not a hardcoded 30.
+    // hideDenominator (packet's own instruction 3): if M could not be
+    // computed at all, print landed-shard COUNT only, no "/M" -- never a
+    // lying denominator.
     //
     // LINE FLOOR (2026-09-16, "tessera-web-encode-hold"): ev.elapsedMs
     // is the SDK's OWN field (ShardProgress.elapsedMs, per
@@ -904,7 +990,10 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
     // duration. Forwarded through tick()'s new 4th arg (transferMs) so
     // map.js's shardLanded() can compute "max(5s, real transfer)"
     // without a second timer/clock of its own.
-    tick('uploading (' + shardsLanded + '/' + expectedShards + ')', pct, ev && ev.hostKey, ev && ev.elapsedMs)
+    const stageText = hideDenominator
+      ? 'uploading (' + shardsLanded + ')'
+      : 'uploading (' + shardsLanded + '/' + expectedShards + ')'
+    tick(stageText, pct, ev && ev.hostKey, ev && ev.elapsedMs)
   }
 
   const uploadOptions = { dataShards, parityShards, onShardUploaded }
@@ -951,26 +1040,35 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
   // frozen percent for up to 5 minutes.
   const STALL_MS = 20000
   let lastProgressAt = Date.now()
-  // WATCHDOG DISARM (2026-09-16, "tessera-web-add-false-fail-after-30of30"):
-  // operator report -- "progress bar stuck at 30/30, map lines drawn (real
-  // shards landed), then 'Could not reach storage hosts. Please try again.'"
-  // -- even though every shard had actually shipped. Root cause: this
-  // watchdog only resets lastProgressAt on onShardUploaded. Once the LAST
-  // shard lands (shardsLanded === expectedShards), no further shard events
-  // will EVER fire for this upload -- but the Rust SDK's Upload::finish()
-  // (called by sdk.upload() internally, confirmed in
+  // WATCHDOG DISARM (2026-09-16, "tessera-web-add-false-fail-after-30of30",
+  // M UPDATED 2026-09-17 "tessera-web-progress-denom"): operator report --
+  // "progress bar stuck at 30/30, map lines drawn (real shards landed),
+  // then 'Could not reach storage hosts. Please try again.'" -- even though
+  // every shard had actually shipped. Root cause: this watchdog only resets
+  // lastProgressAt on onShardUploaded. Once the LAST shard lands
+  // (shardsLanded === expectedShards), no further shard events will EVER
+  // fire for this upload -- but the Rust SDK's Upload::finish() (called by
+  // sdk.upload() internally, confirmed in
   // /tmp/sia-sdk-rs-full/sia_storage/src/upload.rs's finish()) still has to
   // AWAIT each slab task handle to completion after the last shard send --
   // real post-shard bookkeeping (erasure-coding finalization etc.), not a
   // stuck/hung write. If that legitimately takes longer than STALL_MS after
-  // shard #30/30, this watchdog fired a FALSE failure on an upload that had
-  // already fully shipped (and may go on to succeed anyway in the
+  // the last shard, this watchdog fired a FALSE failure on an upload that
+  // had already fully shipped (and may go on to succeed anyway in the
   // now-abandoned background promise -- see the "no cancel hook" comment
   // below). The watchdog's actual job -- catching a write that never
   // started, the "occupy 0 the whole time" bug it was built for -- is
   // already fully satisfied once all expected shards have landed, so it is
   // disarmed at that point rather than kept racing against finalization
   // time it was never designed to bound.
+  //
+  // `expectedShards` here is the SAME variable the progress-bar denominator
+  // above uses -- i.e. this packet's own computedM for the ACTUAL file size
+  // (a multiple of 30 for any multi-slab file), not the old hardcoded flat
+  // 30. A 250 MiB upload now only disarms after its real ~210 shards have
+  // landed, not after the first 30 -- fixing a would-be new false-failure
+  // window the old hardcoded disarm point would have reopened on any
+  // multi-slab file once M was corrected above.
   let shardsFullyLanded = false
   const onShardUploadedWithWatchdog = (ev) => {
     lastProgressAt = Date.now()

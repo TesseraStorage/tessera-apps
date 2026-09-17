@@ -3,6 +3,7 @@ import {
   initSia as initWasm,
   Builder, AppKey, PinnedObject,
   generateRecoveryPhrase, validateRecoveryPhrase,
+  encodedSize,
 } from '../vendor/sia-storage/dist/index.js'
 import { installFetchInterceptor, installWebTransportShim, registerSdk } from './interceptor.js'
 
@@ -24,7 +25,7 @@ export async function initSia(fetchMode) {
   await initWasm()
   _ready = true
 }
-export { Builder, AppKey, PinnedObject, generateRecoveryPhrase, validateRecoveryPhrase, registerSdk }
+export { Builder, AppKey, PinnedObject, generateRecoveryPhrase, validateRecoveryPhrase, registerSdk, encodedSize }
 
 // INDEXER BASE (2026-09-14, "tessera-web-v1"): Drop's fetch interceptor
 // (interceptor.js) rewrites any request whose URL contains the literal
