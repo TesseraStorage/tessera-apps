@@ -536,6 +536,19 @@ export async function mountApp(container) {
     // selection per "Empty selection: Move/Delete do nothing."
     r.btnSelectManyMove.disabled = v.length === 0 || getState().busy
     r.btnSelectManyDelete.disabled = v.length === 0 || getState().busy
+    // BUG FIX (2026-09-17, operator report: "the selected number never
+    // rises above 1"): renderFileList() builds each row's
+    // toggleChecked() closure over the `selectedIds` value from THAT
+    // render call -- this subscriber used to only update the count/
+    // button text above and never re-rendered the list, so every row's
+    // click handler kept closing over the STALE (often still-empty)
+    // array from the render before the user's first click. Each
+    // subsequent click computed `next = [...staleEmptyArray, thisEntry]`
+    // -- always length 1, no matter how many boxes were already
+    // checked. Re-rendering here rebuilds every row's closure against
+    // the CURRENT selectedIds so the next click always starts from the
+    // real running total, not a snapshot from mount time.
+    renderFileList()
   })
   subscribe('progress', v => {
     if (v) {
