@@ -80,6 +80,17 @@ const TOPOJSON_CLIENT_URL = 'https://unpkg.com/topojson-client@3'
 // this Dubai default on any denial/error/timeout, always quiet (never
 // prompts a permission dialog itself -- see setOrigin()'s permissions
 // .query() check).
+//
+// IP GEO FALLBACK ADDED (2026-09-18, "tessera-web-origin-ip-geo"):
+// browser geolocation almost never actually resolves in practice (this
+// app never triggers the permission prompt, only reads a position if
+// it happens to already be granted from some other context) -- so
+// nearly every visitor fell straight through to Dubai. trySetOrigin
+// FromGeolocation() now tries real geolocation first (unchanged), then
+// a keyless IP-geolocation lookup (ipwho.is, CORS-open, no server
+// proxy needed) before finally falling back to Dubai. Still zero
+// permission prompts, still fails quiet on any error -- same contract,
+// just a better-populated middle rung.
 let ORIGIN = { lat: 25.2, lon: 55.3 }  // Dubai, UAE -- default per this task's law
 
 // NAMED RATE/COUNT CONSTANTS (packet law: "Operator will turn these
@@ -178,22 +189,68 @@ export function lookupGeo(hostKey) {
 
 // Quiet, one-shot geolocation: only reads a position if the permission
 // is ALREADY granted (never triggers the browser's permission prompt
-// itself), and fails silently (Dubai stays as ORIGIN) on any denial,
-// error, or missing API. Called once, lazily, from createUploadMap's
-// init() -- not on page load/preload.
+// itself), and fails silently (falls through to IP geolocation, then
+// Dubai) on any denial, error, or missing API. Called once, lazily,
+// from createUploadMap's init() -- not on page load/preload.
+//
+// IP GEOLOCATION FALLBACK (2026-09-18, "tessera-web-origin-ip-geo"):
+// operator asked how to determine the user's approximate location
+// besides asking them to type it in. Browser geolocation ALREADY
+// covers the most-accurate case, but only fires if permission was
+// separately granted at some point -- which almost never happens in
+// practice (this app never prompts for it), so nearly every visit fell
+// straight through to the hardcoded Dubai default. IP-based
+// geolocation needs no permission prompt at all and resolves for
+// essentially every visitor, so it now sits as the middle rung: try
+// real geolocation first (still silent/no-prompt, unchanged), then IP
+// geo (new), then Dubai only if both fail.
+//
+// ipwho.is chosen specifically because it's free, keyless, HTTPS, and
+// serves `access-control-allow-origin: *` (confirmed live via curl) --
+// callable directly from the browser with a plain fetch(), no server-
+// side proxy needed. Same "fail quiet, never block the map" contract
+// as the geolocation branch: any network error, timeout, or malformed
+// response falls through to Dubai without throwing or logging noisily.
+// A short client-side timeout (2s, matching the geolocation branch's
+// own timeout) keeps a slow/blocked request from delaying map init.
+async function fetchIpGeoOrigin() {
+  try {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 2000)
+    const resp = await fetch('https://ipwho.is/', { signal: controller.signal })
+    clearTimeout(timer)
+    if (!resp.ok) return null
+    const data = await resp.json()
+    if (!data || data.success === false) return null
+    if (typeof data.latitude !== 'number' || typeof data.longitude !== 'number') return null
+    return { lat: data.latitude, lon: data.longitude }
+  } catch (_) {
+    return null  // fail quiet, let the caller fall through to Dubai
+  }
+}
+
 async function trySetOriginFromGeolocation() {
   try {
-    if (!navigator.geolocation || !navigator.permissions) return
-    const status = await navigator.permissions.query({ name: 'geolocation' })
-    if (status.state !== 'granted') return  // never prompt; Dubai stays
-    await new Promise((resolve) => {
-      navigator.geolocation.getCurrentPosition(
-        (pos) => { ORIGIN = { lat: pos.coords.latitude, lon: pos.coords.longitude }; resolve() },
-        () => resolve(),          // fail quiet, keep Dubai
-        { timeout: 2000, maximumAge: 300000 },
-      )
-    })
-  } catch (_) { /* fail quiet, keep Dubai */ }
+    if (navigator.geolocation && navigator.permissions) {
+      const status = await navigator.permissions.query({ name: 'geolocation' })
+      if (status.state === 'granted') {
+        const gotIt = await new Promise((resolve) => {
+          navigator.geolocation.getCurrentPosition(
+            (pos) => { ORIGIN = { lat: pos.coords.latitude, lon: pos.coords.longitude }; resolve(true) },
+            () => resolve(false),      // fail quiet, try IP geo next
+            { timeout: 2000, maximumAge: 300000 },
+          )
+        })
+        if (gotIt) return
+      }
+    }
+  } catch (_) { /* fail quiet, try IP geo next */ }
+  // IP GEO FALLBACK: only reached if browser geolocation wasn't
+  // granted, wasn't available, or itself failed/timed out above.
+  const ipGeo = await fetchIpGeoOrigin()
+  if (ipGeo) ORIGIN = ipGeo
+  // else: Dubai stays (the module-level default above), exactly as
+  // before this fallback existed.
 }
 
 // Simple equirectangular projection -- no d3-geo dependency needed for a
