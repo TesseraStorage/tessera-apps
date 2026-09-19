@@ -2380,7 +2380,30 @@ async function doUpload(file, destPathOverride) {
 async function onDownload() {
   const sf = selectedFile(); if (!sf) return
   const sdk = getState().sdk; if (!sdk) return
-  setBusy(true); patchState({ status: 'Downloading\u2026' })
+  setBusy(true)
+  // RESET (2026-09-19, "tessera-web-download-progress"): "After a passed
+  // upload the bar still says 'success!' and sits full. On Download,
+  // that stale pass stays." doUpload() leaves r.progressLabel showing
+  // '\u2705 Success!' and the bar at 100% (see doUpload's own SUCCESS
+  // LINE comment, ~line 2296) with progressWrap still unhidden -- a
+  // Download that follows immediately reused that exact same DOM state
+  // with nothing here to clear it. stopEase()/stopEncodingAnim() guard
+  // against any in-flight upload timer still running (same guards
+  // doUpload's own catch block uses); renderProgressBar(0) + explicit
+  // label text put the SAME progress row upload uses back to a genuine
+  // zero state before this download's own first tick can arrive.
+  stopEase()
+  stopEncodingAnim()
+  renderProgressBar(0)
+  r.progressWrap.classList.remove('hidden')
+  r.progressLabel.textContent = 'downloading (0%)'
+  // Old status-line message REMOVED here on purpose -- the packet's
+  // law is "do not put 'Downloading...' under the file list as the
+  // only signal." r.statusText stays whatever it already was (usually
+  // '') for this action; the progress row above is now the one and
+  // only place Download shows live status, exactly matching Add's own
+  // pattern (doUpload never writes to r.statusText for its own
+  // in-flight progress either).
   // MAP INBOUND HOOK (2026-09-15, "tessera-web-look-v1"): shows the map
   // and feeds it downloadToDisk's onShardDownloaded events, same
   // pattern doUpload uses for onShardUploaded -- landedHost's second
@@ -2400,21 +2423,49 @@ async function onDownload() {
   // exists, Download respects it exactly like every other action.
   if (getMapShownPref() === null) showMap()
   try {
-    await downloadToDisk(sdk, sf.id, sf.name, ({ hostKey, direction, transferMs }) => {
+    await downloadToDisk(sdk, sf.id, sf.name, ({ hostKey, direction, transferMs, percent }) => {
       if (mapController && hostKey) mapController.landedHost(hostKey, direction, transferMs)
+      // COPY (2026-09-19, "tessera-web-download-progress"): "downloading
+      // (N%)" -- same family as upload's "uploading (N/M)", no word
+      // "shards" per law. percent is always present on every tick
+      // downloadToDisk() sends (0 at start, per-shard/whole-blob ticks
+      // in between, 100 at genuine completion) -- never painted as a
+      // guess ahead of what actually landed.
+      if (typeof percent === 'number') {
+        renderProgressBar(percent)
+        r.progressLabel.textContent = 'downloading (' + percent + '%)'
+      }
     })
     if (mapController) mapController.completeWrite()
+    // DONE (2026-09-19, "tessera-web-download-progress"): "use one word
+    // for both" -- doUpload's own success line is '\u2705 Success!'
+    // (see its SUCCESS LINE comment above); reused verbatim rather than
+    // inventing a second word for the same outcome. Bar full first
+    // (downloadToDisk's own final percent:100 tick already did this,
+    // repeated here defensively), then hidden the same way doUpload's
+    // success path leaves it for the next action's 'encoding...' reset
+    // to take over -- progressWrap stays unhidden briefly so this text
+    // is visible, matching upload's own timing.
+    renderProgressBar(100)
+    r.progressLabel.textContent = '\u2705 Success!'
     showToast('\u2B07\uFE0F Downloaded: ' + sf.name)
-    patchState({ status: '' })
   } catch (e) {
     if (mapController) mapController.completeWrite()
     // COPY (2026-09-15, "tessera-web-look-v1"): same "no stack trace"
     // treatment as Add failed -- one quiet sentence, real error only
-    // to console.
-    patchState({ status: 'Could not download this file. Try again.' })
+    // to console. Per packet instruction 4 ("fail: existing calm
+    // sentence. Do not leave a full green bar from the previous
+    // upload") -- painted onto the SAME progress row the reset above
+    // already claimed, at whatever percent the last real tick reached
+    // (frozen, not forced to 0 or 100), mirroring doUpload's own fail
+    // path (renderProgressBar(0) there is the exception it uses for
+    // its OWN, different, fail case -- Download's law only asks that
+    // stale success not persist, not that the fail bar move at all).
+    r.progressLabel.textContent = 'Could not download this file. Try again.'
     console.error(e)
   } finally { setBusy(false) }
 }
+
 
 async function onDelete() {
   const sf = selectedFile(); if (!sf) return

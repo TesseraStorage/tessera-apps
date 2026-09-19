@@ -1161,8 +1161,19 @@ export async function downloadToDisk(sdk, objOrId, filename, onProgress) {
 
   // Web: use proxy relay
   try {
+    // PERCENT (2026-09-19, "tessera-web-download-progress"): the relay
+    // path returns one opaque Blob -- no per-chunk signal exists here
+    // (confirmed: relayFetch()/Response.blob() give nothing between
+    // request-sent and body-fully-buffered). Per the packet's own
+    // instruction 3 ("if neither exists, still reset the bar and count
+    // percent from whatever tick you have. Do not fake 100% at click"):
+    // an honest 0% bookend at start and 100% only once the blob has
+    // actually finished buffering -- no invented intermediate ticks,
+    // and the 100% is real completion, not a click-time lie.
+    if (onProgress) onProgress({ percent: 0 })
     const resp = await relayFetch('GET', 'download/' + objectId.replace(/\//g, ''))
     const blob = await resp.blob()
+    if (onProgress) onProgress({ percent: 100 })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
@@ -1192,8 +1203,28 @@ export async function downloadToDisk(sdk, objOrId, filename, onProgress) {
   // per-shard signal to hook -- it returns a single opaque Blob, so
   // downloads via that path have no inbound map trip; only the WASM
   // fallback path below can light up cyan arcs this packet.
+  //
+  // PERCENT (2026-09-19, "tessera-web-download-progress"): same
+  // computeExpectedShards() formula uploadFile() already uses for its
+  // own N/M denominator (10 data + 20 parity, fixed Tessera layout).
+  // obj.size() is the SAME PinnedObject accessor listFiles() already
+  // calls (files.js line ~694) -- not a new SDK surface. No hosts()
+  // call: this only counts shard-landed events the download was
+  // already making, exactly like the upload side.
+  const dataShards = 10
+  const parityShards = 20
+  let objSize = 0
+  try { objSize = obj.size ? obj.size() : 0 } catch (_) {}
+  const computedM = computeExpectedShards(objSize, dataShards, parityShards)
+  const expectedShards = computedM != null ? computedM : (dataShards + parityShards)
+  let shardsLanded = 0
+  if (onProgress) onProgress({ percent: 0 })
   const downloadOptions = onProgress
-    ? { onShardDownloaded: (ev) => onProgress({ hostKey: ev && ev.hostKey, direction: 'download', transferMs: ev && ev.elapsedMs }) }
+    ? { onShardDownloaded: (ev) => {
+        shardsLanded += 1
+        const pct = Math.min(100, Math.round((shardsLanded / expectedShards) * 100))
+        onProgress({ hostKey: ev && ev.hostKey, direction: 'download', transferMs: ev && ev.elapsedMs, percent: pct })
+      } }
     : {}
   // FIX (2026-09-16, "tessera-web-inflight-v2"): operator's stated
   // intent was "concurrency on downloads was intended to be 10" --
@@ -1208,6 +1239,13 @@ export async function downloadToDisk(sdk, objOrId, filename, onProgress) {
   }
   const stream = sdk.download(obj, Object.keys(downloadOptions).length ? downloadOptions : undefined)
   const blob = await new Response(stream).blob()
+  // Belt-and-braces final tick: rounding in the per-shard formula above
+  // can land just under 100 on the very last shard (integer rounding),
+  // and a trivial/zero-shard object never fires onShardDownloaded at
+  // all -- this guarantees the bar always reaches exactly 100 once the
+  // blob has genuinely finished, matching uploadFile()'s own explicit
+  // renderProgressBar(100) call on its success path.
+  if (onProgress) onProgress({ percent: 100 })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url; a.download = filename || 'download'; a.click()
