@@ -880,19 +880,39 @@ async function onRecoverContinue() {
 
 async function onUnlock() {
   const pw = r.unlockPassword.value
-  if (!pw) { r.unlockStatus.textContent = 'Please enter your password.'; return }
+  if (!pw) { r.unlockStatus.textContent = 'Enter your password.'; return }
 
   r.btnUnlock.disabled = true
-  r.unlockStatus.textContent = ''
+  r.unlockStatus.textContent = 'Unlocking\u2026'
 
   try {
     const appKeyHex = await unwrapAppKey(pw, PREFIX)
     const { appId } = getSaved(PREFIX)
-    const sdk = await reconnectWithAppKey(appId, appKeyHex, 'idx')
+    // TIMEOUT (2026-09-19, "tessera-web-unlock-hang"): reconnectWithAppKey()
+    // has NO internal cap of its own -- it directly `await`s
+    // `builder.connected(key)`, a WASM call into the SDK's own
+    // connect/account logic, with nothing bounding how long that can take.
+    // auth.js's internal try/catch only covers a SYNCHRONOUS throw or a
+    // rejected promise; it does nothing if that promise simply never
+    // settles. When it hangs, this await never returns, the catch below
+    // never fires, and the button stays disabled forever with no status
+    // text -- this IS the silent Unlock hang the packet reports. Reuse
+    // the same Promise.race timeout technique files.js's own
+    // waitForReady(sdk, 10000) already uses elsewhere on this exact
+    // account-ready check, so one stuck connect attempt becomes a fast,
+    // visible failure instead of an indefinite freeze. Per law: never
+    // await map origin / ipwho.is / hosts() on this path -- this timeout
+    // wraps ONLY the reconnect/account call already on this path, it
+    // does not add any new network call.
+    let timer = null
+    const sdk = await Promise.race([
+      reconnectWithAppKey(appId, appKeyHex, 'idx'),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('reconnect timed out')), 10000) }),
+    ]).finally(() => { if (timer) clearTimeout(timer) })
     if (!sdk) {
       // Wrong password or a stale/rejected key -- stay, do NOT delete
       // the vault, per law.
-      r.unlockStatus.textContent = 'Wrong password.'
+      r.unlockStatus.textContent = 'That password did not work.'
       r.btnUnlock.disabled = false
       return
     }
@@ -902,9 +922,17 @@ async function onUnlock() {
     r.unlockPassword.value = ''
     await enterFiles()
   } catch (e) {
+    if (e && e.message === 'reconnect timed out') {
+      // Reconnect/account/wasm init never resolved within the 10s cap --
+      // stay on Unlock, vault untouched, re-enable the button per law.
+      r.unlockStatus.textContent = 'Could not reach your account. Try again.'
+      r.btnUnlock.disabled = false
+      console.error(e)
+      return
+    }
     // unwrapAppKey throws on a wrong password too (AES-GCM auth-tag
     // mismatch) -- same "stay on Unlock, vault untouched" outcome.
-    r.unlockStatus.textContent = 'Wrong password.'
+    r.unlockStatus.textContent = 'That password did not work.'
     r.btnUnlock.disabled = false
     console.error(e)
   }
