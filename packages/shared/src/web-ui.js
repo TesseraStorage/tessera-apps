@@ -2047,6 +2047,55 @@ function setProgressTarget(pct) {
   }, 80)
 }
 
+// COPY TABLE (2026-09-19, "tessera-web-add-fail-copy"): the only four
+// sentences an Add failure may show on the page, per this packet's
+// public copy table. No jargon, no host key, no protocol name.
+const FAIL_CLASS_COPY = {
+  stall: 'Could not reach storage hosts. Please try again.',
+  connect: 'Could not connect to storage hosts. Check your network and try again.',
+  ready: 'Storage is taking longer than expected. Please try again.',
+  generic: 'Could not add this file. Try again.',
+}
+// Quiet support tag appended to the same label, same size, per packet
+// instruction 3 -- not explained on the page.
+const FAIL_CLASS_TAGS = { stall: ' (T20)', connect: ' (TWT)', ready: ' (TR)', generic: ' (T0)' }
+
+// SWALLOW FIX (2026-09-19, "tessera-web-add-fail-copy"): maps a thrown
+// Error from uploadFile()/waitForReady() to one of the four classes
+// above. `sawShards` (doUpload's sawRealShardProgress) is the only
+// piece of state used to distinguish "sdk.upload() itself failed
+// before any shard" (connect) from "something failed after shards
+// were already landing" (generic, e.g. sdk.pinObject() throwing) --
+// there is no message string common to every possible sdk.upload()
+// handshake/network rejection to match on instead (confirmed: the
+// wasm SDK's own transport-open failures are opaque, non-uniform
+// strings -- see this packet's recon). The two watchdog throws
+// (stall, ready) DO have fixed, known message text, so those are
+// matched first and take priority over the sawShards fallback.
+function classifyAddFailure(e, sawShards) {
+  const msg = (e && e.message) || ''
+  // stall: files.js's own STALL_MS watchdog Error (line ~1115) -- its
+  // message IS ALREADY this exact public sentence per the packet's
+  // rule ("If the thrown Error message is already one of the public
+  // sentences in the table below, show that sentence"), matched
+  // verbatim rather than re-derived.
+  if (msg === FAIL_CLASS_COPY.stall) return 'stall'
+  // ready: waitForReady()'s own cap-exceeded throw (files.js line
+  // ~1323), fixed prefix regardless of the timeoutMs value passed in.
+  if (msg.indexOf('Account not ready after') === 0) return 'ready'
+  // connect: the tunnel-unavailable throw (files.js line ~901-903,
+  // Drop's shimmed WebTransport path only -- window.___wtpoly___ gate).
+  if (msg.indexOf('File storage is temporarily unavailable') === 0) return 'connect'
+  // connect (fallback): no shard had landed yet when this rejected --
+  // sdk.upload() itself never got a single shard out, i.e. its own
+  // handshake/network open failed. Per the packet's table this is the
+  // "connect" class regardless of the SDK's own raw message text.
+  if (!sawShards) return 'connect'
+  // generic: anything else, including a pin/finalize failure
+  // (sdk.pinObject() throwing) after shards had already landed.
+  return 'generic'
+}
+
 async function doUpload(file, destPathOverride) {
   const sdk = getState().sdk; if (!sdk) return
   setBusy(true)
@@ -2090,6 +2139,16 @@ async function doUpload(file, destPathOverride) {
   // status is left exactly as it already was (usually '') rather than
   // set to a placeholder string.
   patchState({ status: '' })
+  // SWALLOW FIX (2026-09-19, "tessera-web-add-fail-copy"): tracks whether
+  // any REAL shard-landed tick was ever seen for this Add attempt (the
+  // `else` branch below, after the 'encoding...' branch returns) -- not
+  // reset by anything else. Used only in the catch below to distinguish
+  // "failed before any shard" (connect class) from "failed after shards
+  // were already landing" (generic class, includes pin/finalize
+  // failures) -- see the catch's own comment for why a structural check
+  // like this is used instead of string-matching the SDK's own opaque
+  // WebTransport error text.
+  let sawRealShardProgress = false
   try {
     // FIX (2026-09-15, "tessera-web-folder-create-fail"): "Add must not
     // hang with no error. If it cannot start the write, fail visible in
@@ -2186,6 +2245,11 @@ async function doUpload(file, destPathOverride) {
       // shipping -- stop the encoding animation now that a real
       // progress tick is about to overwrite the same label text.
       stopEncodingAnim()
+      // SWALLOW FIX (2026-09-19, "tessera-web-add-fail-copy"): every tick
+      // that reaches this branch (anything past the 'encoding...' guard
+      // above) is real onShardUploaded/pinning/done progress -- see
+      // doUpload's own sawRealShardProgress declaration above.
+      sawRealShardProgress = true
       if (getState().status) patchState({ status: '' })
       // Real target only -- setProgressTarget's own ease-out never passes
       // this value (see EASE_MS comment above). The 'done' tick still
@@ -2239,23 +2303,37 @@ async function doUpload(file, destPathOverride) {
     // encoding animation could still be running -- stop it so it
     // doesn't keep animating underneath/behind the fail text.
     stopEncodingAnim()
-    // COPY (2026-09-15, "tessera-web-look-v1"): "Add failed: one
-    // sentence + try again. No stack trace." Was 'Add failed: ' +
-    // e.message, which could surface a raw SDK/network error string
-    // (a de-facto stack trace to a non-technical reader). One quiet,
-    // fixed sentence now -- the real e is still logged to console
-    // below for debugging, just never shown in the UI.
-    //
-    // MOVED (2026-09-16, per operator instruction): this fail line now
-    // renders in r.progressLabel -- the SAME progress-bar row the
-    // encoding/success text uses -- instead of r.statusText (a
-    // separate paragraph below the file list, where this used to
-    // surface and read as visually disconnected from the Add that
-    // actually failed). progressWrap is kept unhidden (not reset to
-    // `progress: null`) so the fail text is actually visible, same
-    // pattern as the success line above.
+    // SWALLOW FIX (2026-09-19, "tessera-web-add-fail-copy"): the OLD
+    // code below this comment used to overwrite EVERY throw with the
+    // same generic sentence, no matter which of the throw paths in
+    // uploadFile()/waitForReady() actually fired -- "stall", "ready
+    // cap", and "sdk.upload() itself" all landed on one indistinguishable
+    // string. classifyAddFailure() (top of file) maps e.message to one
+    // of the four public-copy classes per this packet's table:
+    //   stall   -- files.js's own stall-watchdog Error, message is
+    //              ALREADY the public sentence (exact match, kept as-is)
+    //   ready   -- waitForReady()'s 'Account not ready after Ns' throw
+    //              (files.js line ~1323), matched by substring
+    //   connect -- either the tunnel-unavailable throw (files.js line
+    //              ~901-903, Drop's shimmed path only) matched by
+    //              substring, OR any other throw that reached here
+    //              with sawRealShardProgress still false -- i.e.
+    //              sdk.upload() itself failed (handshake/network)
+    //              before a single shard landed
+    //   generic -- anything else, including a pin/finalize failure
+    //              (sdk.pinObject() throwing) after shards had already
+    //              landed -- sawRealShardProgress is true in that case,
+    //              so it falls through to generic exactly per the table
+    const failClass = classifyAddFailure(e, sawRealShardProgress)
+    const tag = FAIL_CLASS_TAGS[failClass]
     renderProgressBar(0)
-    r.progressLabel.textContent = 'Could not add this file. Try again.'
+    r.progressLabel.textContent = FAIL_CLASS_COPY[failClass] + tag
+    // Console-only diagnostic line for support -- never printed on the
+    // page itself. Host URLs inside e.message (if any) are already
+    // visible in the browser's own network panel per this packet's law,
+    // so they are allowed to pass through in `raw` here unredacted; no
+    // phrase/AppKey/cookie/vault value is ever logged by this function.
+    console.error('tessera-add-fail class=' + failClass + ' raw=' + (e && e.message))
     // FIX (2026-09-14, "tessera-web-occupy-fade"): "completeWrite() (or
     // equivalent) runs when uploadFile resolves OR REJECTS. Arcs fade.
     // A hung Add must not leave gold lines forever." Previously only
@@ -2268,7 +2346,6 @@ async function doUpload(file, destPathOverride) {
     // completeWrite() already respects unconditionally), while only
     // the arc LINES fade -- consistent with a successful completion.
     if (mapController) mapController.completeWrite()
-    console.error(e)
   } finally { setBusy(false) }
 }
 
