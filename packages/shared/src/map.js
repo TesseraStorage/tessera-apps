@@ -205,14 +205,44 @@ export function lookupGeo(hostKey) {
 // real geolocation first (still silent/no-prompt, unchanged), then IP
 // geo (new), then Dubai only if both fail.
 //
-// ipwho.is chosen specifically because it's free, keyless, HTTPS, and
-// serves `access-control-allow-origin: *` (confirmed live via curl) --
-// callable directly from the browser with a plain fetch(), no server-
-// side proxy needed. Same "fail quiet, never block the map" contract
-// as the geolocation branch: any network error, timeout, or malformed
-// response falls through to Dubai without throwing or logging noisily.
-// A short client-side timeout (2s, matching the geolocation branch's
-// own timeout) keeps a slow/blocked request from delaying map init.
+// REVERTED BACK TO DIRECT ipwho.is (2026-09-19, "tessera-web-map-origin"):
+// a same-day uncommitted change (never shipped -- caught in this
+// packet's own recon before deploy) had routed this through Tessera's
+// own /origin route (hostfilter :19983) instead of calling ipwho.is
+// directly, on the theory that hostfilter's server-side IP resolution
+// and the map's pin should share one provenance. That theory is sound
+// server-side (hostfilter's own resolvePoint() DOES correctly resolve
+// a Switzerland IP to Zurich -- confirmed live by forcing X-Forwarded-For:
+// 193.32.127.189 directly against https://index.dithr.dev/origin, which
+// returns lat 47.43/lon 8.58). The bug is one layer up: NEITHER nginx
+// proxy hop that fronts /origin for a browser (siagate.dev's own
+// /v2/tessera/web/idx/ location, and Drop's /v2/tessera/drop/idx/
+// sibling) sets X-Forwarded-For or X-Real-IP -- confirmed by reading
+// every location block in /etc/nginx/sites-enabled/siagate.dev; neither
+// proxy_set_header appears anywhere in that file. So every browser
+// request that actually reaches hostfilter's /origin through THIS
+// app's own same-origin proxy chain arrives with no client-IP header
+// at all, and hostfilter falls back to seeing the proxying box's own
+// egress IP (this box's own IP resolves to Singapore) for every single
+// visitor, regardless of their real location -- this is the exact "CH
+// VPN, still draws SG" bug this packet reports, and it reproduces for
+// ANY visitor, not just VPN users. That nginx config is Hermes's lane
+// (source of truth s1-hermes/dashboard/nginx-siagate.conf, mirrored
+// into place and overwritten within 60s of any direct edit) and out of
+// this packet's law (no hostfilter/nginx changes from this chair) --
+// so from the Tessera Web browser's own vantage point, hostfilter's
+// /origin is CURRENTLY equivalent to "does not exist" for real-IP
+// resolution (per this packet's own bullet 2: "if it does not exist,
+// keep one browser ipwho.is call"). Reverted to that direct call,
+// which the operator's own test already proved resolves correctly
+// (Switzerland VPN -> ipwho.is -> Zurich, verbatim in this packet's
+// own payload). No IP-keyed cache is added: ORIGIN is a plain
+// in-memory module variable, and this fetch runs exactly once per
+// createUploadMap() instantiation (once per full page load -- see
+// ensureMapController()'s own "created lazily, stable per page load"
+// comment in web-ui.js) -- there is no persisted point to go stale
+// across IP changes; a full reload (the operator's own repro step)
+// already gets a fresh fetch for the current public IP every time.
 async function fetchIpGeoOrigin() {
   try {
     const controller = new AbortController()
