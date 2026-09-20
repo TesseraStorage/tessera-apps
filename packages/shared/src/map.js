@@ -71,6 +71,16 @@ export function normalizeHostKey(key) {
 
 const GEO_URL = '/v2/tessera/geo/geo.json'
 const LAND_TOPOJSON_URL = 'https://unpkg.com/world-atlas@2/land-110m.json'
+// COUNTRY BORDERS (2026-09-20, operator request): "is there an option
+// to add country borders? If yes, add." world-atlas -- the same
+// package land-110m.json already comes from -- also ships a
+// countries-110m.json topology at the identical 110m resolution (same
+// TopoJSON quantization/projection as the land file, so no new scale/
+// alignment logic is needed to draw them together). Fetched alongside
+// land below, drawn as a topojson.mesh() (deduplicated shared-edge
+// lines, not per-country fill+stroke) so adjacent countries don't get
+// a double-thickness line down their shared border.
+const COUNTRIES_TOPOJSON_URL = 'https://unpkg.com/world-atlas@2/countries-110m.json'
 const TOPOJSON_CLIENT_URL = 'https://unpkg.com/topojson-client@3'
 
 // ORIGIN (2026-09-14, "tessera-web-map-30"): "Browser geolocation if the
@@ -126,6 +136,7 @@ const LINE_FLOOR_MS = 4000
 
 let _geoCache = null       // host_key -> {lat, lon}
 let _landFeature = null    // GeoJSON FeatureCollection (land polygons)
+let _borderMesh = null     // GeoJSON MultiLineString (country borders, deduplicated shared edges)
 let _loadPromise = null
 
 function loadScript(src) {
@@ -162,6 +173,25 @@ async function ensureAssets() {
         _landFeature = window.topojson.feature(topo, topo.objects.land)
       }
     } catch (_) { _landFeature = null }
+    // COUNTRY BORDERS (2026-09-20, operator request): fetched as its
+    // own separate request, in parallel with nothing blocking it --
+    // land-110m.json above already resolved by the time this fires,
+    // but this file failing/being slow must never take down the land
+    // fill it's layered on top of (same fail-quiet contract as land
+    // and geo above -- try/catch to null, drawBorders() below already
+    // no-ops on a null mesh).
+    try {
+      const countriesResp = await fetch(COUNTRIES_TOPOJSON_URL)
+      const countriesTopo = await countriesResp.json()
+      if (window.topojson && window.topojson.mesh) {
+        // topojson.mesh() with no filter returns every shared edge
+        // ONCE (arcs shared by two countries are not double-drawn),
+        // unlike drawing each country's own ring separately the way
+        // drawLand() does for fill -- this is the standard mesh usage
+        // for "draw the boundary lines" per topojson-client's own docs.
+        _borderMesh = window.topojson.mesh(countriesTopo, countriesTopo.objects.countries)
+      }
+    } catch (_) { _borderMesh = null }
   })()
   return _loadPromise
 }
@@ -296,7 +326,12 @@ function drawLand(ctx, w, h) {
   ctx.fillStyle = '#080c12'
   ctx.fillRect(0, 0, w, h)
   if (!_landFeature) return
-  ctx.fillStyle = '#111a24'
+  // BRIGHTEN (2026-09-20, operator request: "brighten the landmass
+  // ... by 10%"): #111a24 (17,26,36) -> #131d28 (19,29,40), each
+  // channel *1.1 rounded, clamped at 255 (no channel here is close to
+  // clamping). Outline color (#1e2d3d) is unchanged -- the request
+  // was scoped to the landmass fill, not its border stroke.
+  ctx.fillStyle = '#131d28'
   ctx.strokeStyle = '#1e2d3d'
   ctx.lineWidth = 0.5
   for (const feat of _landFeature.features || [_landFeature]) {
@@ -332,7 +367,39 @@ function drawLand(ctx, w, h) {
       }
     }
   }
+  drawBorders(ctx, w, h)
 }
+
+// COUNTRY BORDERS (2026-09-20, operator request): draws _borderMesh
+// (a topojson.mesh() MultiLineString -- see ensureAssets()) as thin
+// open lines, NOT closed/filled shapes -- unlike drawLand()'s ring
+// loop above, a mesh's LineString segments are open paths (they do
+// not return to their own start point), so this uses ctx.stroke()
+// only, no ctx.closePath()/ctx.fill(). Drawn AFTER the land fill so
+// borders sit on top of it, not underneath. Same antimeridian-wrap
+// guard as drawLand()'s ring loop, for the same reason (a border
+// segment crossing the dateline would otherwise draw one long chord
+// straight across the canvas).
+function drawBorders(ctx, w, h) {
+  if (!_borderMesh) return
+  const lineStrings = _borderMesh.type === 'MultiLineString' ? _borderMesh.coordinates : [_borderMesh.coordinates]
+  ctx.strokeStyle = '#2a3d52'
+  ctx.lineWidth = 0.5
+  for (const line of lineStrings) {
+    let started = false
+    let prevLon = null
+    ctx.beginPath()
+    line.forEach(([lon, lat]) => {
+      const [x, y] = project(lat, lon, w, h)
+      const crossedAntimeridian = prevLon !== null && Math.abs(lon - prevLon) > 180
+      if (!started || crossedAntimeridian) { ctx.moveTo(x, y); started = true }
+      else { ctx.lineTo(x, y) }
+      prevLon = lon
+    })
+    ctx.stroke()
+  }
+}
+
 
 // Small radial glow. Still used as-is for traveling dots (2026-09-16
 // "sharper fixed dots" packet: "Traveling dots, no change").
