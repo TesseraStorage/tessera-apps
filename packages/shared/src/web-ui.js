@@ -2413,6 +2413,17 @@ function printAddTime(t0, marks, okTag, expectedShards) {
   )
   window.__tesseraAddTimes.push(row)
   if (window.__tesseraAddTimes.length > 20) window.__tesseraAddTimes.shift()
+  // LAST-TICK HOST TRACE (2026-09-20, "tessera-web-29-of-30"): "the
+  // last 3 ticks: i= host=" -- a SECOND console line (not appended to
+  // tessera-add-time itself, keeping that line's own fixed shape
+  // untouched) so a failed Add's console shows which host(s) never
+  // reported the final shard. marks.lastTicks is files.js's own
+  // capped-at-3 array (ShardProgress.shardIndex/hostKey, confirmed
+  // fields per that packet's .d.ts citation) -- no new hosts() call,
+  // purely a readback of ticks the write already produced.
+  const lastTicks = (marks && Array.isArray(marks.lastTicks)) ? marks.lastTicks : []
+  const shardStr = lastTicks.map((t) => 'i=' + fmt(t.i) + ' host=' + fmt(t.host)).join(' | ')
+  console.info('tessera-add-shard ' + (shardStr || '(no shards landed)'))
   // OPTIONAL SUMMARY SENTENCE (packet section 2, "Optional"): one quiet
   // line under the progress row, same family/size as status text, no
   // raw JSON. Only painted when both halves are known -- ship/us both

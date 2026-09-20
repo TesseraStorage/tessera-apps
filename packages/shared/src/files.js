@@ -1006,17 +1006,27 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
   // actually see from inside the WASM upload path. t_first/t_last are
   // captured here since onShardUploaded is the only place that knows
   // "this was the first/last shard" without re-deriving it downstream.
-  const marks = { t_encode: null, t_first: null, t_last: null, t_pin_start: null, t_pin_ok: null, t_upload_ok: null, expectedShards: null, shardsLanded: 0 }
+  const marks = { t_encode: null, t_first: null, t_last: null, t_pin_start: null, t_pin_ok: null, t_upload_ok: null, expectedShards: null, shardsLanded: 0, lastTicks: [] }
   const onShardUploaded = (ev) => {
-    // ev shape per the wasm binary's own field names: hostKey, shardSize,
-    // shardIndex, slabIndex, elapsedMs. computedM (above) is already the
-    // authoritative total for this file, computed once before upload
-    // started -- the SDK's own per-event expectedShards (if it ever
-    // reports one) is now only used as a defensive fallback when
-    // computedM itself was unavailable, never allowed to override a
-    // value we already know is correct.
+    // ev shape per the wasm binary's own field names, CONFIRMED against
+    // node_modules/@siafoundation/sia-storage/wasm/sia_storage_wasm.d.ts's
+    // ShardProgress interface (2026-09-20, "tessera-web-29-of-30" --
+    // vendored wasm binary is byte-identical to that package's own wasm,
+    // md5-verified): hostKey, shardSize, shardIndex, slabIndex, elapsedMs.
+    // computedM (above) is already the authoritative total for this
+    // file, computed once before upload started -- the SDK's own
+    // per-event expectedShards (if it ever reports one) is now only used
+    // as a defensive fallback when computedM itself was unavailable,
+    // never allowed to override a value we already know is correct.
     shardsLanded += 1
     marks.shardsLanded = shardsLanded
+    // LAST-TICK HOST TRACE (2026-09-20, "tessera-web-29-of-30"): "add
+    // the last 3 ticks: i= host=" so a failed Add's console line shows
+    // which host never reported tick 30. Capped at 3 (shift the oldest
+    // out) -- ShardProgress.shardIndex/hostKey are the exact confirmed
+    // fields above, no new signal invented.
+    marks.lastTicks.push({ i: (ev && ev.shardIndex), host: (ev && ev.hostKey) })
+    if (marks.lastTicks.length > 3) marks.lastTicks.shift()
     // ADD STAGE CLOCKS: t_first is the first shard ever seen for this
     // Add; t_last is set once this shard makes shardsLanded reach
     // expectedShards (mirrors the exact WATCHDOG DISARM condition
@@ -1226,6 +1236,23 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
   // stopped, matching the top-of-file comment's stated fix.
   let pinPromiseRef = null
   let stallTimer = null
+  // TAIL STALL (2026-09-20, "tessera-web-29-of-30"): "28 or 29
+  // onShardUploaded ticks, then 20s with no tick 30, T0." Confirmed
+  // via node_modules/@siafoundation/sia-storage/wasm/sia_storage_
+  // wasm.d.ts (ShardProgress has no partial/total-override field,
+  // and the vendored wasm binary is byte-identical to this .d.ts's
+  // own package -- md5 3efe5aae0f9ee84af738f78e620749af both places)
+  // that a completed slab always ships the full dataShards+
+  // parityShards set -- so M=30 stays correct; this is NOT an M bug,
+  // it's a genuinely slow LAST host on an otherwise-healthy slab.
+  // "One slow tail host on a 4 MiB sector can be late; 20s after 29
+  // is how we T0 a live last write." Extends the budget ONLY once
+  // near the very end (>= expectedShards - 2, covers both 28/30 and
+  // 29/30 per the packet's own instruction), never from shard 1 --
+  // an early stall (a write that never really started) still fails
+  // at the original 20s.
+  const TAIL_STALL_MS = 45000
+  const stallBudgetMs = () => (shardsLanded >= expectedShards - 2 ? TAIL_STALL_MS : STALL_MS)
   const stallPromise = new Promise((_, reject) => {
     stallTimer = setInterval(() => {
       // See WATCHDOG DISARM comment above: once every expected shard has
@@ -1234,7 +1261,7 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
       // Never reject past that point; let the real uploadPromise settle on
       // its own, however long that legitimately takes.
       if (shardsFullyLanded) { clearInterval(stallTimer); return }
-      if (Date.now() - lastProgressAt > STALL_MS) {
+      if (Date.now() - lastProgressAt > stallBudgetMs()) {
         clearInterval(stallTimer)
         reject(new Error('Could not reach storage hosts. Please try again.'))
       }
