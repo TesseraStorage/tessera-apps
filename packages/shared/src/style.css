@@ -444,10 +444,18 @@ input:focus { border-color: var(--cyan); }
 }
 
 /* ── drag & drop zone ─────────────────────────────────── */
+/* HEIGHT (2026-09-19, "tessera-web-bar-zero" packet, operator request):
+   "reduce the height of the drop file box to the minimum needed to
+   accommodate the text+icon." Was 40px/20px padding with a 36px icon
+   and generous margins -- tightened to the smallest padding/icon/
+   margin set that still shows all three lines (icon, "Add a file",
+   hint) without touching/clipping. No layout properties beyond
+   padding/font-size/margin touched -- border, radius, cursor,
+   transition, hover/dragover states all unchanged. */
 .dropzone {
   border: 2px dashed var(--border2);
   border-radius: var(--radius);
-  padding: 40px 20px;
+  padding: 10px 20px;
   text-align: center;
   transition: all .2s;
   cursor: pointer;
@@ -459,8 +467,8 @@ input:focus { border-color: var(--cyan); }
   background: rgba(6, 182, 212, 0.04);
 }
 .dropzone .dz-icon {
-  font-size: 36px;
-  margin-bottom: 8px;
+  font-size: 20px;
+  margin-bottom: 2px;
   opacity: .7;
 }
 .dropzone .dz-text {
@@ -470,7 +478,7 @@ input:focus { border-color: var(--cyan); }
 .dropzone .dz-hint {
   color: var(--ink3);
   font-size: 12px;
-  margin-top: 4px;
+  margin-top: 2px;
 }
 
 /* ── file list ────────────────────────────────────────── */
@@ -910,5 +918,5 @@ input:focus { border-color: var(--cyan); }
   .app-header { gap: 8px; }
   .app-header .storage-summary { display: none; }
   .file-row .file-size { display: none; }
-  .dropzone { padding: 24px 14px; }
+  .dropzone { padding: 10px 14px; }
 }

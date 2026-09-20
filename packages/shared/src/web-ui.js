@@ -2148,6 +2148,26 @@ async function doUpload(file, destPathOverride) {
   // IS the moment the preference is born.
   if (getMapShownPref() === null) showMap()
   stopEase()
+  // BAR-TO-ZERO-AT-START (2026-09-19, "tessera-web-bar-zero"): "When a
+  // new upload starts, the progress bar must go to zero immediately."
+  // Previously the bar/wrap were left completely untouched here (see
+  // the REMOVED note just below, still accurate for the `patchState`
+  // part) -- so a bar left at 100% from the PREVIOUS successful Add
+  // (doUpload's own success path sets exactly this: renderProgressBar
+  // (100) + progressWrap still unhidden, see the SUCCESS LINE comment
+  // further down) stayed painted at full width through drop, the Ready
+  // wait, and the entire 'encoding...' phase -- only the first REAL
+  // onShardUploaded tick's setProgressTarget(percent) call ever touched
+  // the bar's width again. Explicit reset right here, before any of
+  // that, guarantees a fresh Add always starts from a genuine zero-
+  // width bar, never the previous job's full one. stopEncodingAnim()
+  // guards the same "a still-running previous animation timer" case
+  // stopEase() already guards for the ease timer -- both are already
+  // idempotent no-ops if nothing is running.
+  stopEncodingAnim()
+  renderProgressBar(0)
+  r.progressWrap.classList.remove('hidden')
+  r.progressLabel.textContent = ''
   // BAR HOLD (2026-09-16, "tessera-web-encode-hold"): "The progress
   // bar does not exist yet. No bar during drop, Ready wait, or
   // encoding." REMOVED: the old `renderProgressBar(0)` +
@@ -2166,6 +2186,18 @@ async function doUpload(file, destPathOverride) {
   // encoding phase. "No 'Preparing...'. No bar at 0% before ship." --
   // status is left exactly as it already was (usually '') rather than
   // set to a placeholder string.
+  //
+  // REVISED (2026-09-19, "tessera-web-bar-zero"): the bar/wrap ARE now
+  // explicitly reset above -- what remains true from the ORIGINAL note
+  // is that no PLACEHOLDER STATUS STRING (like the old 'Preparing...')
+  // is set; status stays '' below exactly as before. The "no bar
+  // visible before ship" law from 2026-09-16 has been superseded by
+  // this packet's explicit instruction: show the wrap immediately, at
+  // zero width, so the previous job's full bar can never be seen
+  // through this window -- the two laws would conflict on a repeat Add
+  // otherwise, and this packet's own reproduction ("previous job's
+  // full bar sitting there during the first status word") is exactly
+  // that conflict.
   patchState({ status: '' })
   // SWALLOW FIX (2026-09-19, "tessera-web-add-fail-copy"): tracks whether
   // any REAL shard-landed tick was ever seen for this Add attempt (the
