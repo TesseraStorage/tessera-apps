@@ -1147,20 +1147,36 @@ function updateTotals() {
     : ''
 }
 
-// FILE MENU (2026-09-19, "tessera-web-file-menu"): "A vertical overlay
-// menu to the right of that row, shifted up or down so every item
-// stays on screen." openFileMenu() anchors #fileMenu (position: fixed,
-// see style.css) to the clicked row's own bounding rect, then clamps
-// against the files pane AND the viewport -- whichever is tighter --
-// exactly the "if it would clip the files pane or the viewport, shift
-// it up (or down)" law. Sits above the list paint via z-index only
-// (see .file-menu in style.css); never resizes/repositions any other
-// element, so it cannot push layout the way the old always-visible
-// .actions-bar row did.
+// FILE MENU (2026-09-19, "tessera-web-file-menu"; REPOSITIONED
+// 2026-09-20, operator report -- "opens top/left of the page,
+// instead of right of the selected file/folder"): the ORIGINAL
+// clamp bounded the menu's right edge against #filesLayout's own
+// right edge (the files pane) -- but a file/folder row already
+// spans that pane's FULL WIDTH (see .file-row in style.css, no
+// margin/inset from the panel edge), so rowRect.right sits AT or
+// PAST the pane's own right boundary on every row, every time. That
+// made the "would it clip the pane's right edge" check fire
+// unconditionally, flipping the menu to the row's LEFT side on
+// essentially every click -- never actually opening to the right,
+// exactly the reported bug. FIX: clamp against the VIEWPORT only
+// (window.innerWidth/innerHeight), not the narrow files-pane column
+// -- the popup is a page-level overlay (position: fixed, z-index
+// above everything), it has no reason to stay boxed inside a 420px
+// column when the rest of the page (map pane, empty space) is right
+// there. Falling back to the row's left side is now a true last
+// resort: only when the viewport itself has no room to the right,
+// not whenever the narrow file list column runs out.
+//
+// VERTICAL: "if there is space, center it vertically on the file/
+// folder clicked" -- default anchor is now the row's OWN vertical
+// center, not its top. "If near the bottom of the page, adjust up
+// until it entirely shows" -- shifts up (never down past the
+// viewport's own top) exactly enough to fit, same clip-flip
+// mechanism as before, just centered instead of top-anchored as the
+// starting point.
 function positionFileMenu(anchorRow) {
   const menu = r.fileMenu
   const rowRect = anchorRow.getBoundingClientRect()
-  const paneRect = r.filesLayout ? r.filesLayout.getBoundingClientRect() : document.documentElement.getBoundingClientRect()
   // Measure the menu's own natural size first (still hidden -> 0x0),
   // so open it invisibly-but-measurable before the real paint.
   menu.style.visibility = 'hidden'
@@ -1170,39 +1186,37 @@ function positionFileMenu(anchorRow) {
 
   const viewportW = window.innerWidth
   const viewportH = window.innerHeight
-  // Right edge of the pane (or viewport, whichever is tighter) bounds
-  // where the menu's LEFT edge may sit -- anchored to the row's right
-  // edge by default, per "anchored to the right of that row."
-  const paneRight = Math.min(paneRect.right, viewportW)
-  const paneBottom = Math.min(paneRect.bottom, viewportH)
-  const paneTop = Math.max(paneRect.top, 0)
+  const GAP = 6
 
-  let left = rowRect.right + 6
-  // CLIP FLIP -- horizontal: if the menu would run past the pane/
-  // viewport's right edge, flip it to the row's LEFT side instead of
-  // letting it clip off the right (mirrors the vertical flip below,
-  // same "shift ... so every option is visible" law, just on the
-  // other axis since "to the right of that row" is the default, not
-  // an absolute rule once it would clip).
-  if (left + menuRect.width > paneRight) {
-    left = rowRect.left - menuRect.width - 6
+  let left = rowRect.right + GAP
+  // CLIP FLIP -- horizontal: only flips to the row's LEFT side when
+  // the VIEWPORT's own right edge would clip the menu -- the files
+  // pane's own (much narrower) edge is no longer a boundary at all,
+  // per the fix note above.
+  if (left + menuRect.width > viewportW) {
+    left = rowRect.left - menuRect.width - GAP
   }
-  // Absolute last resort: neither side fits (a very narrow viewport) --
-  // clamp inside the pane rather than letting it run off both edges.
-  if (left < paneRect.left) left = Math.max(0, paneRect.left)
+  // Absolute last resort: neither side fits within the viewport
+  // itself (an extremely narrow window) -- clamp inside the viewport
+  // rather than running off both edges.
+  if (left < 0) left = Math.max(0, viewportW - menuRect.width)
 
-  let top = rowRect.top
-  // CLIP FLIP -- vertical: "shifted up (or down) so every item stays
-  // on screen." Default anchor is the row's own top; if the menu would
-  // run past the pane/viewport's bottom edge, shift it up just enough
-  // to fit -- never past the pane/viewport's own top edge either.
-  if (top + menuRect.height > paneBottom) {
-    top = Math.max(paneTop, paneBottom - menuRect.height)
-  }
+  // Default: vertically centered on the row, per "if there is space,
+  // center it vertically on the file/folder clicked."
+  let top = rowRect.top + (rowRect.height / 2) - (menuRect.height / 2)
+  // CLIP FLIP -- vertical: "adjust the relative position of the
+  // action column up, until it entirely shows within the visible
+  // screen" -- shift up just enough to clear the viewport's bottom
+  // edge, then never past the viewport's own top edge either (a row
+  // near the very top of the page, if that combination is ever
+  // possible, still gets clamped downward to stay fully on-screen).
+  if (top + menuRect.height > viewportH) top = viewportH - menuRect.height
+  if (top < 0) top = 0
 
   menu.style.left = Math.round(left) + 'px'
   menu.style.top = Math.round(top) + 'px'
 }
+
 
 let _fileMenuOpenFor = -1
 function openFileMenu(anchorRow) {
