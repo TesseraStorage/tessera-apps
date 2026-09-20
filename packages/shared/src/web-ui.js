@@ -2330,8 +2330,71 @@ function classifyAddFailure(e, sawShards) {
   return 'generic'
 }
 
+// ADD STAGE CLOCKS (2026-09-20, "tessera-web-add-timing"): "Instrument
+// only... Clocks first." One console.info line per Add, exact prefix
+// `tessera-add-time` so the operator can filter DevTools by it, plus
+// the same object pushed onto window.__tesseraAddTimes (cap 20, no
+// localStorage, no network beacon -- per this packet's own law).
+// Marks come from two sources: t0/t_done are set HERE (doUpload() is
+// the cited Add-start/Add-end per this packet's own "Add start = the
+// moment this file enters doUpload()" instruction); t_encode/t_first/
+// t_last/t_upload_ok/t_pin_start/t_pin_ok are set inside files.js's
+// uploadFile() (the only place that can see those moments) and handed
+// back via the existing onProgress callback's new `marks` field --
+// no new callback, no second signal, no extra hosts() call.
+window.__tesseraAddTimes = window.__tesseraAddTimes || []
+
+function printAddTime(t0, marks, okTag, expectedShards) {
+  const t_done = Date.now()
+  const g = (k) => (marks && typeof marks[k] === 'number') ? marks[k] : null
+  const t_encode = g('t_encode'), t_first = g('t_first'), t_last = g('t_last')
+  const t_upload_ok = g('t_upload_ok'), t_pin_start = g('t_pin_start'), t_pin_ok = g('t_pin_ok')
+  // Derived fields, per the packet's own formulas -- `-` when either
+  // side of a subtraction never fired (a fail path may be missing
+  // t_last/t_upload_ok/etc depending on where it threw).
+  const diff = (a, b) => (typeof a === 'number' && typeof b === 'number') ? (a - b) : null
+  const us_pre = diff(t_first, t0)
+  const ship = diff(t_last, t_first)
+  const close = diff(t_upload_ok, t_last)
+  const pin = (typeof t_pin_start === 'number' && typeof t_pin_ok === 'number') ? (t_pin_ok - t_pin_start) : (t_pin_start != null ? null : 0)
+  const us_post = diff(t_done, t_last)
+  const us = (us_pre != null && us_post != null) ? (us_pre + us_post) : null
+  const total = t_done - t0
+  const slabs = (typeof expectedShards === 'number' && expectedShards > 0 && expectedShards % 30 === 0) ? (expectedShards / 30) : '-'
+  const fmt = (v) => (v === null || v === undefined) ? '-' : v
+  const row = {
+    ok: okTag, slabs,
+    us_pre: fmt(us_pre), us: fmt(us), ship: fmt(ship), close: fmt(close), pin: fmt(pin), us_post: fmt(us_post), total,
+    t_encode: fmt(t_encode), t_first: fmt(t_first), t_last: fmt(t_last),
+    t_upload_ok: fmt(t_upload_ok), t_pin_start: fmt(t_pin_start), t_pin_ok: fmt(t_pin_ok), t_done,
+  }
+  console.info(
+    'tessera-add-time ok=' + row.ok + ' slabs=' + row.slabs +
+    ' us_pre=' + row.us_pre + ' us=' + row.us + ' ship=' + row.ship + ' close=' + row.close +
+    ' pin=' + row.pin + ' us_post=' + row.us_post + ' total=' + row.total +
+    ' t_encode=' + row.t_encode + ' t_first=' + row.t_first + ' t_last=' + row.t_last +
+    ' t_upload_ok=' + row.t_upload_ok + ' t_pin_start=' + row.t_pin_start + ' t_pin_ok=' + row.t_pin_ok +
+    ' t_done=' + row.t_done
+  )
+  window.__tesseraAddTimes.push(row)
+  if (window.__tesseraAddTimes.length > 20) window.__tesseraAddTimes.shift()
+  // OPTIONAL SUMMARY SENTENCE (packet section 2, "Optional"): one quiet
+  // line under the progress row, same family/size as status text, no
+  // raw JSON. Only painted when both halves are known -- ship/us both
+  // `-` on a fail-before-any-shard would otherwise print a useless
+  // "-s ship -s / us -s" line; better to show nothing than that.
+  if (typeof ship === 'number' && typeof us === 'number') {
+    r.statusText.textContent = (ship / 1000).toFixed(1) + 's ship ' + (us / 1000).toFixed(1) + 's / us ' + (us / 1000).toFixed(1) + 's'
+  }
+}
+
 async function doUpload(file, destPathOverride) {
   const sdk = getState().sdk; if (!sdk) return
+  // ADD STAGE CLOCKS: t0 is cited by this packet as "the moment this
+  // file enters doUpload()" -- the very first line of this function,
+  // before setBusy/reset/anything else below runs.
+  const addT0 = Date.now()
+  let addMarks = null
   setBusy(true)
   // RESEED (2026-09-16, "tessera-web-add-hang-map400"): reset() wipes
   // ALL pins (live AND previously-seeded) so a fresh upload's own
@@ -2484,7 +2547,13 @@ async function doUpload(file, destPathOverride) {
     const siblingNames = existingBasenamesInFolder(files, destPath)
     const finalBasename = resolveCollisionName(siblingNames, file.name)
     const metaName = destPath ? buildPath(destPath, finalBasename) : (finalBasename !== file.name ? finalBasename : undefined)
-    await uploadFile(sdk, file, ({ stage, percent, elapsed, hostKey, transferMs }) => {
+    await uploadFile(sdk, file, ({ stage, percent, elapsed, hostKey, transferMs, marks }) => {
+      // ADD STAGE CLOCKS: every tick (encoding included) carries the
+      // SAME marks object reference from files.js -- captured here on
+      // every call so whichever tick happens to be the LAST one before
+      // success/fail always has the freshest values, with no separate
+      // "final tick" bookkeeping needed.
+      if (marks) addMarks = marks
       // ENCODING WORD (2026-09-16, "tessera-web-encoding-word", MOVED
       // + ANIMATED same day per operator instruction): "'encoding...'
       // messaging, move it to the same line as the progress bar. When
@@ -2540,6 +2609,11 @@ async function doUpload(file, destPathOverride) {
     // text is actually visible for a moment before the next Add
     // starts and reset()s it via the normal 'encoding…' branch above.
     r.progressLabel.textContent = '\u2705 Success!'
+    // ADD STAGE CLOCKS: printed here, ok=yes, after every real mark
+    // this Add could produce has already fired (encode/first/last/
+    // upload_ok/pin_start/pin_ok all happen before uploadFile()
+    // resolves, and this line runs immediately after that await).
+    printAddTime(addT0, addMarks, 'yes', addMarks ? addMarks.expectedShards : null)
     if (mapController) mapController.completeWrite()
     showToast('\u2705 ' + file.name + ' added')
     // BUG FIX (2026-09-16, per operator report: "after pinning, a
@@ -2594,6 +2668,14 @@ async function doUpload(file, destPathOverride) {
     const tag = FAIL_CLASS_TAGS[failClass]
     renderProgressBar(0)
     r.progressLabel.textContent = FAIL_CLASS_COPY[failClass] + tag
+    // ADD STAGE CLOCKS: okTag maps 1:1 to the packet's own vocabulary
+    // (T20/TWT/TR/T0) via the SAME tag string this fail path already
+    // paints on the page -- tag is ' (T20)' etc (leading space +
+    // parens), stripped down to just the bare code; 'other' only if
+    // failClass ever produced something outside FAIL_CLASS_TAGS'
+    // four known keys (should not happen, defensive only).
+    const okTag = tag ? tag.replace(/[ ()]/g, '') : 'other'
+    printAddTime(addT0, addMarks, okTag, addMarks ? addMarks.expectedShards : null)
     // Console-only diagnostic line for support -- never printed on the
     // page itself. Host URLs inside e.message (if any) are already
     // visible in the browser's own network panel per this packet's law,

@@ -833,7 +833,7 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
 
   // WASM SDK fallback (no file = called from dropzone, or relay failed)
   const start = Date.now()
-  const tick = (s, p, hostKey, transferMs) => { if (onProgress) onProgress({ stage: s, percent: p, elapsed: Date.now() - start, hostKey, transferMs }) }
+  const tick = (s, p, hostKey, transferMs) => { if (onProgress) onProgress({ stage: s, percent: p, elapsed: Date.now() - start, hostKey, transferMs, marks }) }
   // BAR HOLD (2026-09-16, "tessera-web-encode-hold"): "The progress
   // bar does not exist yet. No bar during drop, Ready wait, or
   // encoding." The OLD tick('preparing', 0) / tick('uploading', 5)
@@ -958,6 +958,15 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
   const hideDenominator = !!file && computedM == null
   let expectedShards = computedM != null ? computedM : (dataShards + parityShards)
   let shardsLanded = 0
+  // ADD STAGE CLOCKS (2026-09-20, "tessera-web-add-timing"): "Instrument
+  // only." marks is a plain mutable object threaded through every tick
+  // call below via the 5th tick() arg -- t0 is set by the CALLER
+  // (doUpload() in web-ui.js, the true Add-start per this packet's own
+  // definition), not here; this function only fills in the marks it can
+  // actually see from inside the WASM upload path. t_first/t_last are
+  // captured here since onShardUploaded is the only place that knows
+  // "this was the first/last shard" without re-deriving it downstream.
+  const marks = { t_encode: null, t_first: null, t_last: null, t_pin_start: null, t_pin_ok: null, t_upload_ok: null, expectedShards: null }
   const onShardUploaded = (ev) => {
     // ev shape per the wasm binary's own field names: hostKey, shardSize,
     // shardIndex, slabIndex, elapsedMs. computedM (above) is already the
@@ -967,9 +976,16 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
     // computedM itself was unavailable, never allowed to override a
     // value we already know is correct.
     shardsLanded += 1
+    // ADD STAGE CLOCKS: t_first is the first shard ever seen for this
+    // Add; t_last is set once this shard makes shardsLanded reach
+    // expectedShards (mirrors the exact WATCHDOG DISARM condition
+    // below -- same "last shard" moment, not re-derived twice).
+    if (marks.t_first === null) marks.t_first = Date.now()
+    if (shardsLanded >= expectedShards && marks.t_last === null) marks.t_last = Date.now()
     if (computedM == null && ev && typeof ev.expectedShards === 'number' && ev.expectedShards > 0) {
       expectedShards = ev.expectedShards
     }
+    marks.expectedShards = expectedShards
     const pct = 5 + Math.min(85, Math.round((shardsLanded / expectedShards) * 85))
     // FIX (2026-09-14, "tessera-web-map-progress"): forward the event's
     // own hostKey through onProgress so the caller (web-ui.js) can plot
@@ -1126,6 +1142,11 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
   // fixed fail sentence -- this tick does not need its own undo logic
   // for that case, matching the packet's "drop the word and use the
   // existing fail sentence" instruction exactly.
+  // ADD STAGE CLOCKS: t_encode is the exact moment named by this
+  // packet ("`encoding...` tick / `sdk.upload()` called") -- both
+  // happen back-to-back right here, so one Date.now() call covers
+  // both without inventing a second, indistinguishable mark.
+  marks.t_encode = Date.now()
   tick('encoding\u2026', 0)
   const uploadPromise = sdk.upload(obj, stream, uploadOptions)
   // Swallow a later resolve/reject from the abandoned promise once the
@@ -1180,10 +1201,19 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
   })
   try {
     obj = await Promise.race([uploadPromise, stallPromise, pinStallPromise])
+    // ADD STAGE CLOCKS: t_upload_ok is the moment sdk.upload()'s own
+    // promise (via this race) settled -- i.e. the exact mark the
+    // packet names `t_upload_ok`. Set on the marks object itself so
+    // web-ui.js's own later tick('done', ...) call (after this
+    // function returns) can read it back with no separate return
+    // value/shape change to this function's existing contract.
+    marks.t_upload_ok = Date.now()
     // Second race: sdk.pinObject() itself is the other place this
     // window can still hang past the last shard -- same shared
     // pinStallPromise/threshold, not a second independent timer.
+    marks.t_pin_start = Date.now()
     await Promise.race([sdk.pinObject(obj), pinStallPromise])
+    marks.t_pin_ok = Date.now()
   } finally {
     if (stallTimer) clearInterval(stallTimer)
     if (pinStallTimer) clearInterval(pinStallTimer)
