@@ -1070,10 +1070,44 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
   // window the old hardcoded disarm point would have reopened on any
   // multi-slab file once M was corrected above.
   let shardsFullyLanded = false
+  // PIN WATCHDOG (2026-09-19, "tessera-web-pin-watch"): independent of
+  // the 20s shard-stall timer above -- arms ONLY once every expected
+  // shard has landed (the exact moment the shard-stall timer above
+  // disarms itself, never overlapping it). "Last shard landed is not
+  // 'done.' Bound the wait to pin." sdk.upload()'s own promise can
+  // still hang past Upload::finish() (slab-task bookkeeping) with
+  // nothing watching it once shardsFullyLanded flips true -- this is
+  // the exact silent-hang bug this packet fixes (recon:
+  // tessera-web-upload-3030-stall-report.md). 60s, not 20s: the prior
+  // packet (2026-09-16, "tessera-web-add-false-fail-after-30of30")
+  // proved a flat 20s falsely failed a large multi-slab file's
+  // legitimate finalize wait -- reusing that same short threshold here
+  // would silently reopen that exact bug. 60s is long enough to clear
+  // realistic finalize time while still bounding the wait instead of
+  // leaving it open forever.
+  const PIN_STALL_MS = 60000
+  let pinWatchStartedAt = null
   const onShardUploadedWithWatchdog = (ev) => {
     lastProgressAt = Date.now()
     onShardUploaded(ev)
-    if (shardsLanded >= expectedShards) shardsFullyLanded = true
+    if (shardsLanded >= expectedShards && !shardsFullyLanded) {
+      shardsFullyLanded = true
+      // PINNING TICK (2026-09-19, "tessera-web-pin-watch"): "Show
+      // pinning when shards are in... Do not wait for sdk.upload() to
+      // return. That wait is the hang." This tick fires the MOMENT the
+      // last shard lands, not after sdk.upload()'s promise resolves --
+      // pinning IS the finalize step per the operator's own
+      // correction, so no new status word is introduced; the existing
+      // 'pinning' tick (previously only reachable after
+      // Promise.race([uploadPromise, stallPromise]) below had already
+      // resolved) is reused verbatim, just moved earlier so the label
+      // never sits on the stale 'uploading (30/30)' ceiling through
+      // this entire wait. No `N/M` passed -- percent 90, same value
+      // the later, now-redundant tick used, matching law's "pinning
+      // (no N/M, bar may sit)".
+      tick('pinning', 90)
+      pinWatchStartedAt = Date.now()
+    }
   }
   uploadOptions.onShardUploaded = onShardUploadedWithWatchdog
 
@@ -1116,16 +1150,48 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
       }
     }, 2000)
   })
+  // PIN WATCHDOG (2026-09-19, "tessera-web-pin-watch"): runs the whole
+  // time (started here, alongside the shard-stall watchdog above) but
+  // can only actually trip once pinWatchStartedAt is set -- i.e. once
+  // shardsFullyLanded flips true in onShardUploadedWithWatchdog above.
+  // Before that point it is a permanent no-op, exactly mirroring how
+  // the shard-stall watchdog above is a permanent no-op AFTER that same
+  // point -- the two never overlap. Covers BOTH remaining awaits this
+  // function can still hang on past the last shard: the tail of
+  // uploadPromise itself (raced below) and sdk.pinObject() (raced
+  // further down) -- one shared timer/threshold for the whole
+  // post-shard-landed window, cleared in the same `finally` as the
+  // shard-stall timer once either await actually settles.
+  let pinStallTimer = null
+  const pinStallPromise = new Promise((_, reject) => {
+    pinStallTimer = setInterval(() => {
+      if (pinWatchStartedAt !== null && Date.now() - pinWatchStartedAt > PIN_STALL_MS) {
+        clearInterval(pinStallTimer)
+        // Message text only needs to avoid colliding with the stall/
+        // ready/connect classifier patterns in web-ui.js's
+        // classifyAddFailure() -- sawRealShardProgress is already true
+        // by the time this can ever fire (shards landed is the arming
+        // condition), so classifyAddFailure() falls through to its
+        // `generic` bucket regardless of this exact string, which is
+        // what paints the law's required T0 sentence/tag on the page.
+        reject(new Error('Pin window timed out before completion.'))
+      }
+    }, 2000)
+  })
   try {
-    obj = await Promise.race([uploadPromise, stallPromise])
+    obj = await Promise.race([uploadPromise, stallPromise, pinStallPromise])
+    // Second race: sdk.pinObject() itself is the other place this
+    // window can still hang past the last shard -- same shared
+    // pinStallPromise/threshold, not a second independent timer.
+    await Promise.race([sdk.pinObject(obj), pinStallPromise])
   } finally {
     if (stallTimer) clearInterval(stallTimer)
+    if (pinStallTimer) clearInterval(pinStallTimer)
   }
-  tick('pinning', 90)
-  await sdk.pinObject(obj)
   tick('done', 100)
   return obj
 }
+
 
 // ── folders ─────────────────────────────────────────────
 //
