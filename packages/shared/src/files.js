@@ -742,6 +742,46 @@ export function computeTotals(files) {
 // reaches. Every existing caller (Drop's ui.js, desktop) omits this
 // argument entirely -- defaults to `file.name`, byte-identical to
 // before this packet.
+// SERIAL LOCK (2026-09-20, "tessera-web-add-overlap-stall"): "Cite the
+// hole that let a second drop run." THE HOLE: web-ui.js's own
+// _uploadActive/_uploadQueue flag is a QUEUE-LEVEL lock -- it flips
+// false the instant doUpload() returns/throws, INCLUDING when a
+// watchdog (stall or pin) wins its race and doUpload() throws while
+// the underlying, abandoned sdk.upload()/sdk.pinObject() call is
+// STILL RUNNING in the background (files.js's own uploadPromise.catch
+// (() => {}) comment already documents this: "it may keep running in
+// the background... this only prevents an unhandled-rejection console
+// warning, it does not stop that background work"). The queue then
+// starts the NEXT file's real sdk.upload() while the first one's real
+// call is still live underneath -- two genuinely concurrent uploads,
+// exactly what the operator saw (drop a second file while "pinning"
+// was showing; bar zeroed; new arcs). The queue-level lock was never
+// wrong about ITS OWN state; it just has no visibility into whether
+// the REAL SDK call it thinks ended has actually ended.
+//
+// FIX: a lock at THIS level (files.js, where the real sdk.upload()/
+// pinObject() calls actually live) that a second uploadFile() WASM-
+// path call must wait on before calling sdk.upload() at all -- closes
+// the hole regardless of what doUpload()'s own watchdog races do.
+// Released only when the REAL underlying promise chain (upload +
+// pin) actually settles, resolve or reject, never when a watchdog
+// merely gives up waiting on it.
+let _realUploadLock = Promise.resolve()
+// Exported so web-ui.js's own queue/drop handlers can synchronously
+// check "is a real upload chain actually still running right now" --
+// distinct from _uploadActive (web-ui.js's own queue-level flag,
+// which per the hole above can go false while this is still true).
+export function isRealUploadInFlight() { return _realUploadInFlight }
+let _realUploadInFlight = false
+// Exported for processUploadQueue() to await BEFORE popping the next
+// queued item off _uploadQueue -- so a genuinely queued file (already
+// accepted, already toasted "Queued: ...") waits its turn on the real
+// lock instead of reaching doUpload()'s own isRealUploadInFlight()
+// guard and being rejected with "Already adding a file." (that
+// rejection is for an UNQUEUED second drop arriving mid-upload, not
+// for a file this app already promised to queue).
+export function waitForUploadSlot() { return _realUploadLock.catch(() => {}) }
+
 export async function uploadFile(sdk, file, onProgress, metaName) {
   if (isDesktop()) {
     const start = Date.now()
@@ -966,7 +1006,7 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
   // actually see from inside the WASM upload path. t_first/t_last are
   // captured here since onShardUploaded is the only place that knows
   // "this was the first/last shard" without re-deriving it downstream.
-  const marks = { t_encode: null, t_first: null, t_last: null, t_pin_start: null, t_pin_ok: null, t_upload_ok: null, expectedShards: null }
+  const marks = { t_encode: null, t_first: null, t_last: null, t_pin_start: null, t_pin_ok: null, t_upload_ok: null, expectedShards: null, shardsLanded: 0 }
   const onShardUploaded = (ev) => {
     // ev shape per the wasm binary's own field names: hostKey, shardSize,
     // shardIndex, slabIndex, elapsedMs. computedM (above) is already the
@@ -976,6 +1016,7 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
     // computedM itself was unavailable, never allowed to override a
     // value we already know is correct.
     shardsLanded += 1
+    marks.shardsLanded = shardsLanded
     // ADD STAGE CLOCKS: t_first is the first shard ever seen for this
     // Add; t_last is set once this shard makes shardsLanded reach
     // expectedShards (mirrors the exact WATCHDOG DISARM condition
@@ -1146,6 +1187,25 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
   // packet ("`encoding...` tick / `sdk.upload()` called") -- both
   // happen back-to-back right here, so one Date.now() call covers
   // both without inventing a second, indistinguishable mark.
+  //
+  // SERIAL LOCK (2026-09-20, "tessera-web-add-overlap-stall"): wait
+  // for any PRIOR real upload/pin chain to genuinely finish before
+  // this one is allowed to call sdk.upload() at all -- see the lock's
+  // own top-of-file comment for the exact hole this closes. Waiting
+  // on a resolved-or-rejected lock never itself throws (the .catch
+  // below swallows a prior chain's rejection for the purposes of
+  // gating only; that prior chain's own caller already saw and
+  // handled its own real error through its own normal await/throw
+  // path -- this wait only needs to know "has it stopped running",
+  // not "did it succeed"). marks.t_encode/tick('encoding...') are
+  // deliberately placed AFTER this await -- a queued file waiting on
+  // the lock has not truly started yet, so it must not show
+  // 'encoding...' (or record t_encode) until its own turn actually
+  // begins, matching queue semantics doUpload() already assumes.
+  await _realUploadLock.catch(() => {})
+  let releaseLock
+  _realUploadLock = new Promise(res => { releaseLock = res })
+  _realUploadInFlight = true
   marks.t_encode = Date.now()
   tick('encoding\u2026', 0)
   const uploadPromise = sdk.upload(obj, stream, uploadOptions)
@@ -1156,6 +1216,15 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
   // this only prevents an unhandled-rejection console warning, it does
   // not (and cannot, from here) actually stop that background work.
   uploadPromise.catch(() => {})
+  // SERIAL LOCK (2026-09-20, "tessera-web-add-overlap-stall"): set by
+  // the try block below, synchronously, the moment the real
+  // sdk.pinObject(obj) call is actually made -- never a second call.
+  // Read by the release chain further down (after the try/finally),
+  // which waits on the REAL uploadPromise (never the watchdog race)
+  // and, if it resolved, this SAME pin promise -- so the lock only
+  // releases once the actual background SDK work has genuinely
+  // stopped, matching the top-of-file comment's stated fix.
+  let pinPromiseRef = null
   let stallTimer = null
   const stallPromise = new Promise((_, reject) => {
     stallTimer = setInterval(() => {
@@ -1212,12 +1281,35 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
     // window can still hang past the last shard -- same shared
     // pinStallPromise/threshold, not a second independent timer.
     marks.t_pin_start = Date.now()
-    await Promise.race([sdk.pinObject(obj), pinStallPromise])
+    // SERIAL LOCK: pinPromise is created ONCE here and referenced by
+    // BOTH the watchdog race below (this attempt's own await) AND the
+    // lock-release chain after this try/finally -- never a second,
+    // duplicate sdk.pinObject() call for the same object.
+    const pinPromise = sdk.pinObject(obj)
+    pinPromise.catch(() => {})
+    pinPromiseRef = pinPromise
+    await Promise.race([pinPromise, pinStallPromise])
     marks.t_pin_ok = Date.now()
   } finally {
     if (stallTimer) clearInterval(stallTimer)
     if (pinStallTimer) clearInterval(pinStallTimer)
   }
+  // SERIAL LOCK release (2026-09-20, "tessera-web-add-overlap-stall"):
+  // releases only once the REAL underlying chain has genuinely
+  // stopped running -- waits on uploadPromise itself (never the
+  // watchdog race above), and, if it resolved, on pinPromiseRef (the
+  // SAME single sdk.pinObject() call the try block already made, set
+  // via pinPromiseRef just above -- never a second, duplicate call).
+  // Deliberately NOT inside the finally above: that block's own
+  // early exits (an uploadPromise that legitimately takes longer than
+  // the watchdog waited for) must not be entangled with this -- this
+  // await runs fully independently, in the background, exactly
+  // mirroring the pre-existing uploadPromise.catch(() => {}) pattern
+  // this file already used for "let it keep running, just don't
+  // crash on the unhandled rejection."
+  uploadPromise
+    .then(() => (pinPromiseRef ? pinPromiseRef.catch(() => {}) : null), () => {})
+    .finally(() => { releaseLock(); _realUploadInFlight = false })
   tick('done', 100)
   return obj
 }

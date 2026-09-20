@@ -36,6 +36,7 @@ import {
   getMapShownPref, setMapShownPref,
   filesUnderFolder, countFilesUnderFolder, renameFilePath,
   validateFolderRenameName, renameVirtualFolderPrefix, removeVirtualFolderPrefix,
+  isRealUploadInFlight, waitForUploadSlot,
 } from './files.js'
 import { createUploadMap } from './map.js'
 import {
@@ -2116,6 +2117,16 @@ async function processUploadQueue() {
   if (!item) return
   _uploadActive = true
   try {
+    // ONE ADD AT A TIME (2026-09-20, "tessera-web-add-overlap-stall"):
+    // a genuinely QUEUED file (already accepted into _uploadQueue,
+    // already toasted "Queued: ...") waits here on the REAL upload
+    // lock -- files.js's own waitForUploadSlot() -- rather than
+    // racing doUpload()'s own isRealUploadInFlight() guard, which
+    // exists to reject an UNQUEUED second drop, not to eat a file
+    // this app already promised to queue. By the time this resolves,
+    // the prior real chain has genuinely settled, so doUpload()'s own
+    // guard below is expected to pass through cleanly.
+    await waitForUploadSlot()
     await doUpload(item.file, item.destPath)
   } finally {
     _uploadActive = false
@@ -2313,7 +2324,22 @@ function classifyAddFailure(e, sawShards) {
   // rule ("If the thrown Error message is already one of the public
   // sentences in the table below, show that sentence"), matched
   // verbatim rather than re-derived.
-  if (msg === FAIL_CLASS_COPY.stall) return 'stall'
+  //
+  // MID-SLAB SPLIT (2026-09-20, "tessera-web-add-overlap-stall"):
+  // "T20 means 'zero pieces in 20s.' ... If shardsLanded >= 1 and the
+  // 20s gap fires: still fail... Class T0... T20 stays only when
+  // shardsLanded === 0." The watchdog in files.js throws this SAME
+  // message whether zero shards ever landed OR the gap opened mid-
+  // slab after some already had -- sawShards (this function's own
+  // 2nd arg, doUpload's sawRealShardProgress) is the exact signal
+  // that already existed to tell those two cases apart; the bug was
+  // simply that this branch never consulted it before returning
+  // 'stall' unconditionally. A true zero-shard stall (sawShards
+  // false) stays 'stall' (T20); a stall that opened AFTER shards
+  // were already landing (sawShards true) now falls to 'generic'
+  // (T0) -- same fixed sentence the table already has for it
+  // ("Could not add this file. Try again. (T0)"), no new copy.
+  if (msg === FAIL_CLASS_COPY.stall) return sawShards ? 'generic' : 'stall'
   // ready: waitForReady()'s own cap-exceeded throw (files.js line
   // ~1323), fixed prefix regardless of the timeoutMs value passed in.
   if (msg.indexOf('Account not ready after') === 0) return 'ready'
@@ -2349,6 +2375,15 @@ function printAddTime(t0, marks, okTag, expectedShards) {
   const g = (k) => (marks && typeof marks[k] === 'number') ? marks[k] : null
   const t_encode = g('t_encode'), t_first = g('t_first'), t_last = g('t_last')
   const t_upload_ok = g('t_upload_ok'), t_pin_start = g('t_pin_start'), t_pin_ok = g('t_pin_ok')
+  // SHARDS FIELD (2026-09-20, "tessera-web-add-overlap-stall"): "Add
+  // shards=N/M (landed/expected at paint)." landed comes from the
+  // SAME marks object the other clocks already use (files.js's own
+  // onShardUploaded sets marks.shardsLanded on every shard) -- no new
+  // signal, just a field that already existed and was never surfaced
+  // on this line before. M is always the same expectedShards this
+  // line already prints as `slabs`, not re-derived.
+  const shardsLanded = (marks && typeof marks.shardsLanded === 'number') ? marks.shardsLanded : 0
+  const shardsStr = shardsLanded + '/' + (typeof expectedShards === 'number' ? expectedShards : '?')
   // Derived fields, per the packet's own formulas -- `-` when either
   // side of a subtraction never fired (a fail path may be missing
   // t_last/t_upload_ok/etc depending on where it threw).
@@ -2363,13 +2398,13 @@ function printAddTime(t0, marks, okTag, expectedShards) {
   const slabs = (typeof expectedShards === 'number' && expectedShards > 0 && expectedShards % 30 === 0) ? (expectedShards / 30) : '-'
   const fmt = (v) => (v === null || v === undefined) ? '-' : v
   const row = {
-    ok: okTag, slabs,
+    ok: okTag, slabs, shards: shardsStr,
     us_pre: fmt(us_pre), us: fmt(us), ship: fmt(ship), close: fmt(close), pin: fmt(pin), us_post: fmt(us_post), total,
     t_encode: fmt(t_encode), t_first: fmt(t_first), t_last: fmt(t_last),
     t_upload_ok: fmt(t_upload_ok), t_pin_start: fmt(t_pin_start), t_pin_ok: fmt(t_pin_ok), t_done,
   }
   console.info(
-    'tessera-add-time ok=' + row.ok + ' slabs=' + row.slabs +
+    'tessera-add-time ok=' + row.ok + ' slabs=' + row.slabs + ' shards=' + row.shards +
     ' us_pre=' + row.us_pre + ' us=' + row.us + ' ship=' + row.ship + ' close=' + row.close +
     ' pin=' + row.pin + ' us_post=' + row.us_post + ' total=' + row.total +
     ' t_encode=' + row.t_encode + ' t_first=' + row.t_first + ' t_last=' + row.t_last +
@@ -2390,6 +2425,24 @@ function printAddTime(t0, marks, okTag, expectedShards) {
 
 async function doUpload(file, destPathOverride) {
   const sdk = getState().sdk; if (!sdk) return
+  // ONE ADD AT A TIME (2026-09-20, "tessera-web-add-overlap-stall"):
+  // "Until the current Add reaches success paint or a T-tag fail
+  // paint: Drop/Add/queue start must not call sdk.upload() again."
+  // isRealUploadInFlight() is files.js's own real-lock flag -- true
+  // from the moment a WASM-path upload's real sdk.upload() call is
+  // made until its real chain (upload + pin) genuinely settles,
+  // regardless of what any watchdog race in a PRIOR doUpload() call
+  // did. This is a defense-in-depth guard on TOP of the real lock
+  // uploadFile() itself now enforces (see files.js's own top-of-
+  // uploadFile SERIAL LOCK comment) -- that lock alone is sufficient
+  // to prevent a second real sdk.upload() call from ever firing, but
+  // checking here too means a second drop gets the packet's own
+  // required quiet sentence immediately, instead of silently sitting
+  // in the processUploadQueue() array waiting on a lock it can't see.
+  if (isRealUploadInFlight()) {
+    patchState({ status: 'Already adding a file.' })
+    return
+  }
   // ADD STAGE CLOCKS: t0 is cited by this packet as "the moment this
   // file enters doUpload()" -- the very first line of this function,
   // before setBusy/reset/anything else below runs.
