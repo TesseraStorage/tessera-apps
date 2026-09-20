@@ -599,12 +599,55 @@ input:focus { border-color: var(--cyan); }
 }
 
 .actions-bar {
-  display: flex;
-  gap: 8px;
-  margin-top: 14px;
-  padding-top: 14px;
-  border-top: 1px solid var(--border);
+  /* HIDDEN FOR GOOD (2026-09-19, "tessera-web-file-menu"): this row is
+     the exact "one line of large buttons that runs off both sides"
+     the packet reports -- replaced on-screen by .file-menu below. Its
+     buttons are kept in the DOM (see web-ui.js's own comment at
+     #fileActions) purely as the existing disabled-state bookkeeping
+     target; force-hidden here rather than deleted so nothing has to
+     be rewired if that bookkeeping role ever needs the elements back.
+     !important overrides the .hidden class toggle this row still
+     receives (harmless -- toggling a class on an always-display:none
+     row has no visible effect either way). */
+  display: none !important;
 }
+
+/* ── file actions menu (2026-09-19, "tessera-web-file-menu") ────
+   Vertical overlay menu, anchored to the right of the clicked row by
+   positionFileMenu() in web-ui.js (position: fixed + inline left/top,
+   set in JS -- no CSS anchoring math here). Quiet look: same type
+   family/sizing as the file list rows, no giant .btn-lg buttons, no
+   second toolbar. z-index only lifts it above the list paint; it
+   never affects layout/flow of anything else on the page. */
+.file-menu {
+  position: fixed;
+  z-index: 500;
+  min-width: 140px;
+  background: var(--surface);
+  border: 1px solid var(--border2);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 8px 24px rgba(0,0,0,.35);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+}
+.file-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: var(--ink);
+  font-size: 13px;
+  font-family: inherit;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.file-menu-item:hover:not(:disabled) { background: var(--surface2); }
+.file-menu-item:disabled { opacity: .35; cursor: default; }
+.file-menu-item-danger { color: var(--red); }
+.file-menu-item-danger:hover:not(:disabled) { background: var(--red-dim); color: #fca5a5; }
 
 /* ── progress bar ─────────────────────────────────────── */
 .progress-wrap {

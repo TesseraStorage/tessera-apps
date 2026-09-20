@@ -65,6 +65,7 @@ function cacheRefs() {
     'filesScreen', 'dropzone', 'fileInput', 'fileList', 'fileActions',
     'btnDownload', 'btnShare', 'btnDelete',
     'btnMove', 'btnRename', 'btnCancelSelection',
+    'fileMenu', 'fileMenuDownload', 'fileMenuShare', 'fileMenuMove', 'fileMenuRename', 'fileMenuDelete',
     'btnNewFolder', 'breadcrumb', 'newFolderInline', 'newFolderInput',
     'btnNewFolderConfirm', 'btnNewFolderCancel',
     'btnSelectMany', 'selectManyBar', 'selectManyCount', 'btnSelectAll',
@@ -275,6 +276,30 @@ const SKELETON = /*html*/`
         <button id="btnDelete" class="btn btn-danger" disabled>Delete</button>
         <button id="btnCancelSelection" class="btn btn-ghost">Cancel</button>
       </div>
+      <!-- FILE ACTIONS MENU (2026-09-19, "tessera-web-file-menu"): the
+           actions-bar row above overflowed the panel on both sides at
+           normal widths (six always-visible full-size buttons in one
+           unwrapped flex row, no overflow handling -- see
+           .actions-bar in style.css). REPLACED for single-row selection
+           with this small vertical popup, anchored to the right of
+           whichever row triggered it (positionFileMenu() below does the
+           anchoring/clamping). Kept hidden in the DOM by default;
+           #fileActions above is left in place UNUSED (still queried by
+           id, still toggled, but no longer the thing the operator sees
+           for a single selected row -- see subscribe('selectedIdx', ...)
+           below) rather than deleted, since selectedFile()-driven
+           enable/disable logic elsewhere still reads its buttons' own
+           .disabled state as a single source of truth for whether an
+           action is currently valid; this menu's own items call the
+           EXACT SAME handlers (onDownload/onShare/onMove/onRename/
+           onDelete) rather than duplicating any logic. -->
+      <div id="fileMenu" class="file-menu hidden" role="menu">
+        <button id="fileMenuDownload" class="file-menu-item" role="menuitem">Download</button>
+        <button id="fileMenuShare" class="file-menu-item" role="menuitem">Share</button>
+        <button id="fileMenuMove" class="file-menu-item" role="menuitem">Move</button>
+        <button id="fileMenuRename" class="file-menu-item" role="menuitem">Rename</button>
+        <button id="fileMenuDelete" class="file-menu-item file-menu-item-danger" role="menuitem">Delete</button>
+      </div>
       <p id="statusText" class="status-text"></p>
     </section>
 
@@ -377,6 +402,18 @@ export async function mountApp(container) {
   r.btnSelectManyDelete.addEventListener('click', onSelectManyDelete)
   r.btnMoveCancel.addEventListener('click', closeMoveModal)
   r.btnRename.addEventListener('click', onRename)
+  // FILE MENU (2026-09-19, "tessera-web-file-menu"): each menu item
+  // calls the EXACT SAME handler its old #fileActions button called --
+  // "same verbs" is enforced simply by wiring to the same functions,
+  // not by copying/reimplementing them. Close the menu on every action
+  // click regardless of outcome (a failed action still shows its own
+  // toast/fail sentence elsewhere; the menu closing is independent of
+  // that).
+  r.fileMenuDownload.addEventListener('click', () => { closeFileMenu(); onDownload() })
+  r.fileMenuShare.addEventListener('click', () => { closeFileMenu(); onShare() })
+  r.fileMenuMove.addEventListener('click', () => { closeFileMenu(); onMove() })
+  r.fileMenuRename.addEventListener('click', () => { closeFileMenu(); onRename() })
+  r.fileMenuDelete.addEventListener('click', () => { closeFileMenu(); onDelete() })
   r.btnTextInputConfirm.addEventListener('click', onTextInputConfirm)
   r.btnTextInputCancel.addEventListener('click', closeTextInputModal)
   r.textInputField.addEventListener('keydown', e => { if (e.key === 'Enter') onTextInputConfirm() })
@@ -409,11 +446,51 @@ export async function mountApp(container) {
   // underneath it -- excluded explicitly via .closest() checks below,
   // same reasoning as the file-row/actions-bar exclusions.
   document.addEventListener('click', (e) => {
+    // FILE MENU (2026-09-19, "tessera-web-file-menu"): "Click outside,
+    // Escape, or picking an action closes the menu." Picking an action
+    // is already handled at each menu item's own listener above (they
+    // call closeFileMenu() directly, unconditionally, before running
+    // their action). This covers the other two triggers for the popup
+    // specifically -- a click that lands on the row that OPENED the
+    // menu is deliberately allowed through to fall to the row's own
+    // click handler above (which toggles the menu itself), so this
+    // only needs to guard clicks that land ON the open menu's own
+    // content (its own items already close it themselves, but a click
+    // on the menu's padding/gap, not an item, must not fall through to
+    // the outside-closes-menu branch below and immediately re-close
+    // something already mid-click).
+    if (e.target.closest('#fileMenu')) return
+    if (!e.target.closest('.file-row')) closeFileMenu()
     if (getState().selectedIdx === -1) return
     if (e.target.closest('.file-row')) return
     if (e.target.closest('#fileActions')) return
     if (e.target.closest('.modal-overlay')) return
     patchState({ selectedIdx: -1 })
+  })
+  // FILE MENU (2026-09-19, "tessera-web-file-menu"): Escape closes the
+  // menu -- "mouse + Escape is enough" per the packet's own fallback
+  // clause; arrow-key/Enter item navigation was judged the "tangle" it
+  // pre-emptively allows skipping, so this is the only keyboard wiring
+  // added. Does not also clear selectedIdx -- Escape's job here is
+  // just closing the popup, not deselecting the row underneath it.
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !r.fileMenu.classList.contains('hidden')) closeFileMenu()
+  })
+  // FILE MENU (2026-09-19, "tessera-web-file-menu"): a resize can
+  // invalidate the clamped position (e.g. rotating a device, or the
+  // window shrinking) -- reposition against the row that's still
+  // selected rather than leaving a stale, possibly now-clipped rect.
+  // Closing outright on resize would be equally correct per the
+  // packet's own click-outside/Escape/action-only close list, but
+  // repositioning keeps the menu usable through a resize instead of
+  // silently vanishing on the operator mid-click.
+  window.addEventListener('resize', () => {
+    if (r.fileMenu.classList.contains('hidden')) return
+    const sf = selectedFile()
+    if (!sf) { closeFileMenu(); return }
+    const rows = r.fileList.querySelectorAll('.file-row')
+    const row = Array.from(rows).find(rw => rw.querySelector('.file-name') && rw.querySelector('.file-name').textContent === sf.displayName)
+    if (row) positionFileMenu(row); else closeFileMenu()
   })
 
   r.dropzone.addEventListener('dragover', e => { e.preventDefault(); r.dropzone.classList.add('dragover') })
@@ -495,6 +572,16 @@ export async function mountApp(container) {
     r.btnMove.disabled = v || !sf
     r.btnRename.disabled = v || !sf
     r.btnDelete.disabled = v || !sf
+    // FILE MENU (2026-09-19, "tessera-web-file-menu"): mirrors the same
+    // busy-gate onto the popup's own items -- a busy upload/download
+    // must disable Move/Rename/Delete/Download/Share here exactly like
+    // it always disabled the old bar's buttons, since these items call
+    // the identical handlers.
+    r.fileMenuDownload.disabled = v || !sf
+    r.fileMenuShare.disabled = v || !sf
+    r.fileMenuMove.disabled = v || !sf
+    r.fileMenuRename.disabled = v || !sf
+    r.fileMenuDelete.disabled = v || !sf
   })
   subscribe('files', () => { renderFileList(); updateTotals() })
   subscribe('currentPath', () => {
@@ -508,6 +595,12 @@ export async function mountApp(container) {
     // scoping from the packet's own wording without inventing a second
     // per-folder selection cache.
     if (getState().selectedIds.length) patchState({ selectedIds: [] })
+    // FILE MENU (2026-09-19, "tessera-web-file-menu"): a currentPath
+    // change (breadcrumb tap, folder enter, Back) invalidates whatever
+    // row the menu was anchored to -- close it the same way the
+    // checked SET above is cleared, rather than leaving it floating
+    // over a place that no longer has that row.
+    closeFileMenu()
     renderFileList(); renderBreadcrumb()
   })
   subscribe('selectedIdx', () => {
@@ -519,6 +612,16 @@ export async function mountApp(container) {
     r.btnRename.disabled = !sf || getState().busy
     r.btnDelete.disabled = !sf || getState().busy
     r.fileActions.classList.toggle('hidden', !sf)
+    r.fileMenuDownload.disabled = !sf || getState().busy
+    r.fileMenuShare.disabled = !sf || getState().busy
+    r.fileMenuMove.disabled = !sf || getState().busy
+    r.fileMenuRename.disabled = !sf || getState().busy
+    r.fileMenuDelete.disabled = !sf || getState().busy
+    // FILE MENU (2026-09-19, "tessera-web-file-menu"): a row
+    // deselecting (click-outside, Cancel, navigation) with no new row
+    // taking its place must also close the popup -- the row it was
+    // anchored to may no longer even be selected/highlighted.
+    if (!sf) closeFileMenu()
   })
   // SELECT MANY (Apple C, 2026-09-17): a SEPARATE toolbar/state from the
   // single-item fileActions bar above -- both can exist in the DOM at
@@ -527,8 +630,16 @@ export async function mountApp(container) {
   subscribe('selectMode', v => {
     r.selectManyBar.classList.toggle('hidden', !v)
     r.btnSelectMany.textContent = v ? 'Cancel' : 'Select'
+    // FILE MENU (2026-09-19, "tessera-web-file-menu"): entering Select
+    // mode switches every row to checkbox-toggle click behavior (see
+    // renderFileList()'s own selectMode branch) -- the single-row popup
+    // menu has no meaning there (its actions are single-item; the
+    // select-many bottom bar covers the multi-item case per this
+    // packet's own law), so close it on the transition either way.
+    closeFileMenu()
     renderFileList()
   })
+
   subscribe('selectedIds', v => {
     r.selectManyCount.textContent = v.length ? v.length + ' selected' : ''
     // Rename stays one item (packet's own law) -- Move/Delete are the
@@ -1036,6 +1147,74 @@ function updateTotals() {
     : ''
 }
 
+// FILE MENU (2026-09-19, "tessera-web-file-menu"): "A vertical overlay
+// menu to the right of that row, shifted up or down so every item
+// stays on screen." openFileMenu() anchors #fileMenu (position: fixed,
+// see style.css) to the clicked row's own bounding rect, then clamps
+// against the files pane AND the viewport -- whichever is tighter --
+// exactly the "if it would clip the files pane or the viewport, shift
+// it up (or down)" law. Sits above the list paint via z-index only
+// (see .file-menu in style.css); never resizes/repositions any other
+// element, so it cannot push layout the way the old always-visible
+// .actions-bar row did.
+function positionFileMenu(anchorRow) {
+  const menu = r.fileMenu
+  const rowRect = anchorRow.getBoundingClientRect()
+  const paneRect = r.filesLayout ? r.filesLayout.getBoundingClientRect() : document.documentElement.getBoundingClientRect()
+  // Measure the menu's own natural size first (still hidden -> 0x0),
+  // so open it invisibly-but-measurable before the real paint.
+  menu.style.visibility = 'hidden'
+  menu.classList.remove('hidden')
+  const menuRect = menu.getBoundingClientRect()
+  menu.style.visibility = ''
+
+  const viewportW = window.innerWidth
+  const viewportH = window.innerHeight
+  // Right edge of the pane (or viewport, whichever is tighter) bounds
+  // where the menu's LEFT edge may sit -- anchored to the row's right
+  // edge by default, per "anchored to the right of that row."
+  const paneRight = Math.min(paneRect.right, viewportW)
+  const paneBottom = Math.min(paneRect.bottom, viewportH)
+  const paneTop = Math.max(paneRect.top, 0)
+
+  let left = rowRect.right + 6
+  // CLIP FLIP -- horizontal: if the menu would run past the pane/
+  // viewport's right edge, flip it to the row's LEFT side instead of
+  // letting it clip off the right (mirrors the vertical flip below,
+  // same "shift ... so every option is visible" law, just on the
+  // other axis since "to the right of that row" is the default, not
+  // an absolute rule once it would clip).
+  if (left + menuRect.width > paneRight) {
+    left = rowRect.left - menuRect.width - 6
+  }
+  // Absolute last resort: neither side fits (a very narrow viewport) --
+  // clamp inside the pane rather than letting it run off both edges.
+  if (left < paneRect.left) left = Math.max(0, paneRect.left)
+
+  let top = rowRect.top
+  // CLIP FLIP -- vertical: "shifted up (or down) so every item stays
+  // on screen." Default anchor is the row's own top; if the menu would
+  // run past the pane/viewport's bottom edge, shift it up just enough
+  // to fit -- never past the pane/viewport's own top edge either.
+  if (top + menuRect.height > paneBottom) {
+    top = Math.max(paneTop, paneBottom - menuRect.height)
+  }
+
+  menu.style.left = Math.round(left) + 'px'
+  menu.style.top = Math.round(top) + 'px'
+}
+
+let _fileMenuOpenFor = -1
+function openFileMenu(anchorRow) {
+  positionFileMenu(anchorRow)
+  r.fileMenu.classList.remove('hidden')
+  _fileMenuOpenFor = getState().selectedIdx
+}
+function closeFileMenu() {
+  r.fileMenu.classList.add('hidden')
+  _fileMenuOpenFor = -1
+}
+
 // FOLDERS (2026-09-15, "tessera-web-folders-v1"): "Folder rows sit
 // above file rows in the current place. Click a folder -> enter it."
 // `files` in state stays the SDK's full flat list (folder-agnostic --
@@ -1201,7 +1380,20 @@ function renderFileList() {
       // rather than forcing a precise tap on an 18px box.
       row.addEventListener('click', () => toggleChecked(fileEntry))
     } else {
-      row.addEventListener('click', () => patchState({ selectedIdx: realIdx }))
+      // FILE MENU (2026-09-19, "tessera-web-file-menu"): clicking a row
+      // still sets selectedIdx (unchanged -- selectedFile()/the
+      // subscribe('selectedIdx', ...) enable-disable logic on the old
+      // #fileActions buttons still runs, since this menu's own items
+      // call those exact same handlers) AND now also opens the popup
+      // menu anchored to this row. Re-clicking the ALREADY-selected row
+      // toggles the menu closed instead of re-opening it in place --
+      // same "click again to dismiss" affordance a desktop list menu
+      // gives, per the packet's own "same idea as a desktop list menu."
+      row.addEventListener('click', () => {
+        const already = getState().selectedIdx === realIdx && !r.fileMenu.classList.contains('hidden')
+        patchState({ selectedIdx: realIdx })
+        if (already) closeFileMenu(); else openFileMenu(row)
+      })
       // DRAG SOURCE (Apple A, 2026-09-16): "Drop an already-listed file
       // onto a folder row: same move." Carries only the file's real id
       // (its own metadata.name full path is looked up fresh from state
