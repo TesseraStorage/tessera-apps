@@ -1378,6 +1378,9 @@ function renderFileList() {
     const fileEntry = { type: 'file', id: f.id }
     row.className = 'file-row' + (!selectMode && realIdx === selectedIdx ? ' selected' : '') + (selectMode && isChecked(fileEntry) ? ' selected' : '')
     row.draggable = !selectMode
+    // Stable lookup key for re-finding THIS row after a re-render -- see
+    // the click handler below (2026-09-21, "tessera-web-menu-topleft").
+    row.dataset.fileId = f.id
     const checkboxHtml = selectMode
       ? '<input type="checkbox" class="row-checkbox" ' + (isChecked(fileEntry) ? 'checked' : '') + '>'
       : ''
@@ -1406,8 +1409,25 @@ function renderFileList() {
       // gives, per the packet's own "same idea as a desktop list menu."
       row.addEventListener('click', () => {
         const already = getState().selectedIdx === realIdx && !r.fileMenu.classList.contains('hidden')
+        // BUG (2026-09-21, "tessera-web-menu-topleft", operator report:
+        // "action buttons... blocked top/left"): patchState() below
+        // notifies its 'selectedIdx' listener SYNCHRONOUSLY (store.js's
+        // own patchState loops and calls listeners in the same tick,
+        // no microtask/rAF hop), and that listener calls
+        // renderFileList(), which does `fileList.innerHTML = ''` and
+        // rebuilds every row from scratch. That DESTROYS this exact
+        // `row` element -- passing the now-detached closure variable to
+        // openFileMenu() below made positionFileMenu()'s
+        // `anchorRow.getBoundingClientRect()` return an all-zero rect
+        // (a detached node has no layout box), which is exactly why the
+        // menu always opened pinned to (0,0) regardless of which file
+        // was clicked. Re-find the FRESHLY rendered row for this same
+        // file by its stable data-file-id (set above) after the
+        // re-render runs, rather than trusting the pre-render closure.
         patchState({ selectedIdx: realIdx })
-        if (already) closeFileMenu(); else openFileMenu(row)
+        if (already) { closeFileMenu(); return }
+        const freshRow = r.fileList.querySelector('[data-file-id="' + f.id + '"]')
+        openFileMenu(freshRow || row)
       })
       // DRAG SOURCE (Apple A, 2026-09-16): "Drop an already-listed file
       // onto a folder row: same move." Carries only the file's real id
