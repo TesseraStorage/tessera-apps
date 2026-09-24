@@ -27,6 +27,7 @@ import {
   listFiles, computeTotals, uploadFile, downloadToDisk,
   deleteFile, createShareURL, getAccount, waitForReady, initRelay,
   setCredsPrefix,
+  isTailZone,
   buildPath, folderMarkerName, validateFolderName, computeFolderView,
   isNonEmptyFolder, findFolderMarkerId,
   getVirtualFolders, addVirtualFolder,
@@ -2312,68 +2313,92 @@ function setProgressTarget(pct) {
   }, 80)
 }
 
-// COPY TABLE (2026-09-19, "tessera-web-add-fail-copy"): the only four
-// sentences an Add failure may show on the page, per this packet's
-// public copy table. No jargon, no host key, no protocol name.
-const FAIL_CLASS_COPY = {
-  stall: 'Could not reach storage hosts. Please try again.',
-  connect: 'Could not connect to storage hosts. Check your network and try again.',
-  ready: 'Storage is taking longer than expected. Please try again.',
-  generic: 'Could not add this file. Try again.',
+// FAIL-CODE TABLE (2026-09-23, "tessera-web-fail-code"): the public
+// page keeps the SAME four calm sentences as the 2026-09-19
+// "tessera-web-add-fail-copy" packet -- only the tag after them
+// changed, from a flat 4-way class to this packet's own 7-code
+// vocabulary (T20/T20M/T0T/TWT/TR/T0P/T0) so the page/console can say
+// whether the hole was tail-stall, mid-stall, zero-stall, pin, ready,
+// connect, or SDK, per the packet's own requirement.
+const FAIL_SENTENCE = {
+  T20: 'Could not reach storage hosts. Please try again.',
+  T20M: 'Could not reach storage hosts. Please try again.',
+  T0T: 'Could not reach storage hosts. Please try again.',
+  TWT: 'Could not connect to storage hosts. Check your network and try again.',
+  TR: 'Storage is taking longer than expected. Please try again.',
+  T0P: 'Could not add this file. Try again.',
+  T0: 'Could not add this file. Try again.',
 }
-// Quiet support tag appended to the same label, same size, per packet
-// instruction 3 -- not explained on the page.
-const FAIL_CLASS_TAGS = { stall: ' (T20)', connect: ' (TWT)', ready: ' (TR)', generic: ' (T0)' }
+// files.js's own shard-stall watchdog Error message (line ~1266) --
+// matched verbatim below, same as the prior packet's 'stall' class.
+const STALL_WATCHDOG_MSG = 'Could not reach storage hosts. Please try again.'
+// Codes that carry N/M on the page per the packet's own table; TWT/
+// TR/T0P are bare (no shard count applies to a pre-shard or post-M
+// failure).
+const CODES_WITH_NM = new Set(['T20', 'T20M', 'T0T', 'T0'])
 
-// SWALLOW FIX (2026-09-19, "tessera-web-add-fail-copy"): maps a thrown
-// Error from uploadFile()/waitForReady() to one of the four classes
-// above. `sawShards` (doUpload's sawRealShardProgress) is the only
-// piece of state used to distinguish "sdk.upload() itself failed
-// before any shard" (connect) from "something failed after shards
-// were already landing" (generic, e.g. sdk.pinObject() throwing) --
+function buildFailTag(code, shardsLanded, expectedShards) {
+  if (!CODES_WITH_NM.has(code)) return ' (' + code + ')'
+  const n = typeof shardsLanded === 'number' ? shardsLanded : 0
+  const m = typeof expectedShards === 'number' ? expectedShards : '?'
+  return ' (' + code + ' ' + n + '/' + m + ')'
+}
+
+// SWALLOW FIX (2026-09-19, "tessera-web-add-fail-copy"; REVISED
+// 2026-09-23 "tessera-web-fail-code" to the 7-code table above) maps
+// a thrown Error from uploadFile()/waitForReady() to one of the codes
+// in FAIL_SENTENCE. `sawShards` (doUpload's sawRealShardProgress),
+// `shardsLanded` and `expectedShards` (both read back from
+// uploadFile()'s own `marks` object -- no new signal, no extra
+// hosts() call) are the only state used to tell the codes apart;
 // there is no message string common to every possible sdk.upload()
 // handshake/network rejection to match on instead (confirmed: the
 // wasm SDK's own transport-open failures are opaque, non-uniform
-// strings -- see this packet's recon). The two watchdog throws
-// (stall, ready) DO have fixed, known message text, so those are
-// matched first and take priority over the sawShards fallback.
-function classifyAddFailure(e, sawShards) {
+// strings -- see the 2026-09-19 packet's recon).
+function classifyAddFailure(e, sawShards, shardsLanded, expectedShards) {
   const msg = (e && e.message) || ''
-  // stall: files.js's own STALL_MS watchdog Error (line ~1115) -- its
-  // message IS ALREADY this exact public sentence per the packet's
-  // rule ("If the thrown Error message is already one of the public
-  // sentences in the table below, show that sentence"), matched
-  // verbatim rather than re-derived.
-  //
-  // MID-SLAB SPLIT (2026-09-20, "tessera-web-add-overlap-stall"):
-  // "T20 means 'zero pieces in 20s.' ... If shardsLanded >= 1 and the
-  // 20s gap fires: still fail... Class T0... T20 stays only when
-  // shardsLanded === 0." The watchdog in files.js throws this SAME
-  // message whether zero shards ever landed OR the gap opened mid-
-  // slab after some already had -- sawShards (this function's own
-  // 2nd arg, doUpload's sawRealShardProgress) is the exact signal
-  // that already existed to tell those two cases apart; the bug was
-  // simply that this branch never consulted it before returning
-  // 'stall' unconditionally. A true zero-shard stall (sawShards
-  // false) stays 'stall' (T20); a stall that opened AFTER shards
-  // were already landing (sawShards true) now falls to 'generic'
-  // (T0) -- same fixed sentence the table already has for it
-  // ("Could not add this file. Try again. (T0)"), no new copy.
-  if (msg === FAIL_CLASS_COPY.stall) return sawShards ? 'generic' : 'stall'
-  // ready: waitForReady()'s own cap-exceeded throw (files.js line
+  const landed = typeof shardsLanded === 'number' ? shardsLanded : 0
+  const M = typeof expectedShards === 'number' ? expectedShards : null
+
+  // TR: waitForReady()'s own cap-exceeded throw (files.js line
   // ~1323), fixed prefix regardless of the timeoutMs value passed in.
-  if (msg.indexOf('Account not ready after') === 0) return 'ready'
-  // connect: the tunnel-unavailable throw (files.js line ~901-903,
-  // Drop's shimmed WebTransport path only -- window.___wtpoly___ gate).
-  if (msg.indexOf('File storage is temporarily unavailable') === 0) return 'connect'
-  // connect (fallback): no shard had landed yet when this rejected --
-  // sdk.upload() itself never got a single shard out, i.e. its own
-  // handshake/network open failed. Per the packet's table this is the
-  // "connect" class regardless of the SDK's own raw message text.
-  if (!sawShards) return 'connect'
-  // generic: anything else, including a pin/finalize failure
-  // (sdk.pinObject() throwing) after shards had already landed.
-  return 'generic'
+  // Always fires with landed===0 -- doUpload's own
+  // `await waitForReady(sdk, 10000)` runs before uploadFile() (and
+  // therefore before any shard) is ever called.
+  if (msg.indexOf('Account not ready after') === 0) return 'TR'
+
+  // T0P: M/M already landed by the time this threw. shardsFullyLanded
+  // (files.js) is the sole gate for both remaining post-shard awaits
+  // (the pin-stall timeout's own message, or sdk.pinObject() itself
+  // throwing) -- and the shard-stall watchdog explicitly stops
+  // rejecting once shardsFullyLanded flips true (see its own
+  // WATCHDOG DISARM comment), so landed>=M can only mean a pin/
+  // finalize failure here, regardless of e.message's exact text.
+  if (M != null && landed >= M) return 'T0P'
+
+  // T20 / T20M / T0T: files.js's own STALL_MS/TAIL_STALL_MS watchdog
+  // throws this SAME message (line ~1266) whichever budget picked it
+  // -- isTailZone() (imported from files.js, the exact predicate
+  // stallBudgetMs() already applies) is what tells the three apart,
+  // per this packet's own table. "Do not invent a second tail rule":
+  // this reads the ONE threshold the timer itself uses, never a
+  // second, independently-derived one.
+  if (msg === STALL_WATCHDOG_MSG) {
+    if (landed === 0) return 'T20'
+    return (M != null && isTailZone(landed, M)) ? 'T0T' : 'T20M'
+  }
+
+  // TWT: either the tunnel-unavailable throw (Drop's shimmed path
+  // only, window.___wtpoly___ gate -- files.js line ~901-903) matched
+  // by substring, or any other throw that reached here with
+  // sawRealShardProgress still false -- i.e. sdk.upload() itself
+  // failed (handshake/network) before a single shard landed.
+  if (msg.indexOf('File storage is temporarily unavailable') === 0) return 'TWT'
+  if (!sawShards) return 'TWT'
+
+  // T0: anything else -- a throw mid-slab (some shards landed, fewer
+  // than M) that was NOT the stall watchdog's own message.
+  return 'T0'
 }
 
 // ADD STAGE CLOCKS (2026-09-20, "tessera-web-add-timing"): "Instrument
@@ -2727,45 +2752,51 @@ async function doUpload(file, destPathOverride) {
     // encoding animation could still be running -- stop it so it
     // doesn't keep animating underneath/behind the fail text.
     stopEncodingAnim()
-    // SWALLOW FIX (2026-09-19, "tessera-web-add-fail-copy"): the OLD
-    // code below this comment used to overwrite EVERY throw with the
-    // same generic sentence, no matter which of the throw paths in
-    // uploadFile()/waitForReady() actually fired -- "stall", "ready
-    // cap", and "sdk.upload() itself" all landed on one indistinguishable
-    // string. classifyAddFailure() (top of file) maps e.message to one
-    // of the four public-copy classes per this packet's table:
-    //   stall   -- files.js's own stall-watchdog Error, message is
-    //              ALREADY the public sentence (exact match, kept as-is)
-    //   ready   -- waitForReady()'s 'Account not ready after Ns' throw
-    //              (files.js line ~1323), matched by substring
-    //   connect -- either the tunnel-unavailable throw (files.js line
-    //              ~901-903, Drop's shimmed path only) matched by
-    //              substring, OR any other throw that reached here
-    //              with sawRealShardProgress still false -- i.e.
-    //              sdk.upload() itself failed (handshake/network)
-    //              before a single shard landed
-    //   generic -- anything else, including a pin/finalize failure
-    //              (sdk.pinObject() throwing) after shards had already
-    //              landed -- sawRealShardProgress is true in that case,
-    //              so it falls through to generic exactly per the table
-    const failClass = classifyAddFailure(e, sawRealShardProgress)
-    const tag = FAIL_CLASS_TAGS[failClass]
+    // SWALLOW FIX (2026-09-19, "tessera-web-add-fail-copy"; REVISED
+    // 2026-09-23 "tessera-web-fail-code"): the OLD code below this
+    // comment used to overwrite EVERY throw with the same generic
+    // sentence, no matter which throw path in uploadFile()/
+    // waitForReady() actually fired -- "stall", "ready cap", and
+    // "sdk.upload() itself" all landed on one indistinguishable
+    // string. classifyAddFailure() (top of file) now maps e.message
+    // + shard progress to one of the 7 codes in this packet's own
+    // table (T20/T20M/T0T/TWT/TR/T0P/T0) -- see that function's own
+    // comment for the full per-code rationale.
+    const shardsLandedAtFail = (addMarks && typeof addMarks.shardsLanded === 'number') ? addMarks.shardsLanded : 0
+    const expectedShardsAtFail = addMarks ? addMarks.expectedShards : null
+    const failCode = classifyAddFailure(e, sawRealShardProgress, shardsLandedAtFail, expectedShardsAtFail)
+    const tag = buildFailTag(failCode, shardsLandedAtFail, expectedShardsAtFail)
     renderProgressBar(0)
-    r.progressLabel.textContent = FAIL_CLASS_COPY[failClass] + tag
-    // ADD STAGE CLOCKS: okTag maps 1:1 to the packet's own vocabulary
-    // (T20/TWT/TR/T0) via the SAME tag string this fail path already
-    // paints on the page -- tag is ' (T20)' etc (leading space +
-    // parens), stripped down to just the bare code; 'other' only if
-    // failClass ever produced something outside FAIL_CLASS_TAGS'
-    // four known keys (should not happen, defensive only).
-    const okTag = tag ? tag.replace(/[ ()]/g, '') : 'other'
+    r.progressLabel.textContent = FAIL_SENTENCE[failCode] + tag
+    // ADD STAGE CLOCKS: okTag is now exactly this packet's own 7-code
+    // vocabulary (T20/T20M/T0T/TWT/TR/T0P/T0), the SAME string the
+    // fail path just painted on the page (stripped of its N/M suffix
+    // and parens) -- no separate stripping step needed since
+    // classifyAddFailure() already returns the bare code.
+    const okTag = failCode
     printAddTime(addT0, addMarks, okTag, addMarks ? addMarks.expectedShards : null)
-    // Console-only diagnostic line for support -- never printed on the
-    // page itself. Host URLs inside e.message (if any) are already
-    // visible in the browser's own network panel per this packet's law,
-    // so they are allowed to pass through in `raw` here unredacted; no
-    // phrase/AppKey/cookie/vault value is ever logged by this function.
-    console.error('tessera-add-fail class=' + failClass + ' raw=' + (e && e.message))
+    // CONSOLE FAIL BLOCK (2026-09-23, "tessera-web-fail-code" section
+    // 2): "On every Add fail, console.error ONE block the operator
+    // can copy... Exact prefix `tessera-add-fail` so a search still
+    // works." quiet_ms reads back marks.lastProgressAt (the SAME
+    // clock the shard-stall watchdog already maintains in files.js,
+    // exposed onto marks -- no second clock); last_i/last_host read
+    // the last entry of marks.lastTicks (files.js's own capped-at-3
+    // shard trace, unchanged). Host URLs inside e.message (if any)
+    // are already visible in the browser's own network panel per
+    // this packet's law, so they are allowed to pass through in
+    // `raw` here unredacted; no phrase/AppKey/cookie/vault value is
+    // ever logged by this function.
+    const lastTicks = (addMarks && Array.isArray(addMarks.lastTicks)) ? addMarks.lastTicks : []
+    const lastTick = lastTicks.length ? lastTicks[lastTicks.length - 1] : null
+    const quietMs = (addMarks && typeof addMarks.lastProgressAt === 'number') ? (Date.now() - addMarks.lastProgressAt) : '-'
+    const mStr = typeof expectedShardsAtFail === 'number' ? expectedShardsAtFail : '?'
+    console.error(
+      'tessera-add-fail code=' + failCode + ' shards=' + shardsLandedAtFail + '/' + mStr + '\n' +
+      'quiet_ms=' + quietMs + ' last_i=' + (lastTick && lastTick.i != null ? lastTick.i : '-') +
+      ' last_host=' + (lastTick && lastTick.host ? lastTick.host : '-') + '\n' +
+      'raw=' + (e && e.message)
+    )
     // FIX (2026-09-14, "tessera-web-occupy-fade"): "completeWrite() (or
     // equivalent) runs when uploadFile resolves OR REJECTS. Arcs fade.
     // A hung Add must not leave gold lines forever." Previously only

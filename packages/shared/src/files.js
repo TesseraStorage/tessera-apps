@@ -114,6 +114,18 @@ export const UPLOAD_MAX_BUFFERED_SLABS = 4   // null = stock WASM default (2)
 // value we don't control living upstream.
 export const DOWNLOAD_MAX_BUFFERED_CHUNKS = 32   // null = stock WASM default (32) -- explicit here only to document intent, not to change behavior
 
+// TAIL-ZONE PREDICATE (2026-09-23, "tessera-web-fail-code"): named
+// export of the exact "near the end" condition uploadFile()'s own
+// stallBudgetMs() uses to pick between STALL_MS and TAIL_STALL_MS
+// (>= expectedShards - 2, covers 28/30 and 29/30 per the 2026-09-20
+// "tessera-web-29-of-30" packet). web-ui.js's fail-code classifier
+// imports this SAME function to label a stall T20M (mid-slab) vs T0T
+// (tail) -- reading the one threshold the timer already applies,
+// never a second, independently-derived tail rule.
+export function isTailZone(shardsLanded, expectedShards) {
+  return shardsLanded >= expectedShards - 2
+}
+
 // FOLDERS (2026-09-15, "tessera-web-folders-v1", REVISED 2026-09-15
 // "tessera-web-folder-create-fail"): "The SDK has no directories. A
 // folder is a prefix on the object's existing metadata name." Forward
@@ -1107,6 +1119,13 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
   // frozen percent for up to 5 minutes.
   const STALL_MS = 20000
   let lastProgressAt = Date.now()
+  // FAIL-CODE (2026-09-23, "tessera-web-fail-code"): expose the exact
+  // same lastProgressAt the watchdog already tracks onto marks, so
+  // web-ui.js's console.error block can print `quiet_ms` (time since
+  // the last real signal) without a second clock. Set here to mirror
+  // its initial value; onShardUploadedWithWatchdog below re-syncs it
+  // on every real tick.
+  marks.lastProgressAt = lastProgressAt
   // WATCHDOG DISARM (2026-09-16, "tessera-web-add-false-fail-after-30of30",
   // M UPDATED 2026-09-17 "tessera-web-progress-denom"): operator report --
   // "progress bar stuck at 30/30, map lines drawn (real shards landed),
@@ -1155,7 +1174,34 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
   const PIN_STALL_MS = 60000
   let pinWatchStartedAt = null
   const onShardUploadedWithWatchdog = (ev) => {
-    lastProgressAt = Date.now()
+    // GAP LOG (2026-09-23, "tessera-web-fail-code" section 3): "printed
+    // gap, not a new timer." dt = ms since the PREVIOUS real shard
+    // tick (lastProgressAt, read here before this tick overwrites it
+    // below) -- the same clock the stall watchdog already maintains,
+    // no second timer. Only counts a gap between two REAL shard ticks
+    // (priorShardsLanded >= 1 guards out the encode-start-to-first-
+    // shard gap, which is not "two onShardUploaded ticks"). Never
+    // toasts, never pauses the upload, never counted as a fail --
+    // purely an observability print, capped at 40 lines on
+    // window.__tesseraAddGaps (shift oldest) per the packet's law.
+    const now = Date.now()
+    const priorShardsLanded = shardsLanded
+    const dt = now - lastProgressAt
+    if (priorShardsLanded >= 1 && dt >= 3000) {
+      const prevTick = marks.lastTicks.length ? marks.lastTicks[marks.lastTicks.length - 1] : null
+      const i = ev && ev.shardIndex
+      const host = ev && ev.hostKey
+      console.info(
+        'tessera-add-gap dt=' + dt + ' i=' + (i != null ? i : '-') +
+        ' prev_i=' + (prevTick && prevTick.i != null ? prevTick.i : '-') +
+        ' host=' + (host || '-')
+      )
+      window.__tesseraAddGaps = window.__tesseraAddGaps || []
+      window.__tesseraAddGaps.push({ dt, i, prev_i: prevTick ? prevTick.i : null, host })
+      if (window.__tesseraAddGaps.length > 40) window.__tesseraAddGaps.shift()
+    }
+    lastProgressAt = now
+    marks.lastProgressAt = lastProgressAt
     onShardUploaded(ev)
     if (shardsLanded >= expectedShards && !shardsFullyLanded) {
       shardsFullyLanded = true
@@ -1252,7 +1298,7 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
   // an early stall (a write that never really started) still fails
   // at the original 20s.
   const TAIL_STALL_MS = 45000
-  const stallBudgetMs = () => (shardsLanded >= expectedShards - 2 ? TAIL_STALL_MS : STALL_MS)
+  const stallBudgetMs = () => (isTailZone(shardsLanded, expectedShards) ? TAIL_STALL_MS : STALL_MS)
   const stallPromise = new Promise((_, reject) => {
     stallTimer = setInterval(() => {
       // See WATCHDOG DISARM comment above: once every expected shard has
