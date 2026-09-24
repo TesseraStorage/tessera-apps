@@ -1119,6 +1119,15 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
   // frozen percent for up to 5 minutes.
   const STALL_MS = 20000
   let lastProgressAt = Date.now()
+  // QUIET ROW (2026-09-23, "tessera-web-live-quiet"): tracks the last
+  // time the 10s heartbeat console line (section 2 below) printed, so
+  // that line fires on its OWN 10s cadence -- independent of this
+  // watchdog's 2s poll interval and reset to 0 the moment a real tick
+  // lands (see the quiet-state reset alongside lastProgressAt in
+  // onShardUploadedWithWatchdog below), so a fresh stall always waits
+  // a full 10s before its first heartbeat rather than inheriting a
+  // stale timestamp from an earlier stall on the same Add.
+  let lastQuietHeartbeatAt = 0
   // FAIL-CODE (2026-09-23, "tessera-web-fail-code"): expose the exact
   // same lastProgressAt the watchdog already tracks onto marks, so
   // web-ui.js's console.error block can print `quiet_ms` (time since
@@ -1202,6 +1211,12 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
     }
     lastProgressAt = now
     marks.lastProgressAt = lastProgressAt
+    // QUIET ROW: a real tick just landed, so the row's quiet suffix
+    // (added by the stallTimer poll below) is about to be overwritten
+    // by onShardUploaded's own plain stageText tick() call right
+    // below -- reset the heartbeat clock too so the NEXT stall, if
+    // any, gets its own fresh 10s before its first heartbeat line.
+    lastQuietHeartbeatAt = 0
     onShardUploaded(ev)
     if (shardsLanded >= expectedShards && !shardsFullyLanded) {
       shardsFullyLanded = true
@@ -1307,6 +1322,49 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
       // Never reject past that point; let the real uploadPromise settle on
       // its own, however long that legitimately takes.
       if (shardsFullyLanded) { clearInterval(stallTimer); return }
+      // QUIET ROW (2026-09-23, "tessera-web-live-quiet"): "shards
+      // still dripping often enough to reset lastProgressAt (bag-
+      // slow, not a hang)... the page still says uploading (N/M)
+      // either way. That is the lie." Paint the quiet age onto the
+      // SAME progress row once a real tick has been silent for >=3s,
+      // reusing this already-running 2s poll -- no new timer, per
+      // law. Only after at least one real shard has landed (never
+      // during encoding before the first piece, per the packet's own
+      // instruction); stageText mirrors onShardUploaded's own
+      // hideDenominator formula exactly, and hostKey/transferMs are
+      // left undefined so this synthetic tick never re-plots a map
+      // line for the last-landed host. This is a label repaint only --
+      // it does not touch lastProgressAt, so it never resets or masks
+      // the real stall/tail-stall budget check below.
+      const nowQuiet = Date.now()
+      const quietMs = nowQuiet - lastProgressAt
+      if (shardsLanded >= 1 && quietMs >= 3000) {
+        const quietPct = 5 + Math.min(85, Math.round((shardsLanded / expectedShards) * 85))
+        const quietStageText = (hideDenominator
+          ? 'uploading (' + shardsLanded + ')'
+          : 'uploading (' + shardsLanded + '/' + expectedShards + ')'
+        ) + ' quiet ' + Math.floor(quietMs / 1000) + 's'
+        tick(quietStageText, quietPct)
+        // HEARTBEAT CONSOLE (section 2): one line every 10s while
+        // quiet, not a fail -- same last-tick fields as
+        // tessera-add-fail's own last-3-ticks trace, capped at 60
+        // lines on window.__tesseraAddQuiets (shift oldest), no toast.
+        if (nowQuiet - lastQuietHeartbeatAt >= 10000) {
+          lastQuietHeartbeatAt = nowQuiet
+          const lastTick = marks.lastTicks.length ? marks.lastTicks[marks.lastTicks.length - 1] : null
+          const last_i = lastTick && lastTick.i != null ? lastTick.i : null
+          const last_host = lastTick && lastTick.host ? lastTick.host : null
+          console.info(
+            'tessera-add-quiet n=' + shardsLanded + '/' + expectedShards +
+            ' quiet_ms=' + quietMs +
+            ' last_i=' + (last_i != null ? last_i : '-') +
+            ' last_host=' + (last_host || '-')
+          )
+          window.__tesseraAddQuiets = window.__tesseraAddQuiets || []
+          window.__tesseraAddQuiets.push({ n: shardsLanded, m: expectedShards, quiet_ms: quietMs, last_i, last_host })
+          if (window.__tesseraAddQuiets.length > 60) window.__tesseraAddQuiets.shift()
+        }
+      }
       if (Date.now() - lastProgressAt > stallBudgetMs()) {
         clearInterval(stallTimer)
         reject(new Error('Could not reach storage hosts. Please try again.'))
