@@ -1271,6 +1271,19 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
   // window the old hardcoded disarm point would have reopened on any
   // multi-slab file once M was corrected above.
   let shardsFullyLanded = false
+  // ADD-SETTLED GUARD (2026-09-24, "tessera-web-pin-after-t0t"): "once
+  // T0T/T20/T20M has already rejected the Add, a late onShardUploaded
+  // must not flip the row to pinning." Set true in this function's own
+  // outer `finally` below (the same instant both watchdog timers are
+  // cleared) -- i.e. the moment the Promise.race the caller is actually
+  // awaiting has settled, win or lose. The real sdk.upload() promise
+  // keeps running in the background after that (existing lock-release
+  // chain below already handles it) and can still call this very
+  // callback with a late/orphan tick; this flag is what stops that
+  // orphan tick from silently repainting a stale 'pinning' row with no
+  // clock left running behind it (both watchdog setIntervals are
+  // already cleared by the time addSettled can ever be true).
+  let addSettled = false
   // PIN WATCHDOG (2026-09-19, "tessera-web-pin-watch"): independent of
   // the 20s shard-stall timer above -- arms ONLY once every expected
   // shard has landed (the exact moment the shard-stall timer above
@@ -1289,6 +1302,30 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
   const PIN_STALL_MS = 60000
   let pinWatchStartedAt = null
   const onShardUploadedWithWatchdog = (ev) => {
+    // ADD-SETTLED GUARD (2026-09-24, "tessera-web-pin-after-t0t"): checked
+    // FIRST, before any bookkeeping below -- once the Add has already
+    // settled (T0T/T20/T20M rejected it, or it already resolved), the
+    // real sdk.upload() chain can still deliver one more late shard tick
+    // in the background. onShardUploaded() below unconditionally calls
+    // tick(stageText, ...), which would silently repaint the row back to
+    // 'uploading (N/M)' (or, at M/M, 'pinning' with no clock left --
+    // both watchdog setIntervals are already cleared by the time
+    // addSettled is true) over whatever fail/done state the page is
+    // already showing. Log the orphan tick for the debug diary/console
+    // and stop -- never call onShardUploaded()/tick() once settled.
+    if (addSettled) {
+      const lateHost = ev && ev.hostKey
+      const lateShards = (marks.shardsLanded || 0) + 1
+      console.info(
+        'tessera-add-late-shard i=' + (ev && ev.shardIndex != null ? ev.shardIndex : '-') +
+        ' host=' + (lateHost || '-') + ' shards=' + lateShards + '/' + expectedShards
+      )
+      diaryPush(
+        'late-shard-after-settle i=' + (ev && ev.shardIndex != null ? ev.shardIndex : '-') +
+        ' host8=' + hex8(lateHost) + ' shards=' + lateShards + '/' + expectedShards
+      )
+      return
+    }
     // GAP LOG (2026-09-23, "tessera-web-fail-code" section 3): "printed
     // gap, not a new timer." dt = ms since the PREVIOUS real shard
     // tick (lastProgressAt, read here before this tick overwrites it
@@ -1518,6 +1555,21 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
       }
     }, 2000)
   })
+  // LOCK-RELEASE-ON-FAIL FIX (2026-09-24, "tessera-web-pin-after-t0t"):
+  // "release it on pin-trip the same way a normal fail does." Reading
+  // the code as it stood before this packet: the lock-release chain
+  // (`uploadPromise.then().finally(() => releaseLock())`) sits AFTER
+  // this try/finally, with no catch -- on ANY throw out of the try
+  // block (T20/T20M/T0T, and the pin-stall timeout this packet is
+  // about), that line was unreachable, so the lock was never released
+  // on ANY failure, not just a pin-trip. In practice this went
+  // unnoticed because the operator's own habit of hard-refreshing after
+  // a fail wipes all in-memory module state (including the stuck
+  // lock) anyway -- but it is a real, general bug, not something
+  // specific to pin-trip. Fixed generally here (catch + unconditional
+  // release + rethrow) so pin-trip's release is really "the same way a
+  // normal fail does," because normal fails now actually do it too.
+  let raceError = null
   try {
     obj = await Promise.race([uploadPromise, stallPromise, pinStallPromise])
     // ADD STAGE CLOCKS: t_upload_ok is the moment sdk.upload()'s own
@@ -1540,26 +1592,34 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
     pinPromiseRef = pinPromise
     await Promise.race([pinPromise, pinStallPromise])
     marks.t_pin_ok = Date.now()
+  } catch (err) {
+    raceError = err
   } finally {
     if (stallTimer) clearInterval(stallTimer)
     if (pinStallTimer) clearInterval(pinStallTimer)
+    // ADD-SETTLED GUARD: see its own declaration comment above -- this
+    // is the exact instant (win or lose) after which a late/orphan
+    // onShardUploaded tick must never repaint the row to 'pinning'.
+    addSettled = true
   }
-  // SERIAL LOCK release (2026-09-20, "tessera-web-add-overlap-stall"):
-  // releases only once the REAL underlying chain has genuinely
-  // stopped running -- waits on uploadPromise itself (never the
-  // watchdog race above), and, if it resolved, on pinPromiseRef (the
-  // SAME single sdk.pinObject() call the try block already made, set
-  // via pinPromiseRef just above -- never a second, duplicate call).
-  // Deliberately NOT inside the finally above: that block's own
-  // early exits (an uploadPromise that legitimately takes longer than
-  // the watchdog waited for) must not be entangled with this -- this
-  // await runs fully independently, in the background, exactly
-  // mirroring the pre-existing uploadPromise.catch(() => {}) pattern
-  // this file already used for "let it keep running, just don't
-  // crash on the unhandled rejection."
+  // SERIAL LOCK release (2026-09-20, "tessera-web-add-overlap-stall";
+  // extended 2026-09-24 to run on EVERY exit, not just success -- see
+  // the LOCK-RELEASE-ON-FAIL FIX comment above): releases only once the
+  // REAL underlying chain has genuinely stopped running -- waits on
+  // uploadPromise itself (never the watchdog race above), and, if it
+  // resolved, on pinPromiseRef (the SAME single sdk.pinObject() call
+  // the try block already made, set via pinPromiseRef just above --
+  // never a second, duplicate call). This await runs fully
+  // independently, in the background, exactly mirroring the
+  // pre-existing uploadPromise.catch(() => {}) pattern this file
+  // already used for "let it keep running, just don't crash on the
+  // unhandled rejection." Unconditional now (moved outside the
+  // success-only tail this used to be) so a T20/T20M/T0T/T0P failure
+  // releases the lock exactly the same way a clean success does.
   uploadPromise
     .then(() => (pinPromiseRef ? pinPromiseRef.catch(() => {}) : null), () => {})
     .finally(() => { releaseLock(); _realUploadInFlight = false })
+  if (raceError) throw raceError
   tick('done', 100)
   return obj
 }
