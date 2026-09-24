@@ -243,7 +243,7 @@ export function lookupGeo(hostKey) {
 // and the map's pin should share one provenance. That theory is sound
 // server-side (hostfilter's own resolvePoint() DOES correctly resolve
 // a Switzerland IP to Zurich -- confirmed live by forcing X-Forwarded-For:
-// 193.32.127.189 directly against https://index.dithr.dev/origin, which
+// 193.32.127.189 directly against https://index.tessera.storage/origin, which
 // returns lat 47.43/lon 8.58). The bug is one layer up: NEITHER nginx
 // proxy hop that fronts /origin for a browser (siagate.dev's own
 // /v2/tessera/web/idx/ location, and Drop's /v2/tessera/drop/idx/
@@ -493,6 +493,51 @@ function sunflowerOffset(i, n) {
   return [r * Math.cos(theta), r * Math.sin(theta)]
 }
 
+// WEIGHTED CIRCLE VISUALIZATION (2026-09-18, operator request): an
+// alternate to the sunflower dispersion above -- one borderless,
+// semi-transparent gold circle per host, at that host's real (lat, lon),
+// sized by how many shards it holds, instead of many small dispersed
+// dots. TOGGLE, NOT A REPLACEMENT: PIN_VISUALIZATION below picks which
+// model render() actually draws each frame; sunflowerOffset() and
+// recomputeHostCloud() above, and the per-pin dxPin/dyPin bookkeeping
+// in shardLanded()/seedPins(), are left completely intact and still run
+// every frame regardless of this switch -- so flipping this one const
+// back to 'sunflower' is a true one-line revert, no re-implementation.
+const PIN_VISUALIZATION = 'weighted-circle'   // 'sunflower' | 'weighted-circle'
+
+// Same RGB triple as DOT_GOLD (the upload traveling dot's color, defined
+// above). Alpha 0.2 per operator refinement (2026-09-18, "change
+// opacity to 20%" -- was 0.5 at initial ship). Kept as its own literal
+// constant rather than string-parsing DOT_GOLD's alpha out at runtime --
+// simpler, and the values only need to be kept in sync by eye if
+// DOT_GOLD's RGB triple (250, 204, 21) itself is ever changed.
+const CIRCLE_GOLD_FILL = 'rgba(250, 204, 21, 0.2)'
+
+// Area-proportional radius: r = CIRCLE_MIN_RADIUS * sqrt(n). This is the
+// standard convention for proportional-symbol/bubble maps -- scaling
+// AREA (not radius) linearly with the value means a host with 4x the
+// shards reads as "4x as much" by eye (area), rather than looking ~16x
+// bigger the way a linear-radius scale would. n=1 (or the "no host yet"
+// floor via Math.max) still gets a visible CIRCLE_MIN_RADIUS-px dot
+// instead of vanishing to a point. CIRCLE_MIN_RADIUS halved 2026-09-18
+// per operator refinement ("decrease the size of the circles by 50%" --
+// was 4 at initial ship); halving this one base radius scales every
+// circle's radius by the same 0.5 factor since radius is linear in
+// CIRCLE_MIN_RADIUS (only the sqrt(n) term is nonlinear), so this is a
+// uniform 50% size reduction across all host circles, not just the
+// smallest ones.
+const CIRCLE_MIN_RADIUS = 2
+function weightedCircleRadius(n) {
+  return CIRCLE_MIN_RADIUS * Math.sqrt(Math.max(1, n))
+}
+
+function drawWeightedCircle(ctx, x, y, r) {
+  ctx.fillStyle = CIRCLE_GOLD_FILL
+  ctx.beginPath()
+  ctx.arc(x, y, r, 0, Math.PI * 2)
+  ctx.fill()
+}
+
 /**
  * A minimal map controller bound to a <canvas>.
  *
@@ -631,9 +676,33 @@ export function createUploadMap(canvas, captionEl, onLanded) {
     // pixel on a 25px sunflower disk (law #5) -- never stacked, never
     // cleared by fade or completeWrite. White family, brighter/
     // smaller than look-v1.
-    for (const p of pins) {
-      const [hx, hy] = project(p.lat, p.lon, w, h)
-      drawSharpDot(ctx, hx + p.dxPin, hy + p.dyPin, GLOW_WHITE)
+    //
+    // VISUALIZATION SWITCH (2026-09-18): `pins` (built by shardLanded/
+    // seedPins, one entry per landed shard, hostKey preserved) is the
+    // same underlying data for both models -- only how it's drawn
+    // differs. 'sunflower' (the pre-2026-09-18 default, still fully
+    // intact above) draws each shard as its own small dispersed white
+    // dot. 'weighted-circle' instead groups by host and draws ONE
+    // borderless, 50%-alpha gold circle per host, sized by that host's
+    // total shard count -- position is the host's real (lat, lon), not
+    // an offset pixel, since a single area-scaled circle has no need to
+    // disperse (that was only ever needed so multiple small dots on the
+    // same point wouldn't visually merge into one).
+    if (PIN_VISUALIZATION === 'weighted-circle') {
+      const hostPos = new Map()   // hostKey -> {lat, lon} (first-seen wins; same host's pins all share one lat/lon anyway)
+      for (const p of pins) {
+        if (!hostPos.has(p.hostKey)) hostPos.set(p.hostKey, { lat: p.lat, lon: p.lon })
+      }
+      for (const [hostKey, pos] of hostPos) {
+        const n = hostShardCounts.get(hostKey) || 0
+        const [hx, hy] = project(pos.lat, pos.lon, w, h)
+        drawWeightedCircle(ctx, hx, hy, weightedCircleRadius(n))
+      }
+    } else {
+      for (const p of pins) {
+        const [hx, hy] = project(p.lat, p.lon, w, h)
+        drawSharpDot(ctx, hx + p.dxPin, hy + p.dyPin, GLOW_WHITE)
+      }
     }
 
     // Traveling glow-dots: DOTS_PER_ARC dots per still-visible trip,
@@ -735,15 +804,26 @@ export function createUploadMap(canvas, captionEl, onLanded) {
   // shardLanded: the per-shard entry point (2026-09-15, "tessera-web-
   // map-follow"). Draws one trip (arc + DOTS_PER_ARC traveling dots).
   //
-  // LINE LIFETIME (2026-09-16, "tessera-web-encode-hold", SIMPLIFIED
-  // FINAL -- all prior same-day "5s-or-real-transfer" formulas REMOVED
-  // per explicit operator instruction to abandon that approach): every
-  // line lasts a FLAT LINE_FLOOR_MS (4s) from the moment it's drawn
-  // (shard landing -- the only SDK hook available; there is no
-  // separate "shard started" event). `transferMs` is no longer read
-  // or used for line timing at all.
+  // DOWNLOAD: ARC/DOT YES, PIN NO (2026-09-18, operator clarification
+  // after the initial "no dots on download" fix went too far): the
+  // arc + traveling dot is a TRAVEL animation -- it depicts data
+  // moving between host and client and is correct for both directions
+  // (upload: client->host; download: host->client, already flipped via
+  // the `tEff` reversal in render()). What must never happen is a
+  // STATIONARY PIN at either endpoint for a download, because no data
+  // is placed anywhere by a read -- a pin here would misrepresent a
+  // "landed" (written/stored) fact that a download simply doesn't
+  // create. This is the real reason the original "hundreds of dots"
+  // report happened: shardLanded() used to unconditionally push a
+  // stationary pin (`pins.push`, then dispersed into a sunflower cloud
+  // by recomputeHostCloud) for every single shard READ during a
+  // multi-shard download, one static marker per shard, indistinguishable
+  // from a real write. The fix is scoped exactly to that push, not to
+  // the animation: trips (arc+traveling dot) fire for both directions,
+  // pins fire for uploads only.
   function shardLanded(hostKey, dir, transferMs) {
     if (!hostKey) return
+    const isDownload = (dir || 'upload') === 'download'
     const geo = geoLookup(hostKey)
     // "Skip hosts with no lat/long. Do not invent pins. Do not call
     // hosts() to fill gaps." -- no fallback placement.
@@ -751,12 +831,23 @@ export function createUploadMap(canvas, captionEl, onLanded) {
     const now = Date.now()
     trips.push({ lat: geo.lat, lon: geo.lon, hostKey, dir: dir || 'upload', startedAt: now, visibleUntil: now + LINE_FLOOR_MS, fadeAt: now })
 
-    // Dispersed pin (law #5): index is this host's shard count BEFORE
-    // incrementing (0-based), n is the count AFTER.
-    const i = hostShardCounts.get(hostKey) || 0
-    hostShardCounts.set(hostKey, i + 1)
-    pins.push({ lat: geo.lat, lon: geo.lon, hostKey, dxPin: 0, dyPin: 0 })
-    recomputeHostCloud(hostKey)
+    // STATIONARY PIN: upload only (see the function-level comment above
+    // for why download is excluded). A download never places anything
+    // at either endpoint -- it just moves the traveling dot from host
+    // to client and lets the trip fade on the usual LINE_FLOOR_MS clock,
+    // same as an upload's arc, with no persistent mark left behind on
+    // either the host side (destination for upload, origin for
+    // download) or the client's own origin mark (drawn once per
+    // render() regardless of trips -- see the `drawSharpDot(ctx, ox,
+    // oy, ...)` call in render(), untouched by this function either way).
+    if (!isDownload) {
+      // Dispersed pin (law #5): index is this host's shard count BEFORE
+      // incrementing (0-based), n is the count AFTER.
+      const i = hostShardCounts.get(hostKey) || 0
+      hostShardCounts.set(hostKey, i + 1)
+      pins.push({ lat: geo.lat, lon: geo.lon, hostKey, dxPin: 0, dyPin: 0 })
+      recomputeHostCloud(hostKey)
+    }
 
     // PERSIST (2026-09-16, "tessera-web-add-hang-map400"): "New
     // landings append, then trim to 400." onLanded is this
@@ -766,15 +857,14 @@ export function createUploadMap(canvas, captionEl, onLanded) {
     // ALSO gets persisted with the exact same resolved geo, same
     // hostKey, same dir. No new lookup, no new network call -- reuses
     // the `geo` this function already resolved above. Scoped to
-    // 'upload' dir only -- this packet's own law only names "During a
-    // live Add, lines still follow the write... New landings append."
-    // A download's shardLanded call still draws its cyan trip/pin live
-    // (unchanged), it just doesn't ALSO write a new persisted record --
-    // out of this packet's stated scope.
-    if (onLanded && (dir || 'upload') === 'upload') onLanded({ hostKey, lat: geo.lat, lon: geo.lon, dir: dir || 'upload', at: now })
+    // 'upload' dir only, same as the pin push itself above -- a
+    // download never reaches a persisted record because it never
+    // placed a pin in the first place.
+    if (onLanded && !isDownload) onLanded({ hostKey, lat: geo.lat, lon: geo.lon, dir: dir || 'upload', at: now })
 
     if (!rafId) render()
   }
+
   // Back-compat alias -- some call sites still say "landedHost".
   const landedHost = shardLanded
 

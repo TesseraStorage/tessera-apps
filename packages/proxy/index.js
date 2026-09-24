@@ -46,11 +46,11 @@ async function getServiceSdk() {
   const appKeyBytes = new Uint8Array(Buffer.from(SERVICE_APP_KEY, 'hex'))
   const key = new AppKey(appKeyBytes)
 
-  const builder = new Builder('https://index.dithr.dev', {
+  const builder = new Builder('https://index.tessera.storage', {
     id: appIdBytes,
     name: 'Tessera Relay',
     description: 'Proxy relay for web uploads',
-    serviceUrl: 'https://index.dithr.dev',
+    serviceUrl: 'https://index.tessera.storage',
   })
 
   serviceSdk = await builder.connected(key)
@@ -75,11 +75,11 @@ async function getUserSdk(appId, appKey) {
   const appKeyBytes = new Uint8Array(Buffer.from(appKey, 'hex'))
   const key = new AppKey(appKeyBytes)
 
-  const builder = new Builder('https://index.dithr.dev', {
+  const builder = new Builder('https://index.tessera.storage', {
     id: appIdBytes,
     name: 'Tessera User',
     description: 'Tessera web user',
-    serviceUrl: 'https://index.dithr.dev',
+    serviceUrl: 'https://index.tessera.storage',
   })
 
   const sdk = await builder.connected(key)

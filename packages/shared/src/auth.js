@@ -134,7 +134,7 @@ export async function beginConnection(prefix = 'tessera', fetchMode) {
  * from here with a plain fetch(). Confirmed live (2026-09-14) that this
  * endpoint is reachable this way with no Indexd edit:
  *   - POST /auth/connect, GET .../status, POST .../register, GET /account
- *     all return `Access-Control-Allow-Origin: *` on index.dithr.dev.
+ *     all return `Access-Control-Allow-Origin: *` on index.tessera.storage.
  *   - Every one of those requests is self-signed by the wasm SDK
  *     (sc/ss/sv query params validated against the SIGNED URL, not the
  *     browser's Origin header) -- so cross-origin-from-siagate.dev is not

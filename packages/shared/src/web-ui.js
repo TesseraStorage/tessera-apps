@@ -878,7 +878,7 @@ async function onInviteContinue() {
     // see connectWithInvite() in auth.js for the confirmed-live, no-Indexd-
     // edit mechanism. Routed through 'idx' (same-origin /v2/tessera/web/idx/
     // proxy) as of "tessera-web-invite-fetch" -- the approval POST's target
-    // route has no CORS headers on index.dithr.dev directly, so 'direct'
+    // route has no CORS headers on index.tessera.storage directly, so 'direct'
     // mode's cross-origin call was failing preflight ("Failed to fetch").
     // If this ever stops working (proxy route removed, Indexd hardened),
     // it throws and the catch below shows the real error -- this path does

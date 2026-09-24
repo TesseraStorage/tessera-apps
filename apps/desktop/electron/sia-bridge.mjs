@@ -14,7 +14,7 @@ import { Readable } from 'node:stream'
 const _origFetch = globalThis.fetch.bind(globalThis)
 globalThis.fetch = function (input, init) {
   let url = typeof input === 'string' ? input : (input?.url || input?.href || '')
-  if (typeof url === 'string' && url.includes('index.dithr.dev')) {
+  if (typeof url === 'string' && url.includes('index.tessera.storage')) {
     url = 'http://localhost:3099/__proxy__?url=' + encodeURIComponent(url)
     if (typeof input === 'string') input = url
     else if (input && typeof input === 'object') input = new Request(url, input)
@@ -47,11 +47,11 @@ export async function connect(appIdHex, appKeyHex) {
   const appKeyBytes = new Uint8Array(Buffer.from(appKeyHex, 'hex'))
   const key = new AppKey(appKeyBytes)
 
-  const builder = new Builder('https://index.dithr.dev', {
+  const builder = new Builder('https://index.tessera.storage', {
     id: appIdBytes,
     name: 'Tessera Desktop',
     description: 'Tessera desktop client',
-    serviceUrl: 'https://index.dithr.dev',
+    serviceUrl: 'https://index.tessera.storage',
   })
 
   sdk = await builder.connected(key)

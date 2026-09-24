@@ -55,11 +55,11 @@ async function connectSdk() {
   if (savedAid && savedAkey) {
     try {
       const key = new AppKey(fromHex(savedAkey))
-      const builder = new Builder('https://index.dithr.dev', {
+      const builder = new Builder('https://index.tessera.storage', {
         appId: savedAid,
         name: 'Tessera Share',
         description: 'Tessera share download',
-        serviceUrl: 'https://index.dithr.dev',
+        serviceUrl: 'https://index.tessera.storage',
       })
       const sdk = await builder.connected(key)
       if (sdk) return sdk
@@ -70,11 +70,11 @@ async function connectSdk() {
 
   // Fall back to service account (pre-funded contracts for host access)
   const key = new AppKey(fromHex(SVC_APP_KEY))
-  const builder = new Builder('https://index.dithr.dev', {
+  const builder = new Builder('https://index.tessera.storage', {
     appId: SVC_APP_ID,
     name: 'Tessera Share',
     description: 'Tessera share download',
-    serviceUrl: 'https://index.dithr.dev',
+    serviceUrl: 'https://index.tessera.storage',
   })
   const sdk = await builder.connected(key)
   if (!sdk) throw new Error('Could not connect to the Tessera network. Please try again later.')

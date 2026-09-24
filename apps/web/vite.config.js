@@ -18,7 +18,7 @@ export default defineConfig({
   server: {
     port: 5173,
     // Proxy requests that go through the fetch interceptor to the standalone
-    // proxy on port 3099, which handles CORS and forwards to index.dithr.dev.
+    // proxy on port 3099, which handles CORS and forwards to index.tessera.storage.
     // The shared interceptor rewrites indexer URLs to use the standalone proxy,
     // so these rules are only needed if the interceptor is disabled.
     proxy: {

@@ -122,7 +122,7 @@ async function main(){
           localStorage.setItem('tessera.aid','1483449cb22e73c9936cc4153bf071c4008c0787faf078d35bf95f702b326f23');
           localStorage.setItem('tessera.akey','6be4f21d5a4da5ab422077cb8188885e947f10aced92cded35c5aa9afad9d42c');
           var key=new T.AppKey(T.fromHex('6be4f21d5a4da5ab422077cb8188885e947f10aced92cded35c5aa9afad9d42c'));
-          var b=new T.Builder('https://index.dithr.dev',{appId:'1483449cb22e73c9936cc4153bf071c4008c0787faf078d35bf95f702b326f23',name:'E2E',description:'',serviceUrl:'https://index.dithr.dev'});
+          var b=new T.Builder('https://index.tessera.storage',{appId:'1483449cb22e73c9936cc4153bf071c4008c0787faf078d35bf95f702b326f23',name:'E2E',description:'',serviceUrl:'https://index.tessera.storage'});
           var sdk=await b.connected(key);T.registerSdk(sdk);
           T.patchState({sdk:sdk,accountReady:true,screen:'main'});
           window.__T=T;window.__sdk=sdk;await T.initRelay();return'ok';

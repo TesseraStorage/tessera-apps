@@ -1,6 +1,6 @@
 // Fetch interceptor + WebTransport→WebSocket bridge for Tessera.
 //
-// Indexer requests (index.dithr.dev) go through the CORS proxy on :3099
+// Indexer requests (index.tessera.storage) go through the CORS proxy on :3099
 // by default. WebTransport connections to sia hosts are tunnelled through
 // a WebSocket relay that speaks raw siamux TCP to the host.
 //
@@ -13,7 +13,7 @@
 //
 // MODE UPDATE (2026-09-14, "tessera-web-invite-fetch"): 'direct' (the mode
 // Tessera Web previously used) is GONE -- it let indexer requests leave the
-// browser as real cross-origin calls to index.dithr.dev, and one route that
+// browser as real cross-origin calls to index.tessera.storage, and one route that
 // path depends on, POST /auth/connect/:requestID (the invite-approval call
 // connectWithInvite() makes), has NO CORS headers at all on that origin
 // (confirmed live: OPTIONS and POST both come back with zero
@@ -26,13 +26,13 @@
 // question.
 //
 // 'idx' is the fix: same-origin rewrite through THIS app's own
-// /v2/tessera/web/idx/ nginx location (proxy_pass https://index.dithr.dev/),
+// /v2/tessera/web/idx/ nginx location (proxy_pass https://index.tessera.storage/),
 // exactly like Drop's /v2/tessera/drop/idx/ already proves works. Because
 // the request never leaves the browser as cross-origin, CORS headers (or
-// their absence) on index.dithr.dev stop mattering entirely.
+// their absence) on index.tessera.storage stop mattering entirely.
 import { proxyOrigin } from './utils.js'
 
-const INDEXER_HOST = 'index.dithr.dev'
+const INDEXER_HOST = 'index.tessera.storage'
 const INDEXER_ORIGIN = 'https://' + INDEXER_HOST
 
 // ── Fetch interceptor for indexer requests ───────────────
@@ -42,7 +42,7 @@ export function installFetchInterceptor(mode = 'proxy') {
   window.___tfi___ = true
 
   if (mode === 'idx') {
-    // Same-origin rewrite: https://index.dithr.dev/<path> -> <this origin>/idx/<path>
+    // Same-origin rewrite: https://index.tessera.storage/<path> -> <this origin>/idx/<path>
     const rewrite = (url) => proxyOrigin() + '/idx/' + url.slice(INDEXER_ORIGIN.length).replace(/^\/+/, '')
 
     const _R = window.Request
