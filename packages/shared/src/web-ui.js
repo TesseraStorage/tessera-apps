@@ -331,7 +331,7 @@ const SKELETON = /*html*/`
          under the map (same column as the old caption gutter)...
          if the map is closed, the panel still exists under that slot
          so Copy is reachable." Deliberately its OWN sibling aside,
-         never a child of #mapPane -- #mapPane's own `.hidden` class
+         never a child of #mapPane -- #mapPane's own .hidden class
          (toggled purely by showMap()/hideMap(), untouched by this
          packet) must never also hide this panel when the operator
          has the map closed but debug=1 on the URL. Visibility here is
