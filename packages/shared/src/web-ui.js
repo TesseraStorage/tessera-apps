@@ -38,6 +38,7 @@ import {
   filesUnderFolder, countFilesUnderFolder, renameFilePath,
   validateFolderRenameName, renameVirtualFolderPrefix, removeVirtualFolderPrefix,
   isRealUploadInFlight, waitForUploadSlot,
+  isDebugOn, diaryPush, hex8,
 } from './files.js'
 import { createUploadMap } from './map.js'
 import {
@@ -73,6 +74,7 @@ function cacheRefs() {
     'btnSelectMany', 'selectManyBar', 'selectManyCount', 'btnSelectAll',
     'btnSelectManyMove', 'btnSelectManyDelete', 'btnSelectManyDone',
     'filesLayout', 'btnShowMap', 'mapPane', 'btnHideMap', 'mapCanvas',
+    'mapColumn', 'debugPane', 'debugLog', 'btnDebugCopy',
     'statusText', 'progressWrap', 'progressFill', 'progressLabel',
     'shareModal', 'shareLink', 'btnCopyLink', 'btnCloseModal',
     'textInputModal', 'textInputTitle', 'textInputField', 'textInputError',
@@ -305,6 +307,16 @@ const SKELETON = /*html*/`
       <p id="statusText" class="status-text"></p>
     </section>
 
+    <!-- MAP COLUMN (2026-09-24, "tessera-web-debug-log"): a pure layout
+         wrapper -- #filesLayout is a flex ROW (filesScreen | this column),
+         so stacking the debug panel "under the map" in the SAME column
+         needs one flex-column wrapper around both asides. #mapPane keeps
+         every one of its own existing rules/classes/animation untouched
+         (this wrapper adds no width/margin of its own that would fight
+         .map-pane's width 0<->800px slide -- see that rule's own
+         comment); it simply gives .debug-pane somewhere to stack below
+         it without becoming a THIRD flex item next to the map. -->
+    <div id="mapColumn" class="map-column">
     <aside id="mapPane" class="map-pane hidden">
       <canvas id="mapCanvas" class="map-canvas"></canvas>
       <!-- CAPTION KILLED (2026-09-15, "tessera-web-map-follow"):
@@ -314,6 +326,26 @@ const SKELETON = /*html*/`
            -- there is no lower-left text node on the map pane at all
            anymore. -->
     </aside>
+
+    <!-- DEBUG PANE (2026-09-24, "tessera-web-debug-log"): "a panel
+         under the map (same column as the old caption gutter)...
+         if the map is closed, the panel still exists under that slot
+         so Copy is reachable." Deliberately its OWN sibling aside,
+         never a child of #mapPane -- #mapPane's own `.hidden` class
+         (toggled purely by showMap()/hideMap(), untouched by this
+         packet) must never also hide this panel when the operator
+         has the map closed but debug=1 on the URL. Visibility here is
+         driven SOLELY by the debug-flag reader (syncDebugPane() below)
+         -- never by mapShown. Starts hidden (no query = no panel, no
+         Copy, no extra DOM, per law). -->
+    <aside id="debugPane" class="debug-pane hidden">
+      <div class="debug-pane-header">
+        <h3>Debug</h3>
+        <button id="btnDebugCopy" class="btn btn-ghost btn-debug-copy">Copy</button>
+      </div>
+      <div id="debugLog" class="debug-log"></div>
+    </aside>
+    </div>
   </div>
 
   <!-- SHARE MODAL -->
@@ -428,6 +460,12 @@ export async function mountApp(container) {
   r.btnShare.addEventListener('click', onShare)
   r.btnCloseModal.addEventListener('click', closeShareModal)
   r.btnCopyLink.addEventListener('click', onCopyLink)
+  // DEBUG PANE (2026-09-24, "tessera-web-debug-log"): Copy button --
+  // "One click. Clipboard write of the full diary text." wired here
+  // alongside every other Files-screen button listener; the pane's own
+  // visibility is handled separately by syncDebugPane() (boot/popstate/
+  // enterFiles), never gated on this listener existing.
+  r.btnDebugCopy.addEventListener('click', onDebugCopy)
 
   // CANCEL SELECTION (2026-09-16, per operator instruction: "the file
   // options menu doesn't have a cancel button... clicking anywhere
@@ -559,6 +597,12 @@ export async function mountApp(container) {
       renderBreadcrumb()
       renderFileList()
     }
+    // DEBUG PANE (2026-09-24, "tessera-web-debug-log"): "Read the flag
+    // at boot and on popstate / in-app navigation so Back keeps the
+    // switch." Browser Back/Forward is a real navigation the URL query
+    // can change across, so re-read it here every time, not just once
+    // at boot.
+    syncDebugPane()
     setScreen(screen)
   })
 
@@ -1072,6 +1116,11 @@ async function enterFiles() {
                        // a fresh boot -- this guarantees the breadcrumb is
                        // painted regardless.
   replaceScreen('files')
+  // DEBUG PANE (2026-09-24, "tessera-web-debug-log"): "Read the flag at
+  // boot and on popstate / in-app navigation." Entering Files (Unlock,
+  // Ready, or first boot -- see this function's own top-of-file comment)
+  // is exactly such a navigation.
+  syncDebugPane()
   const sdk = getState().sdk
 
   // FIX (2026-09-14, "tessera-web-add-relay"): status used to stay on
@@ -2723,6 +2772,24 @@ async function doUpload(file, destPathOverride) {
     // upload_ok/pin_start/pin_ok all happen before uploadFile()
     // resolves, and this line runs immediately after that await).
     printAddTime(addT0, addMarks, 'yes', addMarks ? addMarks.expectedShards : null)
+    // DEBUG DIARY (2026-09-24, "tessera-web-debug-log"): "Add end: ok or
+    // code, shards N/M, elapsed_ms." bag_n/bag list are read back from
+    // addMarks.bagHosts (files.js's own in-hand hostKey set, built purely
+    // from onShardUploaded events this Add already saw -- never a fresh
+    // hosts() call); bag=- when nothing landed at all.
+    {
+      const m = addMarks ? addMarks.expectedShards : null
+      const n = (addMarks && typeof addMarks.shardsLanded === 'number') ? addMarks.shardsLanded : 0
+      const bag = (addMarks && addMarks.bagHosts && addMarks.bagHosts.size)
+        ? Array.from(addMarks.bagHosts).map(hex8).join(',')
+        : '-'
+      const bagN = (addMarks && addMarks.bagHosts) ? addMarks.bagHosts.size : 0
+      diaryPush(
+        'add-end ok shards=' + n + '/' + (m != null ? m : '?') +
+        ' elapsed_ms=' + (Date.now() - addT0) +
+        ' bag_n=' + bagN + ' bag=' + bag
+      )
+    }
     if (mapController) mapController.completeWrite()
     showToast('\u2705 ' + file.name + ' added')
     // BUG FIX (2026-09-16, per operator report: "after pinning, a
@@ -2797,6 +2864,34 @@ async function doUpload(file, destPathOverride) {
       ' last_host=' + (lastTick && lastTick.host ? lastTick.host : '-') + '\n' +
       'raw=' + (e && e.message)
     )
+    // DEBUG DIARY (2026-09-24, "tessera-web-debug-log"): "fail code +
+    // quiet_ms + last_i + last_host (full key in the copy, 8-hex on the
+    // pane)" + "Add end: ok or code, shards N/M, elapsed_ms." Same
+    // fields the console block above just printed, split into a
+    // pane-safe (8-hex) line and a Copy-only (full key) line via
+    // diaryPush()'s own two-argument form.
+    {
+      const bag = (addMarks && addMarks.bagHosts && addMarks.bagHosts.size)
+        ? Array.from(addMarks.bagHosts).map(hex8).join(',')
+        : '-'
+      const bagN = (addMarks && addMarks.bagHosts) ? addMarks.bagHosts.size : 0
+      const lastHostFull = (lastTick && lastTick.host) ? lastTick.host : '-'
+      const lastHost8 = hex8(lastTick && lastTick.host)
+      diaryPush(
+        'add-end fail code=' + failCode + ' shards=' + shardsLandedAtFail + '/' + mStr +
+        ' elapsed_ms=' + (Date.now() - addT0) +
+        ' quiet_ms=' + quietMs +
+        ' last_i=' + (lastTick && lastTick.i != null ? lastTick.i : '-') +
+        ' last_host8=' + lastHost8 +
+        ' bag_n=' + bagN + ' bag=' + bag,
+        'add-end fail code=' + failCode + ' shards=' + shardsLandedAtFail + '/' + mStr +
+        ' elapsed_ms=' + (Date.now() - addT0) +
+        ' quiet_ms=' + quietMs +
+        ' last_i=' + (lastTick && lastTick.i != null ? lastTick.i : '-') +
+        ' last_host=' + lastHostFull +
+        ' bag_n=' + bagN + ' bag=' + bag
+      )
+    }
     // FIX (2026-09-14, "tessera-web-occupy-fade"): "completeWrite() (or
     // equivalent) runs when uploadFile resolves OR REJECTS. Arcs fade.
     // A hung Add must not leave gold lines forever." Previously only
@@ -3015,6 +3110,52 @@ async function onCopyLink() {
   }
   showToast('\u{1F4CB} Link copied')
   closeShareModal()
+}
+
+// ── debug pane (2026-09-24, "tessera-web-debug-log") ──────
+//
+// SWITCH: "Instrumented diary is on only when the page URL has query
+// debug=1... Read the flag at boot and on popstate/in-app navigation so
+// Back keeps the switch. Do not persist to localStorage. Do not persist
+// to a cookie." syncDebugPane() is the single place that toggles
+// #debugPane's own `.hidden` class -- called from wireEvents' popstate
+// listener and enterFiles() (this file's own boot/nav sites), reading
+// files.js's isDebugOn() live every time rather than caching the result
+// anywhere, so the switch can never go stale against the URL.
+function syncDebugPane() {
+  const on = isDebugOn()
+  r.debugPane.classList.toggle('hidden', !on)
+  if (on) renderDebugPane()
+}
+
+// renderDebugPane(): paints window.__tesseraDebugDiary (files.js's own
+// pane-safe, 8-hex-only array, already capped at 200 lines there) as
+// newest-at-the-bottom text, then scrolls to the bottom. This is the
+// repaint files.js calls through window.__tesseraDebugPaneRepaint every
+// time it pushes a line -- see that file's own diaryPush()/diaryReset().
+function renderDebugPane() {
+  const lines = window.__tesseraDebugDiary || []
+  r.debugLog.textContent = lines.join('\n')
+  r.debugLog.scrollTop = r.debugLog.scrollHeight
+}
+window.__tesseraDebugPaneRepaint = renderDebugPane
+
+// onDebugCopy(): "One click. Clipboard write of the full diary text. If
+// Clipboard API is blocked, console.log the same blob and set the button
+// label to Logged for 2s... Do not toast a fail for a clipboard deny."
+// Copy reads the FULL-key array (window.__tesseraDebugDiaryFull), never
+// the pane's own 8-hex array -- "Full ed25519:... keys may exist inside
+// the copied text, not as visible row chrome."
+async function onDebugCopy() {
+  const text = (window.__tesseraDebugDiaryFull || window.__tesseraDebugDiary || []).join('\n')
+  try {
+    await navigator.clipboard.writeText(text)
+  } catch (_) {
+    console.log(text)
+    const original = r.btnDebugCopy.textContent
+    r.btnDebugCopy.textContent = 'Logged'
+    setTimeout(() => { r.btnDebugCopy.textContent = original }, 2000)
+  }
 }
 
 // ── lock / remove from this browser ──────────────────────

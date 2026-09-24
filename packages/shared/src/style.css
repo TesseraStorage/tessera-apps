@@ -947,6 +947,60 @@ input:focus { border-color: var(--cyan); }
    "Kill the map caption... No replacement sentence this packet.") --
    the #mapCaption element no longer exists in the DOM at all. */
 
+/* MAP COLUMN + DEBUG PANE (2026-09-24, "tessera-web-debug-log"):
+   ".map-column" is a pure flex-column wrapper -- #filesLayout itself
+   stays exactly the same flex ROW it always was (filesScreen | this ONE
+   column), so .map-pane's own width 0<->800px slide/margin/opacity
+   animation (see that rule's own comment) is completely untouched: this
+   wrapper declares no width/margin of its own, it just stacks whatever
+   its children need vertically. ".debug-pane" is a SEPARATE sibling
+   aside from .map-pane (never a child of it) -- its own `.hidden` is
+   toggled purely by the debug-flag reader, never by showMap()/hideMap(),
+   so it stays reachable ("Copy" law) even while the map itself is
+   closed. */
+.map-column {
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 auto;
+}
+.debug-pane {
+  width: 800px;
+  max-height: 220px;
+  margin: 10px 0 14px 15px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.debug-pane.hidden { display: none !important; }
+.debug-pane-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border2);
+  flex: 0 0 auto;
+}
+.debug-pane-header h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-dim, #94a3b8);
+}
+.btn-debug-copy { font-size: 12px; }
+.debug-log {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 6px 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
 
 
 /* ── scrollbar ────────────────────────────────────────── */

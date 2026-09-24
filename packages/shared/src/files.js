@@ -23,6 +23,74 @@ import { checkTunnelReachable } from './interceptor.js'
 // figure used in its byte-budget math).
 const SECTOR_SIZE = 4 * 1024 * 1024
 
+// DEBUG DIARY (2026-09-24, "tessera-web-debug-log"): "Instrumented diary is
+// on only when the page URL has query debug=1." Read LIVE from
+// window.location at every call, never cached at Add start and never
+// persisted to localStorage/cookie -- the URL itself is the switch, so a
+// hard refresh without the query (or the operator stripping it) goes mute
+// on the very next line this module would have written. isDebugOn() is the
+// single reader web-ui.js's pane-visibility code also imports, so the two
+// halves of the switch (what gets written here, what gets shown there)
+// can never drift out of sync with each other.
+export function isDebugOn() {
+  try { return new URLSearchParams(window.location.search).get('debug') === '1' } catch (e) { return false }
+}
+
+// _diaryLines: pane-safe (8-hex only). _diaryLinesFull: same lines with any
+// full host key restored, Copy-only -- "Full ed25519:... keys may exist
+// inside the copied text, not as visible row chrome." Neither array is
+// ever populated when isDebugOn() is false (checked at every push site
+// below), so the mute case costs nothing beyond that one boolean read --
+// "no extra diary lines beyond what fail-code + live-quiet already print
+// to console."
+let _diaryLines = []
+let _diaryLinesFull = []
+const DIARY_CAP = 200
+
+// diaryReset(): "Start a fresh diary when an Add starts. Keep it until the
+// next Add starts (Copy after fail must still work)." -- called once per
+// Add, at the very top of the WASM upload path below, before anything else
+// this Add will ever log. bundle= is read from the actual loaded <script>
+// tag (the real deployed asset name), never hardcoded, so it can never go
+// stale against a future rebuild.
+function diaryReset() {
+  if (!isDebugOn()) return
+  const bundleSrc = (typeof document !== 'undefined' &&
+    document.querySelector('script[type="module"][src*="main-"]')) || null
+  const header = 'tessera-web-debug v=1 utc=' + new Date().toISOString() +
+    ' url=' + window.location.href +
+    ' bundle=' + (bundleSrc ? bundleSrc.getAttribute('src') : '-') +
+    ' debug=1'
+  _diaryLines = [header]
+  _diaryLinesFull = [header]
+  window.__tesseraDebugDiary = _diaryLines
+  window.__tesseraDebugDiaryFull = _diaryLinesFull
+  if (typeof window.__tesseraDebugPaneRepaint === 'function') window.__tesseraDebugPaneRepaint()
+}
+
+// diaryPush(line, fullLine): one timestamped line. fullLine defaults to
+// line when there is no 8-hex/full-key split to make. No-op the entire
+// time debug=1 is not present on the URL.
+export function diaryPush(line, fullLine) {
+  if (!isDebugOn()) return
+  const stamped = 't=' + Date.now() + ' ' + line
+  const stampedFull = 't=' + Date.now() + ' ' + (fullLine != null ? fullLine : line)
+  _diaryLines.push(stamped)
+  _diaryLinesFull.push(stampedFull)
+  if (_diaryLines.length > DIARY_CAP) _diaryLines.shift()
+  if (_diaryLinesFull.length > DIARY_CAP) _diaryLinesFull.shift()
+  window.__tesseraDebugDiary = _diaryLines
+  window.__tesseraDebugDiaryFull = _diaryLinesFull
+  if (typeof window.__tesseraDebugPaneRepaint === 'function') window.__tesseraDebugPaneRepaint()
+}
+
+// hex8(): 8-hex row-chrome form of a host key, per the packet's own "Debug
+// face: 8-hex only" law. Never throws on a short/odd key.
+export function hex8(key) {
+  if (!key) return '-'
+  return String(key).replace(/^ed25519:/, '').slice(0, 8)
+}
+
 // PROGRESS DENOMINATOR (2026-09-17, "tessera-web-progress-denom"): "55/30 on
 // a 250 MiB file. 30 is one slab, not the object." 10 data + 20 parity = 30
 // shards per SLAB, not per file -- a slab's data side is
@@ -886,6 +954,14 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
   // WASM SDK fallback (no file = called from dropzone, or relay failed)
   const start = Date.now()
   const tick = (s, p, hostKey, transferMs) => { if (onProgress) onProgress({ stage: s, percent: p, elapsed: Date.now() - start, hostKey, transferMs, marks }) }
+  // DEBUG DIARY (2026-09-24, "tessera-web-debug-log"): "Start a fresh
+  // diary when an Add starts." This IS the true Add-start moment for the
+  // WASM path (mirrors ADD STAGE CLOCKS' own t_encode reasoning below --
+  // this is simply earlier than that, before even the tunnel-reachable
+  // gate). size_bytes only, never the filename, per the packet's own
+  // "no filename if that is awkward; size is enough" instruction.
+  diaryReset()
+  diaryPush('add-start size_bytes=' + (file ? file.size : '-'))
   // BAR HOLD (2026-09-16, "tessera-web-encode-hold"): "The progress
   // bar does not exist yet. No bar during drop, Ready wait, or
   // encoding." The OLD tick('preparing', 0) / tick('uploading', 5)
@@ -1019,6 +1095,16 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
   // captured here since onShardUploaded is the only place that knows
   // "this was the first/last shard" without re-deriving it downstream.
   const marks = { t_encode: null, t_first: null, t_last: null, t_pin_start: null, t_pin_ok: null, t_upload_ok: null, expectedShards: null, shardsLanded: 0, lastTicks: [] }
+  // DEBUG DIARY: "bag_n if the Add already held a host list; else bag=-."
+  // Built purely from hostKeys this wrapper already receives via every
+  // onShardUploaded event below -- never a fresh hosts()/GET call. Read
+  // at Add-end (both success and fail) to print bag_n + an 8-hex list.
+  const bagHosts = new Set()
+  // DEBUG DIARY: dt_ms on the per-shard line below is a diary-only delta
+  // (Date.now() - the previous onShardUploaded call), separate from the
+  // stall watchdog's own lastProgressAt clock further down -- observability
+  // bookkeeping only, never read by any control-flow/timer in this file.
+  let _diaryLastTickAt = start
   const onShardUploaded = (ev) => {
     // ev shape per the wasm binary's own field names, CONFIRMED against
     // node_modules/@siafoundation/sia-storage/wasm/sia_storage_wasm.d.ts's
@@ -1039,6 +1125,8 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
     // fields above, no new signal invented.
     marks.lastTicks.push({ i: (ev && ev.shardIndex), host: (ev && ev.hostKey) })
     if (marks.lastTicks.length > 3) marks.lastTicks.shift()
+    if (ev && ev.hostKey) bagHosts.add(ev.hostKey)
+    marks.bagHosts = bagHosts
     // ADD STAGE CLOCKS: t_first is the first shard ever seen for this
     // Add; t_last is set once this shard makes shardsLanded reach
     // expectedShards (mirrors the exact WATCHDOG DISARM condition
@@ -1073,6 +1161,24 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
       ? 'uploading (' + shardsLanded + ')'
       : 'uploading (' + shardsLanded + '/' + expectedShards + ')'
     tick(stageText, pct, ev && ev.hostKey, ev && ev.elapsedMs)
+    // DEBUG DIARY (2026-09-24, "tessera-web-debug-log"): "encoding /
+    // first shard / M" + the per-shard line ("each onShardUploaded: i=
+    // n/M host8= dt_ms= since previous tick"). host8/dt_ms only, per
+    // "Debug face: 8-hex only" -- no full key on this line (nothing here
+    // needs Copy-only reveal; that's reserved for the fail line's
+    // last_host per the packet's own instruction).
+    const diaryNow = Date.now()
+    const diaryDt = diaryNow - _diaryLastTickAt
+    _diaryLastTickAt = diaryNow
+    if (shardsLanded === 1) {
+      diaryPush('first-shard M=' + expectedShards)
+    }
+    diaryPush(
+      'shard i=' + (ev && ev.shardIndex != null ? ev.shardIndex : '-') +
+      ' n=' + shardsLanded + '/' + expectedShards +
+      ' host8=' + hex8(ev && ev.hostKey) +
+      ' dt_ms=' + diaryDt
+    )
   }
 
   const uploadOptions = { dataShards, parityShards, onShardUploaded }
@@ -1205,6 +1311,11 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
         ' prev_i=' + (prevTick && prevTick.i != null ? prevTick.i : '-') +
         ' host=' + (host || '-')
       )
+      diaryPush(
+        'gap dt_ms=' + dt + ' i=' + (i != null ? i : '-') +
+        ' prev_i=' + (prevTick && prevTick.i != null ? prevTick.i : '-') +
+        ' host8=' + hex8(host)
+      )
       window.__tesseraAddGaps = window.__tesseraAddGaps || []
       window.__tesseraAddGaps.push({ dt, i, prev_i: prevTick ? prevTick.i : null, host })
       if (window.__tesseraAddGaps.length > 40) window.__tesseraAddGaps.shift()
@@ -1234,6 +1345,7 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
       // the later, now-redundant tick used, matching law's "pinning
       // (no N/M, bar may sit)".
       tick('pinning', 90)
+      diaryPush('phase pinning shards=' + shardsLanded + '/' + expectedShards)
       pinWatchStartedAt = Date.now()
     }
   }
@@ -1279,6 +1391,7 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
   _realUploadInFlight = true
   marks.t_encode = Date.now()
   tick('encoding\u2026', 0)
+  diaryPush('phase encoding')
   const uploadPromise = sdk.upload(obj, stream, uploadOptions)
   // Swallow a later resolve/reject from the abandoned promise once the
   // stall watchdog has already won the race below -- the underlying
@@ -1363,6 +1476,12 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
           window.__tesseraAddQuiets = window.__tesseraAddQuiets || []
           window.__tesseraAddQuiets.push({ n: shardsLanded, m: expectedShards, quiet_ms: quietMs, last_i, last_host })
           if (window.__tesseraAddQuiets.length > 60) window.__tesseraAddQuiets.shift()
+          diaryPush(
+            'quiet n=' + shardsLanded + '/' + expectedShards +
+            ' quiet_ms=' + quietMs +
+            ' last_i=' + (last_i != null ? last_i : '-') +
+            ' last_host8=' + hex8(last_host)
+          )
         }
       }
       if (Date.now() - lastProgressAt > stallBudgetMs()) {
