@@ -57,7 +57,12 @@ function diaryReset() {
   if (!isDebugOn()) return
   const bundleSrc = (typeof document !== 'undefined' &&
     document.querySelector('script[type="module"][src*="main-"]')) || null
-  const header = 'tessera-web-debug v=1 utc=' + new Date().toISOString() +
+  // HEADER v=2 (2026-09-26, "tessera-web-debug-dl"): same fields as v=1
+  // (utc, url, bundle, debug=1) -- only the version token changed, so
+  // every pre-existing Add line pushed before a later Download in the
+  // same Copy stays valid/readable under this header, per the packet's
+  // own "old Add lines stay valid under it" instruction.
+  const header = 'tessera-web-debug v=2 utc=' + new Date().toISOString() +
     ' url=' + window.location.href +
     ' bundle=' + (bundleSrc ? bundleSrc.getAttribute('src') : '-') +
     ' debug=1'
@@ -1644,40 +1649,99 @@ export async function getObject(sdk, objectId) {
   return sdk.object(objectId)
 }
 
+// DL ERR CLASS (2026-09-26, "tessera-web-debug-dl"): short token from the
+// real Error's name/message, truncated to 80 chars, keyed off substrings
+// this codebase's own errors/SDK errors are already known to throw
+// ("Object not found" thrown explicitly two lines below; "no more hosts
+// available" is the exact SDK-fallback phrase this file's own upload path
+// already cites verbatim elsewhere) -- never invents a new taxonomy, just
+// buckets the existing strings. `other` is the honest default when none
+// match, never a guess.
+function dlErrClass(e) {
+  const msg = String((e && e.message) || e || '').slice(0, 80)
+  const low = msg.toLowerCase()
+  if (low.includes('not found')) return 'not-found'
+  if (low.includes('no more hosts') || low.includes('unknown host') || low.includes('no host')) return 'unknown-host'
+  if (low.includes('too few shards') || low.includes('insufficient shard') || low.includes('not enough shard')) return 'too-few-shards'
+  if (low.includes('fetch') || low.includes('network') || low.includes('connection') || low.includes('timed out') || low.includes('timeout')) return 'network'
+  return 'other'
+}
+
 export async function downloadToDisk(sdk, objOrId, filename, onProgress) {
-  if (isDesktop()) {
-    const objectId = typeof objOrId === 'string' ? objOrId : objOrId.id()
-    const result = await window.tesseraDesktop.siaDownload(objectId)
-    if (!result.ok) throw new Error(result.error)
-    const savePath = await window.tesseraDesktop.saveFileDialog(filename)
-    if (!savePath) return
-    await window.tesseraDesktop.writeFile(savePath, result.data)
-    return
-  }
-
-  const objectId = typeof objOrId === 'string' ? objOrId : objOrId.id()
-
-  // Web: use proxy relay
+  // DEBUG DIARY (2026-09-26, "tessera-web-debug-dl", extends 2026-09-24
+  // "tessera-web-debug-log"): dl-start is the literal first statement of
+  // this function, before any await/branch -- "immediate toast with zero
+  // shards must still emit dl-start then dl-end fail" is satisfied purely
+  // by this ordering plus the try/catch wrapping everything below, no
+  // separate zero-shard special case needed. size_bytes comes from the
+  // object handle's own .size() ONLY when the caller already passed an
+  // object (never a fresh fetch to get it) -- the string-id call site
+  // (web-ui.js's onDownload) doesn't have that, so size_bytes=- there,
+  // filled in properly by dl-object once the WASM fallback path (if
+  // taken) actually retrieves the indexer object below.
+  const dlObjectId = typeof objOrId === 'string' ? objOrId : objOrId.id()
+  const dlT0 = Date.now()
+  let dlFirstTickAt = null
+  let dlSizeBytes = null
+  try { if (objOrId && typeof objOrId !== 'string' && objOrId.size) dlSizeBytes = objOrId.size() } catch (_) {}
+  diaryPush('dl-start obj=' + hex8(dlObjectId) + ' size_bytes=' + (dlSizeBytes != null ? dlSizeBytes : '-'))
+  // BAG (Add ticks already in memory this tab): window.__tesseraLastAddBagHosts
+  // is written by web-ui.js's own add-end diary lines (both ok and fail),
+  // never re-derived or fetched here -- "do not compute this by calling
+  // hosts()". No Add this tab yet -> bag=-.
+  let dlBagHosts = null
   try {
+    if (typeof window !== 'undefined' && window.__tesseraLastAddBagHosts && window.__tesseraLastAddBagHosts.size) {
+      dlBagHosts = window.__tesseraLastAddBagHosts
+    }
+  } catch (_) {}
+  const dlBagN = dlBagHosts ? dlBagHosts.size : 0
+  const dlBagStr = dlBagHosts ? Array.from(dlBagHosts).map(hex8).join(',') : '-'
+  diaryPush('dl-bag bag_n=' + dlBagN + ' bag=' + dlBagStr)
+  diaryPush('phase=fetching')
+
+  try {
+    if (isDesktop()) {
+      const result = await window.tesseraDesktop.siaDownload(dlObjectId)
+      if (!result.ok) throw new Error(result.error)
+      const savePath = await window.tesseraDesktop.saveFileDialog(filename)
+      if (!savePath) { diaryPush('dl-end ok elapsed_ms=' + (Date.now() - dlT0) + ' (cancelled, no save path)'); return }
+      diaryPush('phase=saving')
+      await window.tesseraDesktop.writeFile(savePath, result.data)
+      diaryPush('dl-end ok elapsed_ms=' + (Date.now() - dlT0))
+      return
+    }
+
+    const objectId = dlObjectId
+
+    // Web: use proxy relay
+    try {
     // PERCENT (2026-09-19, "tessera-web-download-progress"): the relay
     // path returns one opaque Blob -- no per-chunk signal exists here
     // (confirmed: relayFetch()/Response.blob() give nothing between
     // request-sent and body-fully-buffered). Per the packet's own
     // instruction 3 ("if neither exists, still reset the bar and count
-    // percent from whatever tick you have. Do not fake 100% at click"):
+    // percent from whatever tick you have. Do not fake 100% at click
     // an honest 0% bookend at start and 100% only once the blob has
     // actually finished buffering -- no invented intermediate ticks,
     // and the 100% is real completion, not a click-time lie.
+    diaryPush('phase=downloading')
     if (onProgress) onProgress({ percent: 0 })
     const resp = await relayFetch('GET', 'download/' + objectId.replace(/\//g, ''))
     const blob = await resp.blob()
     if (onProgress) onProgress({ percent: 100 })
+    diaryPush('phase=saving')
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
     a.download = filename || 'download'
     a.click()
     URL.revokeObjectURL(url)
+    // DEBUG DIARY: relay path never fetches an indexer object handle
+    // (no dl-object here -- "obj_hosts=unexposed" would be a lie; there
+    // is simply no object in hand on this branch) and has no per-shard
+    // hook (single opaque Blob) -- shards=-/- is the honest shape.
+    diaryPush('dl-end ok elapsed_ms=' + (Date.now() - dlT0) + ' shards=-/-')
     return
   } catch (e) {
     if (e.message.includes('Not connected')) throw e
@@ -1716,11 +1780,71 @@ export async function downloadToDisk(sdk, objOrId, filename, onProgress) {
   const computedM = computeExpectedShards(objSize, dataShards, parityShards)
   const expectedShards = computedM != null ? computedM : (dataShards + parityShards)
   let shardsLanded = 0
+
+  // DEBUG DIARY (2026-09-26, "tessera-web-debug-dl"): "obj_hosts= 8-hex
+  // list from sector host keys on that object." obj.slabs() is the SAME
+  // PinnedObject accessor uploadFile()'s own diary code doesn't need
+  // (upload never re-reads its own result), confirmed present on the
+  // class itself (not just the plain-object Slab/SealedObject shape) in
+  // sia_storage_wasm.d.ts -- each Slab.sectors[].hostKey is a real,
+  // already-in-hand field, no /hosts fetch of any kind. Deduped into a
+  // Set since redundancy can repeat a host across multiple sectors/slabs
+  // of the same object.
+  let dlObjHostsFull = null
+  try {
+    const slabs = obj.slabs ? obj.slabs() : null
+    if (slabs && slabs.length) {
+      const set = new Set()
+      for (const slab of slabs) {
+        const sectors = (slab && slab.sectors) || []
+        for (const sec of sectors) { if (sec && sec.hostKey) set.add(sec.hostKey) }
+      }
+      if (set.size) dlObjHostsFull = set
+    }
+  } catch (e) {
+    console.warn('[tessera-web] dl-object slab/sector read failed:', e && e.message)
+  }
+  {
+    const objHostN = dlObjHostsFull ? dlObjHostsFull.size : 0
+    // Pane-safe: 8-hex only. Full: real ed25519:... keys, Copy-only,
+    // per the packet's own "Debug face: 8-hex on the pane. Full
+    // ed25519:... only inside Copy" law -- same two-array split
+    // diaryPush() already uses everywhere else in this file.
+    const objHosts8 = dlObjHostsFull ? Array.from(dlObjHostsFull).map(hex8).join(',') : 'unexposed'
+    const objHostsFullStr = dlObjHostsFull ? Array.from(dlObjHostsFull).join(',') : 'unexposed'
+    // intersect_n: count of keys present in BOTH obj_hosts and the
+    // dl-bag Set above -- purely a Set/Set comparison on data already in
+    // hand, "do not compute this by calling hosts()".
+    let intersectPart = ''
+    if (dlObjHostsFull && dlBagHosts) {
+      let n = 0
+      for (const k of dlObjHostsFull) { if (dlBagHosts.has(k)) n++ }
+      intersectPart = ' intersect_n=' + n
+    }
+    diaryPush(
+      'dl-object slabs=' + slabs_len(obj) + ' expected_shards=' + expectedShards +
+      ' obj_host_n=' + objHostN + ' obj_hosts=' + objHosts8 + intersectPart,
+      'dl-object slabs=' + slabs_len(obj) + ' expected_shards=' + expectedShards +
+      ' obj_host_n=' + objHostN + ' obj_hosts=' + objHostsFullStr + intersectPart
+    )
+  }
+
   if (onProgress) onProgress({ percent: 0 })
   const downloadOptions = onProgress
     ? { onShardDownloaded: (ev) => {
         shardsLanded += 1
         const pct = Math.min(100, Math.round((shardsLanded / expectedShards) * 100))
+        // DEBUG DIARY: per-shard tick, 8-hex host only on the pane; full
+        // key reserved for Copy via diaryPush's own two-argument split.
+        // dt_ms on the FIRST tick doubles as "first shard since dl-start"
+        // per the packet's own "first byte / first shard: dt_ms from
+        // dl-start" instruction -- same clock, not a second timer.
+        if (dlFirstTickAt === null) dlFirstTickAt = Date.now()
+        const host8 = hex8(ev && ev.hostKey)
+        diaryPush(
+          'dl-shard i=' + (ev && ev.shardIndex) + ' n/M=' + shardsLanded + '/' + expectedShards +
+          ' host8=' + host8 + ' dt_ms=' + (ev && ev.elapsedMs)
+        )
         onProgress({ hostKey: ev && ev.hostKey, direction: 'download', transferMs: ev && ev.elapsedMs, percent: pct })
       } }
     : {}
@@ -1735,6 +1859,7 @@ export async function downloadToDisk(sdk, objOrId, filename, onProgress) {
   if (DOWNLOAD_MAX_BUFFERED_CHUNKS != null) {
     downloadOptions.maxBufferedChunks = DOWNLOAD_MAX_BUFFERED_CHUNKS
   }
+  diaryPush('phase=downloading')
   const stream = sdk.download(obj, Object.keys(downloadOptions).length ? downloadOptions : undefined)
   const blob = await new Response(stream).blob()
   // Belt-and-braces final tick: rounding in the per-shard formula above
@@ -1744,11 +1869,43 @@ export async function downloadToDisk(sdk, objOrId, filename, onProgress) {
   // blob has genuinely finished, matching uploadFile()'s own explicit
   // renderProgressBar(100) call on its success path.
   if (onProgress) onProgress({ percent: 100 })
+  diaryPush('phase=saving')
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url; a.download = filename || 'download'; a.click()
   URL.revokeObjectURL(url)
+  diaryPush(
+    'dl-end ok shards=' + shardsLanded + '/' + expectedShards +
+    ' elapsed_ms=' + (Date.now() - dlT0) +
+    ' dt_first_ms=' + (dlFirstTickAt != null ? (dlFirstTickAt - dlT0) : '-')
+  )
+  } catch (e) {
+    // DEBUG DIARY: single catch-all around the entire function body
+    // (relay attempt, WASM fallback, desktop branch) -- guarantees
+    // dl-end fires exactly once per Download regardless of which
+    // internal path threw, per "Immediate toast with zero shards must
+    // still emit dl-start then dl-end fail so Copy is not blank."
+    // Rethrows unchanged so web-ui.js's own catch/toast (the public
+    // "Could not download this file. Try again." sentence) is
+    // completely untouched -- this is observation only, no control-flow
+    // change.
+    const errClass = dlErrClass(e)
+    const shortMsg = String((e && e.message) || e || '').slice(0, 80)
+    diaryPush(
+      'dl-end fail err_class=' + errClass + ' elapsed_ms=' + (Date.now() - dlT0),
+      'dl-end fail err_class=' + errClass + ' elapsed_ms=' + (Date.now() - dlT0) + ' full=' + shortMsg
+    )
+    throw e
+  }
 }
+
+// slabs_len(): tiny helper so the dl-object diary line above reads
+// obj.slabs().length once, defensively (never throws into the diary
+// line itself if slabs() is ever unavailable on a given object).
+function slabs_len(obj) {
+  try { const s = obj.slabs ? obj.slabs() : null; return s ? s.length : 0 } catch (_) { return 0 }
+}
+
 
 // ── delete ──────────────────────────────────────────────
 

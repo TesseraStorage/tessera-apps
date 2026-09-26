@@ -1132,7 +1132,12 @@ async function enterFiles() {
   // packet calls out. Clear it immediately; run the real account-ready
   // check and file list load in the background instead of gating on it.
   patchState({ status: '' })
-  refreshFiles().catch(e => console.warn('[tessera-web] initial file list load failed:', e.message))
+  refreshFiles().catch(e => {
+    console.warn('[tessera-web] initial file list load failed:', e.message)
+    // DEBUG DIARY (2026-09-26, "tessera-web-debug-dl"): "list-fail --
+    // files list fetch threw (no object names)."
+    diaryPush('list-fail err=' + String(e.message || e).slice(0, 80))
+  })
 
   // BACKGROUND MAP PRELOAD (2026-09-16, "tessera-web-handoff
   // adjustments"): "When a user arrives on the files page, the map's
@@ -1180,6 +1185,13 @@ async function enterFiles() {
     // used to reintroduce a stuck-looking status line if this hangs (up to
     // 5 minutes) and then fails. Log only.
     console.warn('[tessera-web] account-ready check failed:', e.message)
+    // DEBUG DIARY (2026-09-26, "tessera-web-debug-dl"): "reconnect-fail
+    // -- existing connected()/reconnect catch. No key material." This
+    // is the closest existing connected()-style catch in this file (a
+    // waitForReady()+getAccount() health check, not the Unlock/password
+    // flow -- that flow is explicitly excluded from the diary by the
+    // packet's own law and is left untouched). e.message only.
+    diaryPush('reconnect-fail err=' + String(e.message || e).slice(0, 80))
   }
 }
 
@@ -2784,6 +2796,16 @@ async function doUpload(file, destPathOverride) {
         ? Array.from(addMarks.bagHosts).map(hex8).join(',')
         : '-'
       const bagN = (addMarks && addMarks.bagHosts) ? addMarks.bagHosts.size : 0
+      // BAG PERSISTENCE (2026-09-26, "tessera-web-debug-dl"): keep the
+      // last Add's real in-hand host Set alive on window past this
+      // function's own return, so a LATER Download in the same tab can
+      // cite it ("bag= from memory already held this tab") without
+      // downloadToDisk() ever calling hosts() itself. Full keys only
+      // (never truncated here) -- files.js's own hex8() is applied at
+      // the read site, same as every other bag-consumer in this file.
+      if (addMarks && addMarks.bagHosts && addMarks.bagHosts.size) {
+        window.__tesseraLastAddBagHosts = addMarks.bagHosts
+      }
       diaryPush(
         'add-end ok shards=' + n + '/' + (m != null ? m : '?') +
         ' elapsed_ms=' + (Date.now() - addT0) +
@@ -2807,6 +2829,10 @@ async function doUpload(file, destPathOverride) {
       await refreshFiles()
     } catch (e) {
       console.warn('[tessera-web] post-upload file list refresh failed:', e.message)
+      // DEBUG DIARY (2026-09-26, "tessera-web-debug-dl"): "list-fail --
+      // files list fetch threw (no object names)." e.message only, no
+      // object names/paths.
+      diaryPush('list-fail err=' + String(e.message || e).slice(0, 80))
     }
   } catch (e) {
     // "On fail, freeze and show the fail line." -- stop any in-flight
@@ -2875,6 +2901,13 @@ async function doUpload(file, destPathOverride) {
         ? Array.from(addMarks.bagHosts).map(hex8).join(',')
         : '-'
       const bagN = (addMarks && addMarks.bagHosts) ? addMarks.bagHosts.size : 0
+      // BAG PERSISTENCE (2026-09-26, "tessera-web-debug-dl"): a bag can
+      // exist even on a failed Add (partial shards landed before the
+      // fail) -- persist it the same way the ok branch above does, so
+      // a later Download still has something real to cite.
+      if (addMarks && addMarks.bagHosts && addMarks.bagHosts.size) {
+        window.__tesseraLastAddBagHosts = addMarks.bagHosts
+      }
       const lastHostFull = (lastTick && lastTick.host) ? lastTick.host : '-'
       const lastHost8 = hex8(lastTick && lastTick.host)
       diaryPush(
@@ -3005,10 +3038,15 @@ async function onDelete() {
   try {
     await deleteFile(sdk, sf.id)
     showToast('\u{1F5D1}\uFE0F Deleted: ' + sf.name)
+    // DEBUG DIARY (2026-09-26, "tessera-web-debug-dl"): "delete-end
+    // fail|ok -- if you touch that catch anyway." 8-hex object id only,
+    // never the filename (matches Download's own dl-start convention).
+    diaryPush('delete-end ok obj=' + hex8(sf.id))
     await refreshFiles()
     patchState({ status: '' })
   } catch (e) {
     patchState({ status: 'Delete failed: ' + (e.message || 'error') })
+    diaryPush('delete-end fail obj=' + hex8(sf.id) + ' err=' + String(e.message || e).slice(0, 80))
     console.error(e)
   } finally { setBusy(false) }
 }
