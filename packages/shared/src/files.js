@@ -1860,7 +1860,12 @@ export async function downloadToDisk(sdk, objOrId, filename, onProgress) {
     downloadOptions.maxBufferedChunks = DOWNLOAD_MAX_BUFFERED_CHUNKS
   }
   diaryPush('phase=downloading')
-  const stream = sdk.download(obj, Object.keys(downloadOptions).length ? downloadOptions : undefined)
+  // TESSERA FORK (sonnet-packet-t-sdk-vendor-map-2026-09-27): download()
+  // is now async on the Rust side -- it fetches this object's
+  // GET /objects/:key/hosts map before it can dial, instead of reusing a
+  // standing write-path host cache. Await it here; the returned stream is
+  // otherwise identical.
+  const stream = await sdk.download(obj, Object.keys(downloadOptions).length ? downloadOptions : undefined)
   const blob = await new Response(stream).blob()
   // Belt-and-braces final tick: rounding in the per-shard formula above
   // can land just under 100 on the very last shard (integer rounding),
