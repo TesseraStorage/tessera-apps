@@ -261,6 +261,6 @@ git push origin v0.0.x
 
 ## Indexer
 
-Tessera connects to the indexer at `https://index.dithr.dev`. The SDK derives an
+Tessera connects to the indexer at `https://index.tessera.storage`. The SDK derives an
 `AppKey` from your recovery phrase and uses it to authenticate with the indexer and the
 Sia hosts.
