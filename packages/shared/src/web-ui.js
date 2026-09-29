@@ -21,7 +21,7 @@ import { initSia, registerSdk } from './sdk.js'
 import {
   connectWithInvite, completeRegistration,
   tryReconnect, reconnectWithAppKey, clearCredentials, getSaved,
-  beginRecovery, completeRecovery, setUnlockPassword,
+  beginRecovery, completeRecovery, setUnlockPassword, adoptSharedIdentity,
 } from './auth.js'
 import {
   listFiles, computeTotals, uploadFile, downloadToDisk,
@@ -977,6 +977,41 @@ function kickoffPreload() {
 async function doBoot() {
   kickoffPreload()  // fire-and-forget, after first paint
 
+  // SHARED IDENTITY, DESKTOP ONLY (2026-09-30): if a standalone
+  // tessera-cli login already exists in ~/.tessera, that is the
+  // authoritative account for this machine -- adopt its EXACT
+  // app_id/app_key directly rather than ever letting this app's own
+  // separate Welcome/Recover ceremony mint a different one. Minting a
+  // different app_id, even for "the same account" (same phrase), is a
+  // completely separate, non-overlapping object-storage namespace on
+  // the server -- that mismatch is the actual root cause behind "CLI
+  // shows my files, Desktop doesn't, and vice versa." Only runs when
+  // localStorage doesn't already match, so this is a no-op on every
+  // boot after the first adoption.
+  if (isDesktop()) {
+    try {
+      const cliCfg = await window.tesseraDesktop.getCliConfig()
+      if (cliCfg && cliCfg.appId && cliCfg.appKey) {
+        const saved = getSaved(PREFIX)
+        if (saved.appId !== cliCfg.appId) {
+          const sdk = await reconnectWithAppKey(cliCfg.appId, cliCfg.appKey, FETCH_MODE())
+          if (sdk) {
+            // adoptSharedIdentity() always clears any old vault first (see
+            // its own comment in auth.js), so this browser never has a
+            // wrapped vault for the freshly-adopted app_id yet -- always
+            // ask for a fresh local password, same as any other login.
+            adoptSharedIdentity(cliCfg.appId, cliCfg.appKey, PREFIX)
+            patchState({ sdk, accountReady: true })
+            goToSetPassword('recoverRegister')
+            return
+          }
+        }
+      }
+    } catch (e) {
+      console.error('CLI shared-identity boot check failed:', e)
+    }
+  }
+
   // BOOT ORDER (packet law):
   //   tesseraweb wrapped vault -> Unlock
   //   else                     -> Welcome
@@ -1092,9 +1127,23 @@ async function onSetPassword() {
     } else if (_passwordFlow === 'recoverRegister') {
       const { sdk } = getState()
       if (!sdk) throw new Error('Missing recovery session.')
+      // CAPTURE BEFORE WRAP (2026-09-30): setUnlockPassword() deletes the
+      // plaintext <prefix>.akey the instant it finishes wrapping it into
+      // the vault (by design -- see its own comment in auth.js). enterFiles()
+      // below calls initNativeBridge(appKeyHex), whose whole point on
+      // desktop is to connect the NATIVE NAPI SDK bridge that listFiles()/
+      // uploadFile() actually use (see isDesktop() branches in files.js --
+      // the WASM `sdk` this screen already holds is NOT what lists files
+      // on desktop). Calling enterFiles() with no argument used to fall
+      // through to initNativeBridge()'s own getSaved(PREFIX).appKey
+      // fallback -- which read the vault-emptied localStorage AFTER the
+      // wrap above already ran, always got nothing, and silently never
+      // connected the native bridge at all. Desktop's file list came up
+      // permanently empty after every recovery/registration as a result.
+      const { appKey: plaintextAppKey } = getSaved(PREFIX)
       await setUnlockPassword(pw, PREFIX)
       await initRelay()
-      await enterFiles()
+      await enterFiles(plaintextAppKey)
     } else {
       throw new Error('Unknown password flow.')
     }
@@ -1114,11 +1163,14 @@ async function completeCreateAfterWords() {
   goto('readyWait')
   r.readyWaitStatus.textContent = ''
   try {
+    // Same capture-before-wrap fix as onSetPassword's 'recoverRegister'
+    // branch above -- see its comment for the full explanation.
+    const { appKey: plaintextAppKey } = getSaved(PREFIX)
     await setUnlockPassword(_pendingPassword, PREFIX)
     _pendingPassword = ''
     patchState({ phrase: '' })
     await initRelay()
-    await enterFiles()
+    await enterFiles(plaintextAppKey)
   } catch (e) {
     r.readyWaitStatus.textContent = 'Could not finish setup: ' + (e.message || 'error')
     console.error(e)

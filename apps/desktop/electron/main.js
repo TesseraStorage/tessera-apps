@@ -269,6 +269,7 @@ ipcMain.handle('tessera-sync-run', async (_e, rootId) => cliBridge.syncRun(rootI
 ipcMain.handle('tessera-sync-remove', async (_e, rootId) => cliBridge.syncRemove(rootId))
 ipcMain.handle('tessera-sync-conflicts', async () => cliBridge.syncConflicts())
 ipcMain.handle('tessera-service-status', async () => cliBridge.serviceStatus())
+ipcMain.handle('tessera-cli-config', async () => cliBridge.readConfig())
 ipcMain.handle('tessera-service-install', async () => cliBridge.serviceInstall())
 ipcMain.handle('tessera-service-uninstall', async () => cliBridge.serviceUninstall())
 ipcMain.handle('tessera-trash-list', async () => cliBridge.trashList())

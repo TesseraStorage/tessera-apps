@@ -251,6 +251,20 @@ export async function reconnectWithAppKey(appId, appKeyHex, fetchMode) {
   }
 }
 
+// ADOPT AN ALREADY-LIVE IDENTITY (2026-09-30, desktop/CLI shared app_id
+// fix): saves an appId/appKey pair this browser did NOT mint itself --
+// e.g. one read from the standalone tessera-cli's ~/.tessera config --
+// as this browser's own going forward. Same clear-then-persist order as
+// completeRecovery()/completeRegistration() (only call this once the
+// caller has ALREADY confirmed the identity is live, e.g. via a
+// successful reconnectWithAppKey()) and for the exact same reason: drop
+// any OLD, different-identity vault first so the new plaintext key
+// actually gets saved instead of being silently latched away.
+export function adoptSharedIdentity(appId, appKeyHex, prefix = 'tessera') {
+  clearCredentials(prefix)
+  persist({ appId, appKey: appKeyHex }, prefix)
+}
+
 // ── recovery flow ───────────────────────────────────────
 
 /**

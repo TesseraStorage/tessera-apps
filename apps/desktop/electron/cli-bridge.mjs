@@ -105,6 +105,41 @@ export function hasConfig() {
   return fs.existsSync(path.join(cliHome(), 'config.json'))
 }
 
+// READ SIDE OF THE SAME SHARED IDENTITY (2026-09-30): writeConfig() above
+// only ever pushed the desktop app's OWN identity into ~/.tessera, and
+// only when it was empty. It never made desktop's OWN native-SDK
+// connection (the one the file browser/uploads use) actually READ
+// ~/.tessera back -- so a standalone CLI login and a desktop recovery of
+// the "same account" (same phrase) ended up as two completely different
+// app_id/app_key pairs, i.e. two separate, non-overlapping object-storage
+// namespaces on the server. This is the real root cause of "CLI shows my
+// files, Desktop doesn't, and vice versa": recovering via phrase only
+// proves account ownership for approval purposes, it does NOT hand you
+// the SAME app_id/app_key another device is already using.
+//
+// readConfig() lets the renderer boot check ~/.tessera FIRST and, if it
+// already holds a real login, adopt that exact app_id/app_key directly
+// (see doBoot() in web-ui.js) instead of ever running its own separate
+// recovery ceremony. Returns { appId, appKey (32-byte native seed hex,
+// reduced back down from the 64-byte Go ed25519 format writeConfig()
+// expanded it into) } or null if there's no usable config yet.
+export function readConfig() {
+  const configPath = path.join(cliHome(), 'config.json')
+  if (!fs.existsSync(configPath)) return null
+  let cfg
+  try {
+    cfg = JSON.parse(fs.readFileSync(configPath, 'utf8'))
+  } catch (_) {
+    return null
+  }
+  if (!cfg || !cfg.app_id || !cfg.app_key) return null
+  // Go's ed25519.PrivateKey on-disk format is seed(32B) || pubKey(32B) --
+  // the exact inverse of expandToGoEd25519PrivateKeyHex() above. The
+  // native/WASM SDK's AppKey wants only the 32-byte seed.
+  const seedHex = cfg.app_key.length === 128 ? cfg.app_key.slice(0, 64) : cfg.app_key
+  return { appId: cfg.app_id, appKey: seedHex, indexerUrl: cfg.indexer_url || INDEXER_URL }
+}
+
 function env() {
   return { ...process.env }
 }
