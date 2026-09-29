@@ -98,7 +98,7 @@ const r = {}
 
 function cacheRefs() {
   const ids = [
-    'header', 'readyDot', 'storageSummary', 'btnLock',
+    'header', 'readyDot', 'storageSummary', 'btnLock', 'btnForgetDevice',
     'welcomeScreen', 'btnCreate', 'btnHaveWords',
     'inviteScreen', 'inviteInput', 'btnInviteContinue', 'inviteRequestLink', 'inviteStatus',
     'requestStubScreen', 'btnRequestBack',
@@ -146,6 +146,13 @@ const SKELETON = /*html*/`
          since there is no local filesystem or bundled CLI to drive there. -->
     <button id="btnSyncFolders" class="btn btn-ghost hidden">Synced Folders</button>
     <button id="btnLock" class="btn btn-ghost btn-logout">Lock</button>
+    <!-- FORGET THIS DEVICE (2026-09-29): re-exposes onRemoveBrowser(),
+         which was already correct and kept in code on purpose after its
+         UI entry point was removed 2026-09-16 for space. Small/ghost by
+         design to respect that original space concern -- user explicitly
+         asked "how do I factory reset the app" after a stale-vault bug
+         left no way back in short of manually deleting app data. -->
+    <button id="btnForgetDevice" class="btn btn-ghost btn-logout" title="Remove Tessera from this device -- you will need your 12 words to come back">Forget this device</button>
   </header>
 
   <!-- WELCOME -->
@@ -512,6 +519,7 @@ export async function mountApp(container) {
   r.btnUnlock.addEventListener('click', onUnlock)
   r.btnForgotPassword.addEventListener('click', onForgotPassword)
   r.btnLock.addEventListener('click', onLock)
+  r.btnForgetDevice.addEventListener('click', onRemoveBrowser)
   r.btnHideMap.addEventListener('click', hideMap)
   r.btnShowMap.addEventListener('click', showMap)
   r.btnNewFolder.addEventListener('click', onNewFolder)
@@ -3484,6 +3492,12 @@ function onRemoveBrowser() {
   // "lock / remove from this browser" law above); only the UI entry
   // point to reach this function is gone.
   if (!confirm('Remove Tessera from this browser? You will need your 12 words to come back.')) return
+  // DESKTOP PARITY: same as onLock() -- disconnect the native bridge too,
+  // otherwise the main process keeps an authenticated native SDK instance
+  // alive after this device has supposedly forgotten the account.
+  if (isDesktop()) {
+    window.tesseraDesktop.siaDisconnect().catch(() => {})
+  }
   clearCredentials(PREFIX)
   patchState({
     sdk: null, accountReady: false,
