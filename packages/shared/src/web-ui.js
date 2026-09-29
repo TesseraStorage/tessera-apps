@@ -137,7 +137,7 @@ const SKELETON = /*html*/`
     <span class="logo">Tessera</span>
     <span id="readyDot" class="dot off" title="Account status"></span>
     <span id="storageSummary" class="storage-summary"></span>
-    <button id="btnLock" class="btn btn-ghost btn-logout">Lock this browser</button>
+    <button id="btnLock" class="btn btn-ghost btn-logout">Lock</button>
   </header>
 
   <!-- WELCOME -->
