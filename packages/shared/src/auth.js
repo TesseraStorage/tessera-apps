@@ -198,6 +198,10 @@ export async function completeRegistration(builder, phrase, prefix = 'tessera') 
   const sdk = await builder.register(phrase)
   const appKeyHex = toHex(sdk.appKey().export())
   const { appId } = getSaved(prefix)
+  // See the identical clearCredentials() call + comment in beginRecovery's
+  // direct-success branch above -- same latch bug, same fix, same order
+  // (only after register() has confirmed success).
+  clearCredentials(prefix)
   persist({ appId, appKey: appKeyHex }, prefix)
   registerSdk(sdk)
   return sdk
@@ -286,6 +290,19 @@ export async function beginRecovery(phrase, onStatus, prefix = 'tessera', fetchM
     if (onStatus) onStatus('Validating recovery phrase\u2026')
     const sdk = await builder.register(phrase)
     const appKeyHex = toHex(sdk.appKey().export())
+    // REPLACE, DON'T COEXIST (2026-09-29): recovering an account on this
+    // device is an explicit "this device's identity is now THIS
+    // account" action. If a vault from a DIFFERENT previous account
+    // already existed here, persist()'s latch (see its own comment)
+    // would otherwise silently drop this new plaintext key next to the
+    // old vault -- the account looks "recovered" but nothing was
+    // actually saved, and the stale old vault + old password keeps
+    // logging back into the OLD account after every restart. Only clear
+    // the old vault/plaintext AFTER register() above has already
+    // confirmed the phrase is real and we have a live session -- a
+    // syntactically-valid-but-wrong phrase must never destroy a working
+    // old account for nothing.
+    clearCredentials(prefix)
     persist({ appId, appKey: appKeyHex }, prefix)
     registerSdk(sdk)
     if (onStatus) onStatus('Account recovered!')
@@ -318,6 +335,10 @@ export async function completeRecovery(builder, phrase, prefix = 'tessera') {
   const sdk = await builder.register(phrase)
   const appKeyHex = toHex(sdk.appKey().export())
   const { appId } = getSaved(prefix)
+  // Same latch bug + fix as beginRecovery's direct-success branch and
+  // completeRegistration -- this is the post-approval completion path,
+  // hit whenever recovery needed a new-device approval first.
+  clearCredentials(prefix)
   persist({ appId, appKey: appKeyHex }, prefix)
   registerSdk(sdk)
   return sdk
