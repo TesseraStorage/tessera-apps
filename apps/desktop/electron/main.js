@@ -84,6 +84,16 @@ function createWindow() {
   mainWindow.setMenuBarVisibility(false)
   mainWindow.once('ready-to-show', () => mainWindow.show())
 
+  // Any target="_blank" link (e.g. the recovery approval link) opens in
+  // the user's real system browser, not a chromeless Electron window --
+  // this is what makes "open this link, approve, come back" behave
+  // exactly like the CLI's own "a browser tab will open" step, without
+  // needing a second in-app tab of our own.
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    shell.openExternal(url)
+    return { action: 'deny' }
+  })
+
   if (isDev) {
     mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL || 'http://localhost:5173')
     mainWindow.webContents.openDevTools({ mode: 'detach' })

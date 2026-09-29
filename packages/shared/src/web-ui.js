@@ -107,6 +107,7 @@ function cacheRefs() {
     'btnSetPassword', 'setPasswordStatus',
     'readyWaitScreen', 'readyWaitStatus',
     'recoverScreen', 'recoverPhraseInput', 'btnRecoverContinue', 'recoverStatus',
+    'recoverPhraseStep', 'recoverApprovalStep', 'recoverApprovalLink', 'recoverApprovalUrl', 'recoverApprovalStatus',
     'unlockScreen', 'unlockPassword', 'btnUnlock', 'unlockStatus', 'btnForgotPassword',
     'filesScreen', 'dropzone', 'fileInput', 'fileList', 'fileActions',
     'btnDownload', 'btnShare', 'btnDelete',
@@ -218,14 +219,35 @@ const SKELETON = /*html*/`
   <!-- I HAVE MY WORDS -->
   <section id="recoverScreen" class="panel column-screen hidden">
     <h2>Tessera</h2>
-    <p>Type your 12 words.</p>
-    <textarea id="recoverPhraseInput" class="recover-input"
-              placeholder="Enter your 12 words\u2026"
-              rows="3" autocomplete="off" spellcheck="false"></textarea>
-    <p style="margin-top:14px">
-      <button id="btnRecoverContinue" class="btn btn-primary btn-lg">Continue</button>
-    </p>
-    <p id="recoverStatus" class="status-text"></p>
+    <div id="recoverPhraseStep">
+      <p>Type your 12 words.</p>
+      <textarea id="recoverPhraseInput" class="recover-input"
+                placeholder="Enter your 12 words\u2026"
+                rows="3" autocomplete="off" spellcheck="false"></textarea>
+      <p style="margin-top:14px">
+        <button id="btnRecoverContinue" class="btn btn-primary btn-lg">Continue</button>
+      </p>
+      <p id="recoverStatus" class="status-text"></p>
+    </div>
+    <!-- RECOVER APPROVAL (2026-09-29): fills the gap the "This account
+         needs to be re-approved" hard error used to leave -- a genuine
+         new-device recovery needs the SAME one-time approval any new
+         app_id needs (exactly what 'tessera login <phrase>' does on the
+         CLI: open a link, approve, done). This is not the invite flow's
+         in-page secret-POST trick (there is no secret to submit here,
+         just the account owner's own click) and it is not a programmatic
+         second tab -- it's a normal link the user opens and comes back
+         from, same as the CLI's own browser step. -->
+    <div id="recoverApprovalStep" class="hidden">
+      <p>This device needs a one-time approval to reconnect this account.</p>
+      <p>Open this link, approve, then come back here:</p>
+      <p><a id="recoverApprovalLink" href="#" target="_blank" rel="noopener" class="btn btn-primary btn-lg">Open approval link</a></p>
+      <p style="margin-top:8px">
+        <input id="recoverApprovalUrl" type="text" readonly
+               style="width:100%" onclick="this.select()" />
+      </p>
+      <p id="recoverApprovalStatus" class="status-text">Waiting for approval\u2026</p>
+    </div>
   </section>
 
   <!-- UNLOCK -->
@@ -1121,17 +1143,35 @@ async function onRecoverContinue() {
       return
     }
 
-    // Rare edge case: this account needs re-approval before it can
-    // reconnect (revoked / never fully registered). Tessera Web has no
-    // "no second tab" exception for this -- the packet's ban is blanket,
-    // and this path isn't in the proof scope (direct recovery, the branch
-    // above, needs zero approval for a normal already-registered
-    // account). Rather than opening a second tab or reusing Drop's
-    // approval-link UI here, this fails with a clear, honest message and
-    // leaves the customer on Recover -- no invented mechanism, no silent
-    // fallback to the forbidden second-tab flow.
-    throw new Error('This account needs to be re-approved. Contact support to continue.')
+    // RECOVER APPROVAL (2026-09-29): fills the gap the earlier hard
+    // error left. This mirrors what ui.js (Drop's predecessor screen,
+    // never ported here) already did correctly, and what the CLI's own
+    // 'tessera login <phrase>' does: show the approval link, wait for
+    // approval, then complete registration with the SAME phrase via
+    // completeRecovery() -- not a new tab of our own; the link opens in
+    // the system browser (desktop: setWindowOpenHandler in main.js) or
+    // a normal new browser tab (web: standard <a target="_blank">),
+    // same as any other outbound link, and the user comes back here.
+    r.recoverApprovalLink.href = result.approvalUrl
+    r.recoverApprovalUrl.value = result.approvalUrl
+    r.recoverApprovalStatus.textContent = 'Waiting for approval\u2026'
+    r.recoverPhraseStep.classList.add('hidden')
+    r.recoverApprovalStep.classList.remove('hidden')
+    goto('recoverApproval')
+
+    await result.builder.waitForApproval()
+    r.recoverApprovalStatus.textContent = 'Approved! Completing recovery\u2026'
+
+    const sdk = await completeRecovery(result.builder, result.phrase, PREFIX)
+    patchState({ sdk, builder: null, phrase: '' })
+    registerSdk(sdk)
+    r.recoverPhraseStep.classList.remove('hidden')
+    r.recoverApprovalStep.classList.add('hidden')
+    goToSetPassword('recoverRegister')
   } catch (e) {
+    r.recoverApprovalStatus.textContent = ''
+    r.recoverPhraseStep.classList.remove('hidden')
+    r.recoverApprovalStep.classList.add('hidden')
     r.recoverStatus.textContent = 'Could not continue: ' + (e.message || 'Unknown error')
     r.btnRecoverContinue.disabled = false
     console.error(e)
