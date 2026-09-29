@@ -84,6 +84,16 @@ export function fmtDateTime(d) {
  */
 export function proxyOrigin() {
   if (typeof window === 'undefined') return 'http://localhost:3099'
+  // Electron desktop: the renderer's origin is file:// (or an opaque/custom
+  // scheme), never a real http(s) origin -- window.location.hostname is ''
+  // there, so it never matched the localhost check below, and the
+  // production branch's window.location.origin + pathname math produced a
+  // garbage URL (e.g. file:///idx/... or worse). The desktop app always
+  // talks to its OWN bundled local proxy (started by electron/main.js) on
+  // :3099, exactly like local dev -- so route there unconditionally.
+  if (window.tesseraDesktop && window.tesseraDesktop.isDesktop) {
+    return 'http://localhost:3099'
+  }
   const host = window.location.hostname
   if (host === 'localhost' || host === '127.0.0.1') {
     return 'http://localhost:3099'

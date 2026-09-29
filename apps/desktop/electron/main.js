@@ -28,9 +28,27 @@ function startProxy() {
       resolve()
     })
     req.on('error', () => {
-      // Port free or not responding — start our own
-      const proxyPath = path.join(__dirname, '..', '..', '..', 'packages', 'proxy', 'index.js')
-      proxyProcess = spawn('node', [proxyPath], { stdio: 'pipe' })
+      // Port free or not responding — start our own.
+      // FIX (2026-09-29): two bugs found live on a packaged macOS build.
+      // (1) This relative path assumed the monorepo layout (apps/desktop/electron
+      //     -> ../../../packages/proxy), which only exists in dev. A packaged app's
+      //     __dirname is inside app.asar / Resources -- going up 3 dirs landed on
+      //     Contents/packages/proxy/index.js, which was never bundled there at all,
+      //     so the proxy child process crashed with MODULE_NOT_FOUND on every launch.
+      //     Fix: bundle packages/proxy via electron-builder's extraResources (see
+      //     apps/desktop/package.json) and resolve from process.resourcesPath when
+      //     packaged.
+      // (2) Spawned the SYSTEM 'node' binary, which isn't guaranteed to exist on an
+      //     end-user machine (Electron bundles its own Node but doesn't put it on
+      //     PATH as 'node'). Fix: spawn Electron's own binary with
+      //     ELECTRON_RUN_AS_NODE=1, which makes it behave as a plain Node runtime.
+      const proxyPath = app.isPackaged
+        ? path.join(process.resourcesPath, 'proxy', 'index.js')
+        : path.join(__dirname, '..', '..', '..', 'packages', 'proxy', 'index.js')
+      proxyProcess = spawn(process.execPath, [proxyPath], {
+        stdio: 'pipe',
+        env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+      })
 
       let started = false
       proxyProcess.stderr.on('data', (d) => {

@@ -30,6 +30,9 @@
       "electron/**/*",
       "package.json"
     ],
+    "extraResources": [
+      { "from": "../../packages/proxy", "to": "proxy", "filter": ["index.js", "package.json"] }
+    ],
     "includeSubNodeModules": true,
     "npmRebuild": false,
     "mac": {
