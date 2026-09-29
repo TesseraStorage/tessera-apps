@@ -13,7 +13,7 @@ import https from 'https'
 import { fileURLToPath } from 'url'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const TESSERA_CLI_VERSION = process.env.TESSERA_CLI_VERSION || 'v1.4.0'
+const TESSERA_CLI_VERSION = process.env.TESSERA_CLI_VERSION || 'v1.5.0'
 
 const ASSET_BY_PLATARCH = {
   'darwin-x64': 'tessera-darwin-amd64',

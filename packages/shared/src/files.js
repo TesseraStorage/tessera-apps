@@ -870,7 +870,7 @@ export function waitForUploadSlot() { return _realUploadLock.catch(() => {}) }
 export async function uploadFile(sdk, file, onProgress, metaName) {
   if (isDesktop()) {
     const start = Date.now()
-    const tick = (s, p) => { if (onProgress) onProgress({ stage: s, percent: p, elapsed: Date.now() - start }) }
+    const tick = (s, p, hostKey, transferMs) => { if (onProgress) onProgress({ stage: s, percent: p, elapsed: Date.now() - start, hostKey, transferMs }) }
     tick('reading', 0)
     // DESKTOP PARITY (2026-09-29): Tessera Web's doUpload() (web-ui.js)
     // reads file.name/file.size directly for its own UI (queue toast,
@@ -903,7 +903,22 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
       html:'text/html', css:'text/css', zip:'application/zip', mp4:'video/mp4',
       mp3:'audio/mpeg', wav:'audio/wav' }
     const mimeType = mimeMap[ext] || 'application/octet-stream'
-    const result = await window.tesseraDesktop.siaUpload(fileName, fileBuffer, mimeType)
+    // REAL PROGRESS (2026-09-29): the IPC push channel for this already
+    // existed (onUploadProgress in preload.cjs, sia-upload-progress in
+    // main.js) but nothing on this side ever subscribed to it -- the map
+    // had no per-shard signal to plot for the whole real transfer,
+    // unlike the WASM path below which drives it from onShardUploaded.
+    // Forward the SAME { stage, percent, hostKey, transferMs } shape so
+    // web-ui.js's map code doesn't need a separate desktop-only branch.
+    const unsubscribe = window.tesseraDesktop.onUploadProgress((progress) => {
+      tick(progress.stage, progress.percent, progress.hostKey, progress.transferMs)
+    })
+    let result
+    try {
+      result = await window.tesseraDesktop.siaUpload(fileName, fileBuffer, mimeType)
+    } finally {
+      unsubscribe()
+    }
     if (!result.ok) throw new Error(result.error)
     tick('done', 100)
     return { id: result.id, size: result.size }

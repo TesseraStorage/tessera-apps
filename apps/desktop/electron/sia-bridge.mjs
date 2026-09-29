@@ -107,9 +107,33 @@ export async function uploadFile(fileName, fileBuffer, mimeType, onProgress) {
     },
   })
 
+  const dataShards = 10
+  const parityShards = 20
+  const expectedShards = dataShards + parityShards
+  let shardsLanded = 0
+
   obj = await sdk.upload(obj, source, {
-    dataShards: 10,
-    parityShards: 20,
+    dataShards,
+    parityShards,
+    // REAL PROGRESS (2026-09-29, matches Tessera Web's WASM path in
+    // files.js -- ShardProgress: hostKey, shardSize, shardIndex,
+    // slabIndex, elapsedMs, per index.node.d.ts): without this, the
+    // desktop app had exactly one blocking await from 5% to 90% that
+    // could sit for minutes on a real file with the map showing
+    // nothing -- this is the actual per-shard-landed signal the web
+    // map is driven by, just not previously wired through IPC.
+    onShardUploaded: (ev) => {
+      shardsLanded += 1
+      const percent = 5 + Math.min(85, Math.round((shardsLanded / expectedShards) * 85))
+      if (onProgress) {
+        onProgress({
+          stage: 'uploading (' + shardsLanded + '/' + expectedShards + ')',
+          percent,
+          hostKey: ev && ev.hostKey,
+          transferMs: ev && ev.elapsedMs,
+        })
+      }
+    },
   })
 
   if (onProgress) onProgress({ stage: 'pinning', percent: 90 })

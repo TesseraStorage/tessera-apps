@@ -169,11 +169,19 @@ ipcMain.handle('sia-account', async () => {
   }
 })
 
-ipcMain.handle('sia-upload', async (_e, fileName, fileBuffer, mimeType) => {
+ipcMain.handle('sia-upload', async (event, fileName, fileBuffer, mimeType) => {
   try {
     const bridge = await getBridge()
-    const result = await bridge.uploadFile(fileName, fileBuffer, mimeType)
-    // Send progress events to renderer
+    const result = await bridge.uploadFile(fileName, fileBuffer, mimeType, (progress) => {
+      // FIX (2026-09-29): this callback used to not exist at all, so the
+      // renderer's onUploadProgress subscription (already wired in
+      // preload.cjs) never received anything but the final synthetic
+      // 'done' event below -- the map had nothing to plot for the
+      // entire real transfer. event.sender is the invoking webContents;
+      // pushing here (mid-handler, before the promise resolves) is what
+      // makes intermediate ticks actually reach the renderer.
+      event.sender.send('sia-upload-progress', progress)
+    })
     mainWindow.webContents.send('sia-upload-progress', { stage: 'done', percent: 100 })
     return { ok: true, ...result }
   } catch (e) {
