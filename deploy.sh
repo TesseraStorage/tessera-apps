@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# deploy.sh — pull updates and deploy the Tessera drop app to the live server.
+# deploy.sh — pull updates and deploy the Tessera Web app to the live server.
 # Run from /root/tessera-apps (the script lives there).
+#
+# RENAME (2026-09-29): apps/web is now Tessera Web (formerly apps/tessera-web) --
+# the map/folders/invite-flow app. The old Drop app (apps/web's previous
+# contents) was removed from the repo; /v2/tessera/drop/ now 301-redirects to
+# /v2/tessera/web/ in nginx. This script's deploy target moved from
+# /var/www/siagate/v2/tessera/drop to /var/www/siagate/v2/tessera/web to match.
 
 REPO_DIR="/root/tessera-apps"
-DROP_DIR="/var/www/siagate/v2/tessera/drop"
+WEB_DIR="/var/www/siagate/v2/tessera/web"
 SERVICE="tessera-proxy"
 
 cd "$REPO_DIR"
@@ -27,10 +33,10 @@ else
 fi
 
 # ── 3. Copy dist to live directory ───────────────────────
-echo "[3/5] copying dist → $DROP_DIR"
-rm -rf "$DROP_DIR/src" "$DROP_DIR/vendor" "$DROP_DIR/index.html" "$DROP_DIR/assets" 2>/dev/null || true
-cp -r "$REPO_DIR/apps/web/dist/"* "$DROP_DIR/"
-echo "       $(ls "$DROP_DIR")"
+echo "[3/5] copying dist → $WEB_DIR"
+rm -rf "$WEB_DIR/src" "$WEB_DIR/vendor" "$WEB_DIR/index.html" "$WEB_DIR/assets" 2>/dev/null || true
+cp -r "$REPO_DIR/apps/web/dist/"* "$WEB_DIR/"
+echo "       $(ls "$WEB_DIR")"
 
 # ── 4. Restart proxy ─────────────────────────────────────
 echo "[4/5] restarting $SERVICE"

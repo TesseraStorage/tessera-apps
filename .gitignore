@@ -7,5 +7,4 @@ dist-electron/
 !.env.example
 *.local
 apps/web/dist/
-apps/tessera-web/dist/
 apps/desktop/dist/

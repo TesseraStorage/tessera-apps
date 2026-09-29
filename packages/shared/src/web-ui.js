@@ -50,6 +50,49 @@ import { hasWrappedVault, unwrapAppKey } from './vault.js'
 
 const PREFIX = 'tesseraweb'
 
+// DESKTOP PARITY (2026-09-29): Tessera Web ('idx' fetch mode) assumes a
+// same-origin nginx /v2/tessera/web/idx/ location -- that doesn't exist in
+// the Electron desktop app (no nginx there at all). The desktop app's own
+// bundled local proxy (apps/desktop/electron/main.js -> packages/proxy)
+// already implements '/__proxy__' (Drop/ui.js's exact existing route,
+// already fixed and verified working there) -- reuse THAT instead of
+// inventing a second '/idx/' route. Everywhere this file passed the
+// literal string 'idx' to initSia/reconnectWithAppKey/beginRecovery/
+// connectWithInvite, use FETCH_MODE() instead: 'idx' in the browser,
+// undefined (-> installFetchInterceptor's default 'proxy' mode) in
+// desktop, matching Drop's own desktop behavior exactly.
+function FETCH_MODE() {
+  return (window.tesseraDesktop && window.tesseraDesktop.isDesktop) ? undefined : 'idx'
+}
+
+function isDesktop() {
+  return !!(window.tesseraDesktop && window.tesseraDesktop.isDesktop)
+}
+
+/**
+ * In the Electron desktop app, also connect the native NAPI SDK in the
+ * main process so upload/download work via raw TCP (same mechanism as
+ * Drop/ui.js's initNativeBridge() -- ported verbatim, PREFIX-aware).
+ *
+ * `appKeyHex` is optional -- pass it explicitly when the key just came
+ * from somewhere other than plaintext localStorage (e.g. Unlock's
+ * unwrapAppKey() result), since getSaved(PREFIX).appKey is empty once a
+ * password/vault is set. Falls back to getSaved(PREFIX) otherwise.
+ */
+async function initNativeBridge(appKeyHex) {
+  if (!isDesktop()) return
+  const saved = getSaved(PREFIX)
+  const appId = saved.appId
+  const appKey = appKeyHex || saved.appKey
+  if (!appKey || !appId) return
+  try {
+    const result = await window.tesseraDesktop.siaConnect(appId, appKey)
+    if (!result.ok) console.warn('Native bridge connect failed:', result.error)
+  } catch (e) {
+    console.warn('Native bridge unavailable:', e.message)
+  }
+}
+
 let root
 const r = {}
 
@@ -453,7 +496,32 @@ export async function mountApp(container) {
   r.textInputField.addEventListener('keydown', e => { if (e.key === 'Enter') onTextInputConfirm() })
   r.breadcrumb.addEventListener('click', onBreadcrumbClick)
 
-  r.dropzone.addEventListener('click', () => r.fileInput.click())
+  // Dropzone: desktop uses the native file dialog. files.js's uploadFile()
+  // would happily prompt its own dialog if given file=null (like Drop/
+  // ui.js does) -- but Tessera Web's doUpload() reads file.name/file.size
+  // directly for its OWN UI (queue toast, collision-name check, success
+  // toast) before ever calling uploadFile(), so a bare null crashes there.
+  // Resolve the file via IPC here first, build a lightweight stand-in
+  // object carrying the real name/size plus the pre-fetched path/buffer,
+  // and feed THAT into the exact same enqueueUpload() queue the browser
+  // drop path already uses -- one upload pipeline, not two. uploadFile()
+  // recognizes __desktopBuffer and skips its own (would-be duplicate)
+  // dialog prompt.
+  if (isDesktop()) {
+    r.dropzone.addEventListener('click', async () => {
+      try {
+        const filePath = await window.tesseraDesktop.openFileDialog()
+        if (!filePath) return  // user cancelled the dialog -- no-op, same as Drop
+        const fileBuffer = await window.tesseraDesktop.readFile(filePath)
+        const name = filePath.split('/').pop() || filePath.split('\\').pop() || 'upload'
+        enqueueUpload({ name, size: fileBuffer.length, __desktopPath: filePath, __desktopBuffer: fileBuffer })
+      } catch (e) {
+        showToast('Could not read that file: ' + (e.message || 'Unknown error'))
+      }
+    })
+  } else {
+    r.dropzone.addEventListener('click', () => r.fileInput.click())
+  }
   r.fileInput.addEventListener('change', onFilePicked)
   r.btnDownload.addEventListener('click', onDownload)
   r.btnDelete.addEventListener('click', onDelete)
@@ -828,7 +896,7 @@ function kickoffPreload() {
   //    /v2/tessera/web/idx/ nginx proxy (2026-09-14 "tessera-web-invite-fetch"
   //    fix -- see interceptor.js's MODE UPDATE comment for why 'direct'
   //    broke the invite-approval POST specifically).
-  initSia('idx').catch(e => console.warn('[tessera-web] preload initSia failed:', e.message))
+  initSia(FETCH_MODE()).catch(e => console.warn('[tessera-web] preload initSia failed:', e.message))
   // 2. warm the indexer proxy path with a harmless GET. Only meaningful
   //    once a real sdk exists (post-Unlock/Set-password reconnect) --
   //    with no sdk yet (fresh Welcome visit, no account attached), there
@@ -883,7 +951,7 @@ async function onInviteContinue() {
     // If this ever stops working (proxy route removed, Indexd hardened),
     // it throws and the catch below shows the real error -- this path does
     // not fall back to a second tab.
-    const { builder, appId, phrase } = await connectWithInvite(invite, PREFIX, 'idx')
+    const { builder, appId, phrase } = await connectWithInvite(invite, PREFIX, FETCH_MODE())
     patchState({ builder, appId, phrase })
     r.inviteInput.value = ''
     r.inviteStatus.textContent = ''
@@ -1007,7 +1075,7 @@ async function onRecoverContinue() {
   r.recoverStatus.textContent = ''
 
   try {
-    const result = await beginRecovery(phrase, msg => { r.recoverStatus.textContent = msg }, PREFIX, 'idx')
+    const result = await beginRecovery(phrase, msg => { r.recoverStatus.textContent = msg }, PREFIX, FETCH_MODE())
 
     if (!result.needsApproval) {
       patchState({ sdk: result.sdk, builder: null, phrase: '' })
@@ -1063,7 +1131,7 @@ async function onUnlock() {
     // does not add any new network call.
     let timer = null
     const sdk = await Promise.race([
-      reconnectWithAppKey(appId, appKeyHex, 'idx'),
+      reconnectWithAppKey(appId, appKeyHex, FETCH_MODE()),
       new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('reconnect timed out')), 10000) }),
     ]).finally(() => { if (timer) clearTimeout(timer) })
     if (!sdk) {
@@ -1077,7 +1145,7 @@ async function onUnlock() {
     registerSdk(sdk)
     await initRelay()
     r.unlockPassword.value = ''
-    await enterFiles()
+    await enterFiles(appKeyHex)
   } catch (e) {
     if (e && e.message === 'reconnect timed out') {
       // Reconnect/account/wasm init never resolved within the 10s cap --
@@ -1101,7 +1169,11 @@ function onForgotPassword() {
 
 // ── files ────────────────────────────────────────────────
 
-async function enterFiles() {
+async function enterFiles(appKeyHex) {
+  // DESKTOP PARITY (2026-09-29): connect the native NAPI SDK bridge too
+  // (no-op in the browser -- initNativeBridge() returns immediately when
+  // !isDesktop()), mirroring Drop/ui.js's initNativeBridge() call sites.
+  await initNativeBridge(appKeyHex)
   // replaceScreen, not goto (packet law: "After Ready lands on Files,
   // replaceState so Back does not unwind create or clear tesseraweb.*").
   // FOLDERS (2026-09-15, "tessera-web-folders-v1"): always lands at
@@ -3203,6 +3275,12 @@ async function onDebugCopy() {
 // Two DIFFERENT buttons/actions, per law -- not a single confirm-toggle.
 
 function onLock() {
+  // DESKTOP PARITY (2026-09-29): disconnect the native bridge too, same
+  // as Drop/ui.js's onLogout() -- otherwise the main process keeps an
+  // authenticated native SDK instance alive after the UI has locked.
+  if (isDesktop()) {
+    window.tesseraDesktop.siaDisconnect().catch(() => {})
+  }
   patchState({
     sdk: null, accountReady: false,
     files: [], selectedIdx: -1, totals: { count: 0, totalBytes: 0 },

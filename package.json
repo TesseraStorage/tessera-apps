@@ -5,14 +5,12 @@
   "workspaces": [
     "packages/shared",
     "apps/web",
-    "apps/tessera-web",
     "apps/desktop"
   ],
   "scripts": {
     "proxy": "node packages/proxy/index.js",
     "dev:web": "node scripts/start-dev.js web",
     "build:web": "npm -w apps/web run build",
-    "build:tessera-web": "npm -w apps/tessera-web run build",
     "prod:web": "node packages/proxy/index.js --static apps/web/dist",
     "dev:desktop": "node scripts/start-dev.js desktop",
     "build:desktop": "npm -w apps/desktop run build",

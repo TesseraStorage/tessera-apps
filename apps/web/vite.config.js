@@ -11,16 +11,15 @@ export default defineConfig({
     rollupOptions: {
       input: {
         main: resolve(__dirname, 'index.html'),
-        download: resolve(__dirname, 'd/download.html'),
       },
     },
   },
   server: {
-    port: 5173,
-    // Proxy requests that go through the fetch interceptor to the standalone
-    // proxy on port 3099, which handles CORS and forwards to index.tessera.storage.
-    // The shared interceptor rewrites indexer URLs to use the standalone proxy,
-    // so these rules are only needed if the interceptor is disabled.
+    port: 5174,
+    // The shared fetch interceptor rewrites indexer
+    // URLs to go through the standalone proxy on :3099 in dev. In
+    // production this app's own /v2/tessera/web/idx/ nginx location
+    // handles it instead -- see the packet's nginx section.
     proxy: {
       '/__proxy__': { target: 'http://localhost:3099', changeOrigin: true },
     },

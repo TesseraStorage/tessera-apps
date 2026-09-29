@@ -872,10 +872,29 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
     const start = Date.now()
     const tick = (s, p) => { if (onProgress) onProgress({ stage: s, percent: p, elapsed: Date.now() - start }) }
     tick('reading', 0)
-    const filePath = await window.tesseraDesktop.openFileDialog()
-    if (!filePath) throw new Error('No file selected')
-    const fileBuffer = await window.tesseraDesktop.readFile(filePath)
-    const fileName = filePath.split('/').pop() || filePath.split('\\').pop() || 'upload'
+    // DESKTOP PARITY (2026-09-29): Tessera Web's doUpload() (web-ui.js)
+    // reads file.name/file.size directly for its own UI (queue toast,
+    // collision-name resolution, success toast) BEFORE calling this
+    // function -- unlike Drop/ui.js, which always calls this with
+    // file=null and lets THIS function's own openFileDialog() below be
+    // the only prompt. To give Tessera Web a real name/size upfront
+    // (so its UI text is correct) without a SECOND native dialog here,
+    // its dropzone handler pre-resolves the path/buffer once and passes
+    // a lightweight `{ name, size, __desktopPath, __desktopBuffer }`
+    // stand-in object instead of null. Use that pre-fetched data when
+    // present; otherwise (Drop's exact original call shape) prompt here,
+    // unchanged.
+    let filePath, fileBuffer, fileName
+    if (file && file.__desktopBuffer) {
+      filePath = file.__desktopPath
+      fileBuffer = file.__desktopBuffer
+      fileName = file.name
+    } else {
+      filePath = await window.tesseraDesktop.openFileDialog()
+      if (!filePath) throw new Error('No file selected')
+      fileBuffer = await window.tesseraDesktop.readFile(filePath)
+      fileName = filePath.split('/').pop() || filePath.split('\\').pop() || 'upload'
+    }
     tick('uploading', 10)
     const ext = (fileName.split('.').pop() || '').toLowerCase()
     const mimeMap = { png:'image/png', jpg:'image/jpeg', jpeg:'image/jpeg', gif:'image/gif',
