@@ -6,13 +6,24 @@
 // tombstone engine in JS. See tessera-cli's ARCHITECTURE.md / TESTING.md.
 //
 // Identity is shared with the native SDK bridge (sia-bridge.mjs): once the
-// app connects, writeConfig() below seeds the bundled CLI's own
-// TESSERA_HOME/config.json with the SAME app_id/app_key, so there is no
-// second "tessera login" browser approval — the CLI is instantly usable.
+// app connects, writeConfig() below seeds the SAME ~/.tessera config the
+// standalone tessera-cli uses — deliberately NOT an app-isolated home.
+//
+// Why not isolated: tessera-cli's OS-native watcher (launchd/systemd-user/
+// schtasks) is a single global slot per machine, identified by a fixed
+// name, entirely independent of TESSERA_HOME. There is only ever one
+// watcher process a user can have running. Pointing the desktop app at
+// its own isolated TESSERA_HOME let `service install` silently look
+// "already installed" (because a standalone tessera-cli install already
+// owned that slot) while the real running watcher never learned about the
+// desktop app's own sync roots -- folders showed "running" but never
+// synced. Sharing ~/.tessera makes both surfaces register roots into, and
+// read status from, the one real watcher that can exist.
 
 import { app } from 'electron'
 import path from 'path'
 import fs from 'fs'
+import os from 'os'
 import crypto from 'crypto'
 import { execFile, spawn } from 'child_process'
 import { fileURLToPath } from 'url'
@@ -43,10 +54,12 @@ function expandToGoEd25519PrivateKeyHex(seedHex) {
   return Buffer.concat([seed, pubRaw]).toString('hex')
 }
 
+// Real, shared tessera-cli home -- same default the standalone CLI uses
+// (no TESSERA_HOME override). Mirrors config.go's configDir() exactly:
+// $TESSERA_HOME if a caller sets it in their OWN shell, else ~/.tessera.
 function cliHome() {
-  const dir = path.join(app.getPath('userData'), 'tessera-cli-home')
-  fs.mkdirSync(dir, { recursive: true })
-  return dir
+  if (process.env.TESSERA_HOME) return process.env.TESSERA_HOME
+  return path.join(app.getPath('home') || os.homedir(), '.tessera')
 }
 
 function binName() {
@@ -63,11 +76,21 @@ function cliPath() {
   return path.join(base, binName())
 }
 
-// Seed the bundled CLI's config with the already-connected app_id/app_key —
-// called from sia-bridge.mjs's connect(), so both bridges share one identity.
+// Seed ~/.tessera/config.json with the already-connected app_id/app_key --
+// called from sia-bridge.mjs's connect(). Never overwrites an existing
+// config: if the user already has a working standalone tessera-cli login
+// (any app_id, same account per the shared-watcher design above), that
+// login is left alone rather than replaced with the desktop app's own.
 export function writeConfig(appIdHex, appKeyHex) {
   const dir = cliHome()
+  fs.mkdirSync(dir, { recursive: true })
   const configPath = path.join(dir, 'config.json')
+  if (fs.existsSync(configPath)) {
+    try {
+      const existing = JSON.parse(fs.readFileSync(configPath, 'utf8'))
+      if (existing && existing.app_id && existing.app_key) return  // already logged in -- leave it
+    } catch (_) { /* fall through and write a fresh one */ }
+  }
   const config = {
     indexer_url: INDEXER_URL,
     app_id: appIdHex,
@@ -83,7 +106,7 @@ export function hasConfig() {
 }
 
 function env() {
-  return { ...process.env, TESSERA_HOME: cliHome() }
+  return { ...process.env }
 }
 
 function run(args, { input } = {}) {

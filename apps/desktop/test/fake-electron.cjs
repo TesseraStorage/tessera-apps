@@ -8,6 +8,7 @@ const fakeUserData = path.join(os.tmpdir(), 'tessera-cli-bridge-test-userdata')
 exports.app = {
   getPath: (name) => {
     if (name === 'userData') return fakeUserData
+    if (name === 'home') return path.join(os.tmpdir(), 'tessera-cli-bridge-test-home')
     return os.tmpdir()
   },
   isPackaged: false,
