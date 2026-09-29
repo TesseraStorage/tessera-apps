@@ -123,6 +123,8 @@ function cacheRefs() {
     'textInputModal', 'textInputTitle', 'textInputField', 'textInputError',
     'btnTextInputConfirm', 'btnTextInputCancel',
     'moveModal', 'moveModalList', 'btnMoveCancel',
+    'btnSyncFolders', 'syncFoldersModal', 'syncWatcherStatus', 'syncFolderList',
+    'syncFoldersError', 'btnAddSyncFolder', 'btnCloseSyncFolders',
     'toast',
   ]
   for (const id of ids) r[id] = $(id)
@@ -137,6 +139,11 @@ const SKELETON = /*html*/`
     <span class="logo">Tessera</span>
     <span id="readyDot" class="dot off" title="Account status"></span>
     <span id="storageSummary" class="storage-summary"></span>
+    <!-- SYNCED FOLDERS (2026-09-29): desktop-only entry point for the
+         tessera-cli-backed folder sync/watcher feature -- shown only when
+         isDesktop() (see wireEvents() below), never in the browser build,
+         since there is no local filesystem or bundled CLI to drive there. -->
+    <button id="btnSyncFolders" class="btn btn-ghost hidden">Synced Folders</button>
     <button id="btnLock" class="btn btn-ghost btn-logout">Lock</button>
   </header>
 
@@ -434,6 +441,27 @@ const SKELETON = /*html*/`
     </div>
   </div>
 
+  <!-- SYNCED FOLDERS MODAL (2026-09-29): desktop-only, same modal-card
+       look as the other modals -- no new component family. Drives the
+       bundled tessera-cli binary over IPC (see cli-bridge.mjs); "watcher"
+       is the CLI's own OS-native background service, installed
+       automatically the moment the first folder is added (see
+       onAddSyncFolder below), not a separate step the user has to take. -->
+  <div id="syncFoldersModal" class="modal-overlay hidden">
+    <div class="modal-card">
+      <h3>Synced Folders</h3>
+      <p class="hint">A synced folder stays up to date automatically, like a
+        cloud drive folder — even while Tessera isn&rsquo;t open.</p>
+      <p id="syncWatcherStatus" class="status-text"></p>
+      <div id="syncFolderList" class="file-list sync-folder-list"></div>
+      <p id="syncFoldersError" class="status-text"></p>
+      <div class="modal-buttons">
+        <button id="btnAddSyncFolder" class="btn btn-primary">Add a folder&hellip;</button>
+        <button id="btnCloseSyncFolders" class="btn btn-ghost">Close</button>
+      </div>
+    </div>
+  </div>
+
   <div id="toast" class="toast"></div>
 
 </div>`
@@ -521,6 +549,15 @@ export async function mountApp(container) {
     })
   } else {
     r.dropzone.addEventListener('click', () => r.fileInput.click())
+  }
+
+  // Synced Folders (2026-09-29): desktop-only, hidden entirely in the
+  // browser build (no local filesystem / bundled CLI there).
+  if (isDesktop()) {
+    r.btnSyncFolders.classList.remove('hidden')
+    r.btnSyncFolders.addEventListener('click', onOpenSyncFolders)
+    r.btnAddSyncFolder.addEventListener('click', onAddSyncFolder)
+    r.btnCloseSyncFolders.addEventListener('click', () => r.syncFoldersModal.classList.add('hidden'))
   }
   r.fileInput.addEventListener('change', onFilePicked)
   r.btnDownload.addEventListener('click', onDownload)
@@ -3266,6 +3303,108 @@ async function onDebugCopy() {
     r.btnDebugCopy.textContent = 'Logged'
     setTimeout(() => { r.btnDebugCopy.textContent = original }, 2000)
   }
+}
+
+// ── Synced Folders (2026-09-29) ───────────────────────────
+//
+// Desktop-only: gives the desktop app the same folder-sync/watcher
+// functionality as tessera-cli, by driving the bundled CLI binary over
+// IPC (see cli-bridge.mjs) instead of re-implementing its tested
+// three-way sync/reconcile/tombstone engine here in JS.
+
+function defaultSyncPrefix(localPath) {
+  const base = (localPath.split('/').pop() || localPath.split('\\').pop() || 'folder')
+    .toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '') || 'folder'
+  return 'tessera/' + base
+}
+
+async function renderSyncFolders() {
+  r.syncFolderList.innerHTML = '<p class="status-text">Loading&hellip;</p>'
+  r.syncFoldersError.textContent = ''
+
+  const [listRes, statusRes] = await Promise.all([
+    window.tesseraDesktop.syncList(),
+    window.tesseraDesktop.serviceStatus(),
+  ])
+
+  if (statusRes && statusRes.ok) {
+    r.syncWatcherStatus.textContent = statusRes.installed
+      ? (statusRes.running ? 'Watcher: running' : 'Watcher: installed, starting\u2026')
+      : 'Watcher: not installed yet (installs automatically with your first folder)'
+  } else {
+    r.syncWatcherStatus.textContent = ''
+  }
+
+  if (!listRes || !listRes.ok) {
+    r.syncFolderList.innerHTML = ''
+    r.syncFoldersError.textContent = 'Could not load synced folders: ' + ((listRes && listRes.error) || 'unknown error')
+    return
+  }
+
+  const roots = listRes.data || []
+  if (!roots.length) {
+    r.syncFolderList.innerHTML = '<p class="status-text">No synced folders yet.</p>'
+    return
+  }
+
+  r.syncFolderList.innerHTML = ''
+  for (const root of roots) {
+    const row = document.createElement('div')
+    row.className = 'file-row sync-folder-row'
+    row.innerHTML =
+      '<div class="file-icon">\u{1F4C1}</div>' +
+      '<div class="file-info">' +
+        '<span class="file-name">' + esc(root.local_path) + '</span>' +
+        '<span class="file-meta">' + esc(root.remote_prefix) + '/ &middot; last sync: ' +
+          esc(root.last_sync && !root.last_sync.startsWith('0001') ? fmtDateTime(root.last_sync) : 'never') +
+        '</span>' +
+      '</div>'
+    const openBtn = document.createElement('button')
+    openBtn.className = 'btn btn-ghost'
+    openBtn.textContent = 'Open'
+    openBtn.addEventListener('click', (e) => { e.stopPropagation(); window.tesseraDesktop.openPath(root.local_path) })
+    const removeBtn = document.createElement('button')
+    removeBtn.className = 'btn btn-danger'
+    removeBtn.textContent = 'Remove'
+    removeBtn.addEventListener('click', (e) => { e.stopPropagation(); onRemoveSyncFolder(root.id) })
+    row.appendChild(openBtn)
+    row.appendChild(removeBtn)
+    r.syncFolderList.appendChild(row)
+  }
+}
+
+async function onOpenSyncFolders() {
+  r.syncFoldersModal.classList.remove('hidden')
+  await renderSyncFolders()
+}
+
+async function onAddSyncFolder() {
+  r.syncFoldersError.textContent = ''
+  const localPath = await window.tesseraDesktop.pickFolder()
+  if (!localPath) return  // cancelled
+
+  r.btnAddSyncFolder.disabled = true
+  try {
+    const prefix = defaultSyncPrefix(localPath)
+    const res = await window.tesseraDesktop.syncAdd(localPath, prefix)
+    if (!res.ok) {
+      r.syncFoldersError.textContent = 'Could not add that folder: ' + (res.error || res.stderr || 'unknown error')
+      return
+    }
+    showToast('Folder synced: ' + localPath)
+  } finally {
+    r.btnAddSyncFolder.disabled = false
+    await renderSyncFolders()
+  }
+}
+
+async function onRemoveSyncFolder(rootId) {
+  if (!confirm('Stop syncing this folder? Local files and remote copies are both kept.')) return
+  const res = await window.tesseraDesktop.syncRemove(rootId)
+  if (!res.ok) {
+    r.syncFoldersError.textContent = 'Could not remove: ' + (res.error || res.stderr || 'unknown error')
+  }
+  await renderSyncFolders()
 }
 
 // ── lock / remove from this browser ──────────────────────

@@ -107,6 +107,36 @@ function serveStatic(req, res) {
   } catch (_) { return false }
 }
 
+// ── idx proxy (mirrors nginx's /v2/tessera/*/idx/ location) ─
+//
+// Unlike proxy() above (?url=... query param, used by fetchMode='proxy'),
+// this strips a fixed '/idx/' prefix and forwards the rest straight to
+// the real indexer, exactly like nginx's proxy_pass https://index.tessera.storage/.
+function idxProxy(req, res) {
+  const rest = req.url.slice('/idx/'.length).replace(/^\/+/, '')
+  const u = new URL('https://index.tessera.storage/' + rest)
+  const hdrs = {}
+  for (const k of Object.keys(req.headers)) {
+    if (k !== 'host' && k !== 'connection' && k !== 'origin' && k !== 'referer')
+      hdrs[k] = req.headers[k]
+  }
+  hdrs.host = u.hostname
+
+  const up = https.request({
+    hostname: u.hostname, port: 443,
+    path: u.pathname + u.search, method: req.method, headers: hdrs,
+    timeout: 120000,
+  })
+  up.on('error', e => {
+    if (!res.headersSent) { res.writeHead(502, { ...CORS, 'content-type': 'text/plain' }); res.end('idx-proxy:' + e.message) }
+  })
+  up.on('response', upRes => {
+    res.writeHead(upRes.statusCode, { ...upRes.headers, ...CORS, 'cache-control': 'no-store' })
+    upRes.pipe(res)
+  })
+  req.pipe(up)
+}
+
 // ── indexer proxy ───────────────────────────────────────
 
 function proxy(req, res) {
@@ -393,6 +423,12 @@ const srv = http.createServer((req, res) => {
 
   // Indexer proxy
   if (req.url.startsWith('/__proxy__')) return proxy(req, res)
+
+  // 'idx' fetch-mode proxy (2026-09-29): mirrors nginx's production
+  // /v2/tessera/*/idx/ location (proxy_pass to the real indexer, prefix
+  // stripped) so local dev testing of Tessera Web's default fetch mode
+  // doesn't need a running nginx. Same upstream, same no-store headers.
+  if (req.url.startsWith('/idx/')) return idxProxy(req, res)
 
   // Static files
   if (serveStatic(req, res)) return

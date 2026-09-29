@@ -33,6 +33,23 @@ contextBridge.exposeInMainWorld('tesseraDesktop', {
   siaDelete: (objectId) => ipcRenderer.invoke('sia-delete', objectId),
   siaShare: (objectId) => ipcRenderer.invoke('sia-share', objectId),
 
+  // ── tessera-cli bridge (Synced Folders / watcher) ─────
+
+  pickFolder: () => ipcRenderer.invoke('tessera-pick-folder'),
+  openPath: (p) => ipcRenderer.invoke('tessera-open-path', p),
+  syncAdd: (localPath, remotePrefix) => ipcRenderer.invoke('tessera-sync-add', localPath, remotePrefix),
+  syncList: () => ipcRenderer.invoke('tessera-sync-list'),
+  syncRun: (rootId) => ipcRenderer.invoke('tessera-sync-run', rootId),
+  syncRemove: (rootId) => ipcRenderer.invoke('tessera-sync-remove', rootId),
+  syncConflicts: () => ipcRenderer.invoke('tessera-sync-conflicts'),
+  serviceStatus: () => ipcRenderer.invoke('tessera-service-status'),
+  serviceInstall: () => ipcRenderer.invoke('tessera-service-install'),
+  serviceUninstall: () => ipcRenderer.invoke('tessera-service-uninstall'),
+  trashList: () => ipcRenderer.invoke('tessera-trash-list'),
+  trashRestore: (relPath) => ipcRenderer.invoke('tessera-trash-restore', relPath),
+  versionsList: (relPath) => ipcRenderer.invoke('tessera-versions-list', relPath),
+  versionsRestore: (relPath, n) => ipcRenderer.invoke('tessera-versions-restore', relPath, n),
+
   // Progress events from main process
   onUploadProgress: (callback) => {
     const handler = (_event, progress) => callback(progress)

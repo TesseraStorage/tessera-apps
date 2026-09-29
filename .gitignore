@@ -8,3 +8,4 @@ dist-electron/
 *.local
 apps/web/dist/
 apps/desktop/dist/
+apps/desktop/resources/cli/

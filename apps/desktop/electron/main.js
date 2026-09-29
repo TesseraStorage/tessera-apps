@@ -3,12 +3,13 @@
 // Starts the CORS proxy and exposes Sia operations via IPC using the
 // native @siafoundation/sia-storage SDK (NAPI addon with raw TCP access).
 
-import { app, BrowserWindow, ipcMain, dialog, safeStorage } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, safeStorage, shell } from 'electron'
 import path from 'path'
 import fs from 'fs'
 import http from 'http'
 import { fileURLToPath } from 'url'
 import { spawn } from 'child_process'
+import * as cliBridge from './cli-bridge.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const isDev = !app.isPackaged
@@ -219,6 +220,43 @@ ipcMain.handle('sia-share', async (_e, objectId) => {
     return { ok: false, error: e.message }
   }
 })
+
+// ---- IPC: tessera-cli bridge (Synced Folders) ----------------
+
+ipcMain.handle('tessera-pick-folder', async () => {
+  const r = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openDirectory', 'createDirectory'],
+    title: 'Choose a folder to keep in sync',
+  })
+  return r.canceled || !r.filePaths.length ? null : r.filePaths[0]
+})
+
+ipcMain.handle('tessera-open-path', async (_e, p) => {
+  const err = await shell.openPath(p)
+  return { ok: !err, error: err || undefined }
+})
+
+ipcMain.handle('tessera-sync-add', async (_e, localPath, remotePrefix) => {
+  const result = await cliBridge.syncAdd(localPath, remotePrefix)
+  if (result.ok) {
+    // "Installing the watcher should be automatic once a new synced folder
+    // is added" — ensure the OS-native watcher is running, no separate step.
+    try { await cliBridge.ensureWatcherInstalled() } catch (_) {}
+  }
+  return result
+})
+
+ipcMain.handle('tessera-sync-list', async () => cliBridge.syncList())
+ipcMain.handle('tessera-sync-run', async (_e, rootId) => cliBridge.syncRun(rootId))
+ipcMain.handle('tessera-sync-remove', async (_e, rootId) => cliBridge.syncRemove(rootId))
+ipcMain.handle('tessera-sync-conflicts', async () => cliBridge.syncConflicts())
+ipcMain.handle('tessera-service-status', async () => cliBridge.serviceStatus())
+ipcMain.handle('tessera-service-install', async () => cliBridge.serviceInstall())
+ipcMain.handle('tessera-service-uninstall', async () => cliBridge.serviceUninstall())
+ipcMain.handle('tessera-trash-list', async () => cliBridge.trashList())
+ipcMain.handle('tessera-trash-restore', async (_e, relPath) => cliBridge.trashRestore(relPath))
+ipcMain.handle('tessera-versions-list', async (_e, relPath) => cliBridge.versionsList(relPath))
+ipcMain.handle('tessera-versions-restore', async (_e, relPath, n) => cliBridge.versionsRestore(relPath, n))
 
 // ---- lifecycle ---------------------------------------------
 

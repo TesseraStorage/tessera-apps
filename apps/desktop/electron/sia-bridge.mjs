@@ -6,6 +6,7 @@
 
 import { initSia, Builder, AppKey, PinnedObject } from '@siafoundation/sia-storage'
 import { Readable } from 'node:stream'
+import * as cliBridge from './cli-bridge.mjs'
 
 // ── Fetch patching ───────────────────────────────────────
 // NOTE (fix, 2026-09-29): this used to rewrite every indexer request to
@@ -55,6 +56,14 @@ export async function connect(appIdHex, appKeyHex) {
 
   sdk = await builder.connected(key)
   console.log('[sia-bridge] connected to indexer')
+
+  // Seed the bundled tessera-cli's config with this same identity, so the
+  // Synced Folders feature (which shells out to that binary) needs no
+  // separate "tessera login" browser approval.
+  try { cliBridge.writeConfig(appIdHex, appKeyHex) } catch (e) {
+    console.error('[sia-bridge] could not seed tessera-cli config:', e.message)
+  }
+
   return true
 }
 

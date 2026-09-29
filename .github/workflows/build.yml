@@ -77,6 +77,15 @@ jobs:
       - name: Build Vite frontend
         run: npm run build:desktop
 
+      - name: Fetch bundled tessera-cli binary
+        shell: bash
+        env:
+          TESSERA_TARGET_PLATFORM: ${{ matrix.target == 'mac' && 'darwin' || matrix.target == 'win' && 'win32' || 'linux' }}
+          TESSERA_TARGET_ARCH: ${{ contains(matrix.electron-arch, 'arm64') && 'arm64' || 'x64' }}
+        run: |
+          cd apps/desktop
+          npm run fetch:cli
+
       - name: Package Electron app (${{ matrix.target }} ${{ matrix.electron-arch }})
         shell: bash
         run: |
