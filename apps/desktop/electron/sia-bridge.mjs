@@ -8,19 +8,18 @@ import { initSia, Builder, AppKey, PinnedObject } from '@siafoundation/sia-stora
 import { Readable } from 'node:stream'
 
 // ── Fetch patching ───────────────────────────────────────
-// Route indexer requests through the local proxy on :3099 so
-// that CORS doesn't block them (the native SDK uses fetch internally).
-
-const _origFetch = globalThis.fetch.bind(globalThis)
-globalThis.fetch = function (input, init) {
-  let url = typeof input === 'string' ? input : (input?.url || input?.href || '')
-  if (typeof url === 'string' && url.includes('index.tessera.storage')) {
-    url = 'http://localhost:3099/__proxy__?url=' + encodeURIComponent(url)
-    if (typeof input === 'string') input = url
-    else if (input && typeof input === 'object') input = new Request(url, input)
-  }
-  return _origFetch(input, init)
-}
+// NOTE (fix, 2026-09-29): this used to rewrite every indexer request to
+// http://localhost:3099/__proxy__?url=... under the theory that "CORS"
+// would otherwise block them. That's wrong on two counts: (1) CORS is a
+// browser-only restriction -- this file runs in the Electron MAIN process,
+// which is plain Node, never subject to CORS; (2) :3099 is
+// tessera-proxy.service, which only exists on the dev/prod server, is not
+// bundled with the shipped app, and is intentionally left dead there too.
+// On an end-user machine nothing listens on :3099, so every indexer call
+// failed with a connection-refused surfaced through the native SDK as
+// "client error: http error: error sending request". No rewrite needed --
+// call index.tessera.storage directly (confirmed reachable, valid TLS,
+// from a plain Node context).
 
 // ── Module state ─────────────────────────────────────────
 
