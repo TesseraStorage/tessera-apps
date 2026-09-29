@@ -58,6 +58,7 @@
 // skipping the pin -- so if the mismatch the packet suspected is real,
 // pins recover instead of silently all dropping; if it wasn't real, this
 // is a no-op (exact match hits on the first try every time).
+
 export function normalizeHostKey(key) {
   if (!key || typeof key !== 'string') return null
   const candidates = [
@@ -69,7 +70,22 @@ export function normalizeHostKey(key) {
   return candidates
 }
 
+// GEO_URL FIX (2026-09-30): was a bare relative path, fetched with a
+// plain fetch(GEO_URL) below. That resolves fine when Tessera Web is
+// served from a real https:// origin (nginx serves it directly, and
+// GEO_URL is already an absolute site-root path there -- do NOT run
+// it through proxyOrigin(), which prepends the *app's own* subpath
+// like /v2/tessera/web and would double-prefix this one). Tessera
+// Desktop's renderer is loaded via file:// though -- a relative fetch
+// there can never reach anything real, so only THAT case needs
+// redirecting to the local bundled proxy on :3099.
 const GEO_URL = '/v2/tessera/geo/geo.json'
+function geoFetchUrl() {
+  if (typeof window !== 'undefined' && window.tesseraDesktop && window.tesseraDesktop.isDesktop) {
+    return 'http://localhost:3099' + GEO_URL
+  }
+  return GEO_URL
+}
 const LAND_TOPOJSON_URL = 'https://unpkg.com/world-atlas@2/land-110m.json'
 // COUNTRY BORDERS (2026-09-20, operator request): "is there an option
 // to add country borders? If yes, add." world-atlas -- the same
@@ -155,7 +171,7 @@ async function ensureAssets() {
   if (_loadPromise) return _loadPromise
   _loadPromise = (async () => {
     const [geoResp] = await Promise.all([
-      fetch(GEO_URL).catch(() => null),
+      fetch(geoFetchUrl()).catch(() => null),
       loadScript(TOPOJSON_CLIENT_URL).catch(() => null),
     ])
     if (geoResp && geoResp.ok) {

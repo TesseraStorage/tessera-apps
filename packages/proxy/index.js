@@ -430,6 +430,44 @@ const srv = http.createServer((req, res) => {
   // doesn't need a running nginx. Same upstream, same no-store headers.
   if (req.url.startsWith('/idx/')) return idxProxy(req, res)
 
+  // MAP GEO DATA (2026-09-30): mirrors nginx's production
+  // `location = /v2/tessera/geo/geo.json { alias ...; }` -- map.js's
+  // fetch(GEO_URL) is a bare relative path, which resolves fine when
+  // Tessera Web is served from a real https:// origin (nginx handles
+  // it directly there) but is NEVER reachable from Tessera Desktop's
+  // file://-loaded renderer without going through this local proxy
+  // (see proxyOrigin()'s own file:// comment in utils.js -- same root
+  // cause). This exact file is ALSO bundled and spawned as-is inside
+  // packaged Desktop (see main.js's extraResources comment) and runs
+  // on the END USER's own machine there, where the local disk path
+  // below does not exist -- so this tries that fast path first (real
+  // when this process happens to be colocated with nginx, e.g. the
+  // systemd tessera-proxy.service on the same box that serves the
+  // static file) and falls back to a real fetch of the public URL
+  // otherwise. NOTE (2026-09-30): tessera.storage is currently behind
+  // a site-wide HTTP Basic Auth staging gate -- the fallback fetch
+  // will itself 401 until that's lifted or this proxy is given
+  // credentials for it (a deliberate infra decision, not something to
+  // silently hardcode here).
+  if (req.url === '/v2/tessera/geo/geo.json') {
+    try {
+      const data = fs.readFileSync('/var/www/siagate/v2/tessera/geo/geo.json')
+      res.writeHead(200, { ...CORS, 'content-type': 'application/json', 'cache-control': 'no-store' })
+      return res.end(data)
+    } catch (_) {
+      const up = https.request({ hostname: 'tessera.storage', port: 443, path: '/v2/tessera/geo/geo.json', method: 'GET', timeout: 15000 })
+      up.on('error', e => {
+        if (!res.headersSent) { res.writeHead(502, CORS); res.end(JSON.stringify({ error: 'geo data unavailable: ' + e.message })) }
+      })
+      up.on('response', upRes => {
+        res.writeHead(upRes.statusCode, { ...CORS, 'content-type': 'application/json', 'cache-control': 'no-store' })
+        upRes.pipe(res)
+      })
+      up.end()
+      return
+    }
+  }
+
   // Static files
   if (serveStatic(req, res)) return
 
