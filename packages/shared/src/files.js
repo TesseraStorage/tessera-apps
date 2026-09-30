@@ -23,6 +23,17 @@ import { checkTunnelReachable } from './interceptor.js'
 // figure used in its byte-budget math).
 const SECTOR_SIZE = 4 * 1024 * 1024
 
+// DOWNLOAD FADE FLOOR (2026-09-30, "tessera-web-dl-arc-floor"): "2.5s
+// is 2500ms. Do not reuse the write 4000ms constant. Name a download
+// floor constant." A deliberately separate value from map.js's
+// LINE_FLOOR_MS (which governs write/gold attempt-hold minimums, a
+// different trip family entirely) -- this one governs how long the
+// download's own together-fade (fadeDownloadTrips) must wait before
+// firing, so a fast one-sector read still shows its cyan arc for a
+// human-visible moment instead of vanishing before the eye registers
+// it.
+const DL_FADE_FLOOR_MS = 2500
+
 // DEBUG DIARY (2026-09-24, "tessera-web-debug-log"): "Instrumented diary is
 // on only when the page URL has query debug=1." Read LIVE from
 // window.location at every call, never cached at Add start and never
@@ -1964,26 +1975,53 @@ export async function downloadToDisk(sdk, objOrId, filename, onProgress) {
           'dl-shard i=' + (ev && ev.shardIndex) + ' n/M=' + shardsLanded + '/' + expectedShards +
           ' host8=' + host8 + ' dt_ms=' + (ev && ev.elapsedMs)
         )
-        // FADE-TOGETHER (2026-09-30, "tessera-web-dl-arc-fade"): "when
+        // FADE-TOGETHER (2026-09-30, "tessera-web-dl-arc-fade";
+        // FLOOR added 2026-09-30, "tessera-web-dl-arc-floor"): "when
         // this Download has 10 shards... fade every cyan trip for this
         // job at once... If a late download tick arrives after that
         // fade started, do not draw a new cyan line for this job."
         // `crossedNow` is true on the exact tick that reaches
-        // minShardsTotal -- that tick's own arc still gets drawn AND
-        // triggers the fade-all (dlComplete), together, same frame.
+        // minShardsTotal -- that tick's own arc still gets drawn.
         // Every tick strictly after that has `dlFadeSent` already
         // true, so `hostKey` is omitted from its payload -- web-ui.js's
         // `if (mapController && hostKey)` guard (unchanged) then simply
         // never draws that trip, with no new suppression flag needed
-        // on that side.
+        // on that side. This suppression takes effect immediately on
+        // crossing, regardless of the floor wait below -- "late ticks
+        // still draw no new blue" is unconditional.
+        //
+        // FLOOR: "that together-fade must not start before this
+        // Download has been visible for 2.5 seconds... Clock starts at
+        // the first cyan trip for this job." Reuses `dlFirstTickAt`
+        // (set on the very first tick, above) rather than inventing a
+        // second clock -- every tick up to and including the crossing
+        // tick draws a real cyan arc, so "first tick" and "first cyan
+        // trip" are the same instant here. "Visible time before the
+        // pack-fade = max(2.5s, time-to-MinShards)": if the floor is
+        // already satisfied by the time MinShards lands, fire
+        // dlComplete on this same tick/frame (unchanged from
+        // dl-arc-fade); otherwise schedule ONE deferred synthetic tick
+        // (dlComplete only, no hostKey, no percent -- so it cannot
+        // repaint the success label if the Add has already finished by
+        // then) for exactly the remaining wait.
         const crossedNow = !dlFadeSent && shardsLanded >= minShardsTotal
         if (crossedNow) dlFadeSent = true
+        let fireNow = false
+        if (crossedNow) {
+          const elapsedSinceFirstTrip = Date.now() - (dlFirstTickAt || Date.now())
+          const remaining = DL_FADE_FLOOR_MS - elapsedSinceFirstTrip
+          if (remaining <= 0) {
+            fireNow = true
+          } else if (onProgress) {
+            setTimeout(() => { onProgress({ direction: 'download', dlComplete: true }) }, remaining)
+          }
+        }
         onProgress({
           hostKey: (dlFadeSent && !crossedNow) ? undefined : (ev && ev.hostKey),
           direction: 'download',
           transferMs: ev && ev.elapsedMs,
           percent: pct,
-          dlComplete: crossedNow,
+          dlComplete: fireNow,
         })
       } }
     : {}
