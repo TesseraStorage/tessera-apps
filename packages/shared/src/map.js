@@ -144,7 +144,23 @@ const SHARD_FADE_MS = 1000
 // completion check, no whole-object override. tripFade() is fully
 // opaque until `t.visibleUntil`, then fades linearly to 0 over
 // SHARD_FADE_MS -- unchanged mechanically from before.
+//
+// ARC HOLDS (2026-09-29, "tessera-web-arc-holds" -- REVISES the
+// "every line lasts a flat 4s" framing above for OPEN attempt lines
+// only): an attempt line that hasn't ended yet (`t.open === true`)
+// is always fully opaque, full stop -- no floor countdown, no fade,
+// regardless of how long it's been open. Operator: "Live first-shard
+// was 9.6s. LINE_FLOOR_MS is 5s and the clock starts at attempt...
+// three seconds before the first shard... That picture is a lie."
+// `closeAttempt()` (below) is what ends the hold, at land or Add
+// settle, and it is the one place that computes the real
+// `visibleUntil` (= max(now, startedAt+LINE_FLOOR_MS), i.e. "a 200ms
+// success still shows the floor"). Only THEN does the normal fade
+// clock below apply. Download trips are never opened (no attempt
+// seam instruments them) -- they keep the exact old flat-floor
+// behavior untouched.
 function tripFade(t, now) {
+  if (t.open) return 1
   if (now < t.visibleUntil) return 1
   return Math.max(0, 1 - (now - t.visibleUntil) / SHARD_FADE_MS)
 }
@@ -833,13 +849,60 @@ export function createUploadMap(canvas, captionEl, onLanded) {
   // unconditionally draws whatever it is given, same fail-quiet
   // contract as shardLanded (skip silently if there is no geo, never
   // invent a pin/placement).
+  //
+  // ARC HOLDS (2026-09-29, "tessera-web-arc-holds"): the pushed trip
+  // starts `open: true` -- tripFade() (above) holds it fully visible
+  // for as long as it stays open, regardless of LINE_FLOOR_MS. It is
+  // closed by closeAttempt() below, at land (shardLanded) or Add
+  // settle (completeWrite), never by simple elapsed time.
   function attemptStart(hostKey) {
     if (!hostKey) return
     const geo = geoLookup(hostKey)
     if (!geo) return
     const now = Date.now()
-    trips.push({ lat: geo.lat, lon: geo.lon, hostKey, dir: 'upload', startedAt: now, visibleUntil: now + LINE_FLOOR_MS, fadeAt: now })
+    trips.push({ lat: geo.lat, lon: geo.lon, hostKey, dir: 'upload', startedAt: now, open: true, visibleUntil: now + LINE_FLOOR_MS, fadeAt: now })
     if (!rafId) render()
+  }
+
+  // closeAttempt: ends an open attempt line -- "An attempt line stays
+  // up for as long as that attempt is open... Visible time = max(5s,
+  // attempt-open)." Finds the OLDEST still-open upload trip for this
+  // hostKey (a retry to the same host after a prior attempt to it was
+  // already closed would have started a fresh trip; this only ever
+  // matches a trip that is still genuinely in flight) and gives it its
+  // real `visibleUntil`: never before its own LINE_FLOOR_MS floor from
+  // when it started, but also never in the past relative to now (a
+  // long-open attempt lands immediately, not "3 seconds ago"). Silent
+  // no-op if there is no matching open trip (e.g. a download hostKey,
+  // or an attempt this map instance never saw) -- same fail-quiet
+  // contract as the rest of this module.
+  function closeAttempt(hostKey) {
+    if (!hostKey) return
+    const now = Date.now()
+    for (let i = 0; i < trips.length; i++) {
+      const t = trips[i]
+      if (t.dir === 'upload' && t.hostKey === hostKey && t.open) {
+        t.open = false
+        t.visibleUntil = Math.max(now, t.startedAt + LINE_FLOOR_MS)
+        return
+      }
+    }
+  }
+
+  // closeAllOpenAttempts: the Add-settle sweep -- "this Add settles
+  // (ok/fail -- addSettled already stops new arcs; also fade/remove
+  // open attempt lines for this Add)." Closes every still-open upload
+  // trip at once (a host whose attempt never got a land tick before
+  // settle, e.g. it lost the shard race or the Add failed outright).
+  function closeAllOpenAttempts() {
+    const now = Date.now()
+    for (let i = 0; i < trips.length; i++) {
+      const t = trips[i]
+      if (t.dir === 'upload' && t.open) {
+        t.open = false
+        t.visibleUntil = Math.max(now, t.startedAt + LINE_FLOOR_MS)
+      }
+    }
   }
 
   // shardLanded: the per-shard entry point (2026-09-15, "tessera-web-
@@ -881,6 +944,14 @@ export function createUploadMap(canvas, captionEl, onLanded) {
     const now = Date.now()
     if (isDownload) {
       trips.push({ lat: geo.lat, lon: geo.lon, hostKey, dir: 'download', startedAt: now, visibleUntil: now + LINE_FLOOR_MS, fadeAt: now })
+    } else {
+      // ARC HOLDS (2026-09-29, "tessera-web-arc-holds"): "Shard tick =
+      // confirmation that attempt landed" -- this is the land signal
+      // that ends the hold attemptStart() opened, giving it its real
+      // (possibly much-later-than-the-floor) end time instead of
+      // fading it out on a fixed clock the attempt may have long
+      // outlived.
+      closeAttempt(hostKey)
     }
 
     // STATIONARY PIN: upload only (see the function-level comment above
@@ -932,6 +1003,13 @@ export function createUploadMap(canvas, captionEl, onLanded) {
   // flight), not a map-drawing concern; that messaging lives in
   // web-ui.js/files.js's own status-string plumbing, not here.
   function completeWrite() {
+    // ARC HOLDS (2026-09-29, "tessera-web-arc-holds"): "this Add
+    // settles (ok/fail -- addSettled already stops new arcs; also
+    // fade/remove open attempt lines for this Add)." Any attempt that
+    // never got its own land tick (lost the shard race, or the Add
+    // failed outright) gets closed here instead of staying open
+    // forever.
+    closeAllOpenAttempts()
     if (!rafId) render()
   }
 
