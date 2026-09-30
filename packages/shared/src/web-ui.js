@@ -115,6 +115,7 @@ function cacheRefs() {
     'filesScreen', 'dropzone', 'fileInput', 'fileList', 'fileActions',
     'btnDownload', 'btnShare', 'btnDelete',
     'btnMove', 'btnRename', 'btnCancelSelection',
+    'confirmModal', 'confirmBody', 'btnConfirmYes', 'btnConfirmNo',
     'fileMenu', 'fileMenuDownload', 'fileMenuShare', 'fileMenuMove', 'fileMenuRename', 'fileMenuDelete',
     'btnNewFolder', 'breadcrumb', 'newFolderInline', 'newFolderInput',
     'btnNewFolderConfirm', 'btnNewFolderCancel',
@@ -446,6 +447,21 @@ const SKELETON = /*html*/`
   <!-- RENAME MODAL (Apple A, 2026-09-16): "In-page name. Same collision
        rule in the current folder. Metadata only. No re-upload." Reuses
        the same modal-card look as Share -- no new component family. -->
+  <!-- DELETE CONFIRM (2026-10-01, "tessera-web-delete-silent"): an in-page confirm. The native
+       window.confirm() this replaces returns false WITHOUT showing anything in a browser that
+       suppresses dialogs ("prevent this page from creating more dialogs", in-app webviews) --
+       Delete then looked like it did nothing at all. Same modal-card look as Rename/Share. -->
+  <div id="confirmModal" class="modal-overlay hidden">
+    <div class="modal-card">
+      <h3>Delete</h3>
+      <p id="confirmBody" style="white-space:pre-line"></p>
+      <div class="modal-buttons">
+        <button id="btnConfirmYes" class="btn btn-primary">Delete</button>
+        <button id="btnConfirmNo" class="btn btn-ghost">Cancel</button>
+      </div>
+    </div>
+  </div>
+
   <div id="textInputModal" class="modal-overlay hidden">
     <div class="modal-card">
       <h3 id="textInputTitle">Rename</h3>
@@ -1978,7 +1994,7 @@ async function moveFileToQuiet(objectId, destPath) {
 // from onDeleteFolder's single-folder confirm, which counts the files
 // INSIDE that one folder instead; this is the top-level "how many things
 // did you check" number).
-function onSelectManyDelete() {
+async function onSelectManyDelete() {
   const { selectedIds } = getState()
   if (!selectedIds.length) return  // "Empty selection: Move/Delete do nothing."
   const n = selectedIds.length
@@ -1986,7 +2002,7 @@ function onSelectManyDelete() {
   const question = hasFolders
     ? 'Delete ' + n + ' item' + (n === 1 ? '' : 's') + ' including folders and their files?\n\nThis cannot be undone.'
     : 'Delete ' + n + ' item' + (n === 1 ? '' : 's') + '?\n\nThis cannot be undone.'
-  if (!confirm(question)) return  // Cancel keeps everything -- no state touched above this line
+  if (!(await askDeleteConfirm(question))) return  // Cancel keeps everything -- no state touched above this line
   deleteSelected()
 }
 
@@ -2031,6 +2047,7 @@ async function deleteSelected() {
     showToast('\u{1F5D1}\uFE0F Deleted ' + selectedIds.length + ' item' + (selectedIds.length === 1 ? '' : 's'))
   } catch (e) {
     patchState({ status: 'Delete failed: ' + (e.message || 'error') })
+    showToast('Could not delete everything selected. Try again.')
     console.error(e)
   } finally { setBusy(false) }
 }
@@ -3310,10 +3327,46 @@ async function onDownload() {
 }
 
 
+// askDeleteConfirm(message): in-page Delete / Cancel. Resolves true only on an explicit Delete click;
+// Cancel, Escape and a click on the dim overlay all resolve false (nothing is touched). Never a
+// native dialog, so it can never be silently suppressed by the browser.
+let _confirmResolve = null
+function askDeleteConfirm(message) {
+  if (_confirmResolve) { _confirmResolve(false); _confirmResolve = null }
+  r.confirmBody.textContent = message
+  r.confirmModal.classList.remove('hidden')
+  return new Promise((resolve) => {
+    const done = (v) => {
+      r.confirmModal.classList.add('hidden')
+      r.btnConfirmYes.removeEventListener('click', yes)
+      r.btnConfirmNo.removeEventListener('click', no)
+      r.confirmModal.removeEventListener('click', overlay)
+      document.removeEventListener('keydown', key)
+      _confirmResolve = null
+      resolve(v)
+    }
+    const yes = () => done(true)
+    const no = () => done(false)
+    const overlay = (e) => { if (e.target === r.confirmModal) done(false) }
+    const key = (e) => { if (e.key === 'Escape') done(false) }
+    _confirmResolve = done
+    r.btnConfirmYes.addEventListener('click', yes)
+    r.btnConfirmNo.addEventListener('click', no)
+    r.confirmModal.addEventListener('click', overlay)
+    document.addEventListener('keydown', key)
+    r.btnConfirmNo.focus()
+  })
+}
+
 async function onDelete() {
   const sf = selectedFile(); if (!sf) return
   const sdk = getState().sdk; if (!sdk) return
-  if (!confirm('Delete "' + sf.name + '"?\n\nThis cannot be undone.')) return
+  diaryPush('delete-confirm shown obj=' + hex8(sf.id))
+  if (!(await askDeleteConfirm('Delete "' + sf.name + '"?\n\nThis cannot be undone.'))) {
+    diaryPush('delete-confirm cancel obj=' + hex8(sf.id))
+    return
+  }
+  diaryPush('delete-confirm yes obj=' + hex8(sf.id))
   setBusy(true); patchState({ status: 'Deleting\u2026' })
   try {
     await deleteFile(sdk, sf.id)
@@ -3323,9 +3376,20 @@ async function onDelete() {
     // never the filename (matches Download's own dl-start convention).
     diaryPush('delete-end ok obj=' + hex8(sf.id))
     await refreshFiles()
+    // Used-storage evidence (debug only, one READ of the existing indexer account call sdk.account(),
+    // never a host fetch): the footer total is computeTotals(listFiles) -- the sum of the object
+    // list the indexer just returned -- and Account.pinnedData is the indexer's own counter.
+    if (isDebugOn()) {
+      try {
+        const a = await getAccount(sdk)
+        diaryPush('delete-usage list_files=' + getState().totals.count + ' list_bytes=' + getState().totals.totalBytes +
+          ' pinned_data=' + (a && a.pinnedData != null ? a.pinnedData : '-'))
+      } catch (_) { diaryPush('delete-usage account-read-failed') }
+    }
     patchState({ status: '' })
   } catch (e) {
     patchState({ status: 'Delete failed: ' + (e.message || 'error') })
+    showToast('Could not delete "' + sf.name + '". Try again.')
     diaryPush('delete-end fail obj=' + hex8(sf.id) + ' err=' + String(e.message || e).slice(0, 80))
     console.error(e)
   } finally { setBusy(false) }
@@ -3362,7 +3426,7 @@ async function onDeleteFolder(path, name) {
   const question = n > 0
     ? 'Delete "' + name + '" and ' + n + (n === 1 ? ' file' : ' files') + '?\n\nThis cannot be undone.'
     : 'Delete "' + name + '"?\n\nThis cannot be undone.'
-  if (!confirm(question)) return  // Cancel leaves everything -- no state touched above this line
+  if (!(await askDeleteConfirm(question))) return  // Cancel leaves everything -- no state touched above this line
   const sdk = getState().sdk
   if (n > 0 && !sdk) return  // real objects to delete but no sdk -- nothing safe to do
   setBusy(true); patchState({ status: 'Deleting\u2026' })
@@ -3407,6 +3471,7 @@ async function onDeleteFolder(path, name) {
     showToast('\u{1F5D1}\uFE0F Deleted: ' + name)
   } catch (e) {
     patchState({ status: 'Delete failed: ' + (e.message || 'error') })
+    showToast('Could not delete "' + name + '". Try again.')
     console.error(e)
   } finally { setBusy(false) }
 }
