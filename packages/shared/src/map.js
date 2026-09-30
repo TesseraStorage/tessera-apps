@@ -817,6 +817,31 @@ export function createUploadMap(canvas, captionEl, onLanded) {
     render()
   }
 
+  // attemptStart: the per-ATTEMPT entry point (2026-09-29,
+  // "tessera-web-attempt-arcs-2"). Draws exactly one gold outbound trip
+  // the moment the client BEGINS an effort toward a host -- fed by the
+  // T-SDK's `onWriteAttemptStart` callback (fired from
+  // `upload::ShardUpload::spawn_write`, before `write_sector` dials --
+  // see that Rust comment for the exact seam), never waiting for that
+  // shard to land. One call here = one trip start, same fields/floor/
+  // fade as the old land-time push (LINE_FLOOR_MS, fade not snap --
+  // unchanged), just moved to the earlier, honest moment. Caller
+  // (files.js via web-ui.js's window.__tesseraOnAttemptStart forwarder)
+  // is responsible for NOT calling this once the Add has settled -- see
+  // that call site's own comment for the "map ignores this Add after
+  // settle" gate; this function itself has no notion of settle and
+  // unconditionally draws whatever it is given, same fail-quiet
+  // contract as shardLanded (skip silently if there is no geo, never
+  // invent a pin/placement).
+  function attemptStart(hostKey) {
+    if (!hostKey) return
+    const geo = geoLookup(hostKey)
+    if (!geo) return
+    const now = Date.now()
+    trips.push({ lat: geo.lat, lon: geo.lon, hostKey, dir: 'upload', startedAt: now, visibleUntil: now + LINE_FLOOR_MS, fadeAt: now })
+    if (!rafId) render()
+  }
+
   // shardLanded: the per-shard entry point (2026-09-15, "tessera-web-
   // map-follow"). Draws one trip (arc + DOTS_PER_ARC traveling dots).
   //
@@ -837,6 +862,15 @@ export function createUploadMap(canvas, captionEl, onLanded) {
   // from a real write. The fix is scoped exactly to that push, not to
   // the animation: trips (arc+traveling dot) fire for both directions,
   // pins fire for uploads only.
+  //
+  // ARC-AT-ATTEMPT (2026-09-29, "tessera-web-attempt-arcs-2"): upload
+  // trips are no longer pushed HERE -- attemptStart() (above) now owns
+  // them, fired from T-SDK's onWriteAttemptStart at dial start, per
+  // operator law ("Arc means... the beginning of that effort... not
+  // when the shard completes"). Download keeps the exact prior
+  // behavior unchanged (isDownload branch below) -- "Cyan inbound
+  // stays download-only" -- downloads have no attempt-start seam this
+  // packet instruments.
   function shardLanded(hostKey, dir, transferMs) {
     if (!hostKey) return
     const isDownload = (dir || 'upload') === 'download'
@@ -845,7 +879,9 @@ export function createUploadMap(canvas, captionEl, onLanded) {
     // hosts() to fill gaps." -- no fallback placement.
     if (!geo) return
     const now = Date.now()
-    trips.push({ lat: geo.lat, lon: geo.lon, hostKey, dir: dir || 'upload', startedAt: now, visibleUntil: now + LINE_FLOOR_MS, fadeAt: now })
+    if (isDownload) {
+      trips.push({ lat: geo.lat, lon: geo.lon, hostKey, dir: 'download', startedAt: now, visibleUntil: now + LINE_FLOOR_MS, fadeAt: now })
+    }
 
     // STATIONARY PIN: upload only (see the function-level comment above
     // for why download is excluded). A download never places anything
@@ -917,6 +953,7 @@ export function createUploadMap(canvas, captionEl, onLanded) {
     showCandidates,
     shardLanded,
     landedHost,
+    attemptStart,
     completeWrite,
     reset,
     seedPins,

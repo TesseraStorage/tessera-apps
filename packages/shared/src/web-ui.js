@@ -2933,6 +2933,19 @@ async function doUpload(file, destPathOverride) {
       // success/fail always has the freshest values, with no separate
       // "final tick" bookkeeping needed.
       if (marks) addMarks = marks
+      // ARC-AT-ATTEMPT (2026-09-29, "tessera-web-attempt-arcs-2"):
+      // files.js forwards T-SDK's onWriteAttemptStart through this
+      // SAME onProgress channel under a distinct 'attempt' stage so it
+      // can never be mistaken for a real landed tick below -- must
+      // not touch the encoding animation / sawRealShardProgress / any
+      // DOM label, only the map. files.js's own onWriteAttemptStart
+      // already checks addSettled before calling tick('attempt', ...),
+      // so a late attempt from this Add cannot reach here after
+      // settle; this branch has no further gate of its own.
+      if (stage === 'attempt') {
+        if (mapController && hostKey) mapController.attemptStart(hostKey)
+        return
+      }
       // ENCODING WORD (2026-09-16, "tessera-web-encoding-word", MOVED
       // + ANIMATED same day per operator instruction): "'encoding...'
       // messaging, move it to the same line as the progress bar. When

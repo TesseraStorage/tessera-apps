@@ -1139,6 +1139,65 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
   // onShardUploaded event below -- never a fresh hosts()/GET call. Read
   // at Add-end (both success and fail) to print bag_n + an 8-hex list.
   const bagHosts = new Set()
+  // DEBUG DIARY (2026-09-29, "tessera-web-attempt-arcs-2"): the FULL
+  // tray this write was handed, not tick hosts. trayHosts (the Set of
+  // hosts actually dialed so far, via onWriteAttemptStart below) exists
+  // to answer "did ANY attempt ever start" for the tray n=0 fallback;
+  // the printed line itself reads the full plate back from
+  // sdk.lastWritePlate() (a RAM read of this write's own one GET
+  // /hosts, never a second fetch) the first time any attempt fires --
+  // by then refresh_hosts() has unconditionally already completed,
+  // since upload_object can't pick a host to dial before its queue is
+  // populated. "bag= on add-end stays tick hosts. Do not merge tray
+  // into bag" -- kept fully separate from bagHosts above.
+  const trayHosts = new Set()
+  let trayPrinted = false
+  const printTrayLine = () => {
+    if (trayPrinted) return
+    trayPrinted = true
+    let plate = []
+    try { plate = sdk.lastWritePlate() || [] } catch (e) { plate = [] }
+    if (!plate.length) {
+      diaryPush('tray n=0 tray=-')
+      return
+    }
+    const entries = plate.map((h) => {
+      const key = hex8(h && h.publicKey)
+      const cc = h && h.countryCode
+      // "If the body has keys and no country, print 8hex only and cite
+      // the missing field. Do not invent CC." -- countryCode always
+      // exists per the Host TS interface, but may be an empty string
+      // for a host that genuinely has none; that is the "missing
+      // field" case, not an invented one.
+      if (!cc) return key
+      if (typeof h.latitude === 'number' && typeof h.longitude === 'number') {
+        return key + ':' + cc + ':' + h.latitude + ':' + h.longitude
+      }
+      return key + ':' + cc
+    }).join(',')
+    diaryPush('tray n=' + plate.length + ' tray=' + entries)
+  }
+  // ARC-AT-ATTEMPT (2026-09-29, "tessera-web-attempt-arcs-2"): T-SDK's
+  // onWriteAttemptStart fires once per write attempt, at dial /
+  // WriteSector start (see sia_storage::upload::ShardUpload::
+  // spawn_write) -- the beginning of the effort, not the shard land.
+  // Forwarded to web-ui.js's mapController via the SAME onProgress
+  // channel onShardUploaded already uses, under a distinct stage
+  // string ('attempt') so it can never be confused with a real landed
+  // tick. "After this Add settles (ok or fail), no new arcs for it" --
+  // addSettled (below) is checked here, at the source, so a late
+  // attempt from this write's own still-running background WASM task
+  // (which has no cancel hook -- see the uploadPromise.catch() comment
+  // further down) can never reach the map once this function has
+  // already returned/thrown.
+  const onWriteAttemptStart = (attempt) => {
+    const hostKey = attempt && attempt.hostKey
+    if (!hostKey) return
+    trayHosts.add(hostKey)
+    printTrayLine()
+    if (addSettled) return
+    tick('attempt', 0, hostKey)
+  }
   // DEBUG DIARY: dt_ms on the per-shard line below is a diary-only delta
   // (Date.now() - the previous onShardUploaded call), separate from the
   // stall watchdog's own lastProgressAt clock further down -- observability
@@ -1220,7 +1279,7 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
     )
   }
 
-  const uploadOptions = { dataShards, parityShards, onShardUploaded }
+  const uploadOptions = { dataShards, parityShards, onShardUploaded, onWriteAttemptStart }
   // FIX (2026-09-16, "tessera-web-inflight-v2" — REVISES/CORRECTS
   // "tessera-web-inflight" 2026-09-14): the OLD `maxInflight: 10` line
   // that used to sit here has been REMOVED, not just renamed --
@@ -1640,6 +1699,13 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
     // is the exact instant (win or lose) after which a late/orphan
     // onShardUploaded tick must never repaint the row to 'pinning'.
     addSettled = true
+    // TRAY FALLBACK (2026-09-29, "tessera-web-attempt-arcs-2"): "If the
+    // write dies before any list exists: tray n=0 tray=- at settle."
+    // Normal case already printed this via onWriteAttemptStart's first
+    // call; this only fires when zero attempts ever happened at all
+    // (e.g. NoMoreHosts immediately) -- printTrayLine()'s own
+    // trayPrinted guard makes this a no-op otherwise.
+    printTrayLine()
   }
   // SERIAL LOCK release (2026-09-20, "tessera-web-add-overlap-stall";
   // extended 2026-09-24 to run on EVERY exit, not just success -- see
