@@ -905,6 +905,32 @@ export function createUploadMap(canvas, captionEl, onLanded) {
     }
   }
 
+  // fadeDownloadTrips: (2026-09-30, "tessera-web-dl-arc-fade") -- "when
+  // this Download has 10 shards... fade every cyan trip for this job
+  // at once... Do not leave blue lines sitting on the 4s floor after
+  // the file is already back." Download trips are never `open` (no
+  // attempt-start seam instruments reads -- see shardLanded's own
+  // comment), so each one already carries its own independent
+  // `visibleUntil` set at ITS OWN creation time, which is exactly the
+  // staggering the operator is calling out. This just collapses every
+  // still-active cyan trip's `visibleUntil` down to `now` -- "same fade
+  // already used on write close (not a snap), start that fade now" --
+  // so they all begin the SAME SHARD_FADE_MS clock on the SAME frame.
+  // Trips already past their own visibleUntil (already fading or
+  // already gone) are left alone -- this can only pull a floor IN, it
+  // never pushes one out. Gold upload trips (`dir==='upload'`) are
+  // untouched, open or not.
+  function fadeDownloadTrips() {
+    const now = Date.now()
+    for (let i = 0; i < trips.length; i++) {
+      const t = trips[i]
+      if (t.dir === 'download' && t.visibleUntil > now) {
+        t.visibleUntil = now
+      }
+    }
+    if (!rafId) render()
+  }
+
   // shardLanded: the per-shard entry point (2026-09-15, "tessera-web-
   // map-follow"). Draws one trip (arc + DOTS_PER_ARC traveling dots).
   //
@@ -1032,6 +1058,7 @@ export function createUploadMap(canvas, captionEl, onLanded) {
     shardLanded,
     landedHost,
     attemptStart,
+    fadeDownloadTrips,
     completeWrite,
     reset,
     seedPins,

@@ -3208,8 +3208,17 @@ async function onDownload() {
   // exists, Download respects it exactly like every other action.
   if (getMapShownPref() === null) showMap()
   try {
-    await downloadToDisk(sdk, sf.id, sf.name, ({ hostKey, direction, transferMs, percent }) => {
+    await downloadToDisk(sdk, sf.id, sf.name, ({ hostKey, direction, transferMs, percent, dlComplete }) => {
       if (mapController && hostKey) mapController.landedHost(hostKey, direction, transferMs)
+      // FADE-TOGETHER (2026-09-30, "tessera-web-dl-arc-fade"): files.js
+      // flags the exact tick that reaches MinShards (10 on 10+20) with
+      // dlComplete:true -- fade every still-visible cyan trip for this
+      // job at once, rather than each one guttering out on its own
+      // separate staggered 4s floor well after the file is already
+      // back. Gold write arcs (mapController.attemptStart's own hold
+      // logic) are a completely separate trip set (`dir==='upload'`)
+      // and untouched by this call.
+      if (mapController && dlComplete) mapController.fadeDownloadTrips()
       // COPY (2026-09-19, "tessera-web-download-progress"): "downloading
       // (N%)" -- same family as upload's "uploading (N/M)", no word
       // "shards" per law. percent is always present on every tick

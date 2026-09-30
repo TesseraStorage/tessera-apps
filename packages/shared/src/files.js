@@ -1930,6 +1930,25 @@ export async function downloadToDisk(sdk, objOrId, filename, onProgress) {
   }
 
   if (onProgress) onProgress({ percent: 0 })
+  // ASSEMBLE-READY THRESHOLD (2026-09-30, "tessera-web-dl-arc-fade"):
+  // "10 shards (or the SDK/object-ready signal that already means we
+  // can assemble)... 10 is MinShards for 10+20." No richer SDK signal
+  // exists for this -- `DownloadOptions.onShardDownloaded` (this same
+  // handler) and the returned `ReadableStream` are the only download
+  // events sia_storage_wasm.d.ts exposes; there is no isComplete flag
+  // on ShardProgress and no separate "assembled" event. `expectedShards`
+  // (above) is the WRITE-side denominator (encodedSize()'s full 10+20
+  // = 30-shards-per-slab count, used only for the percent bar -- left
+  // untouched, not this packet's job). The real per-object MinShards
+  // total is `slabs_len(obj) * dataShards` -- reusing the SAME
+  // obj.slabs() accessor the diary code just above already calls, not
+  // a second counter that could disagree with the SDK's own object
+  // metadata. Falls back to a bare `dataShards` (one slab) if slab
+  // metadata is ever unreadable, matching the same single-slab
+  // assumption `expectedShards`'s own fallback (line ~1881) already
+  // makes.
+  const minShardsTotal = (slabs_len(obj) || 1) * dataShards
+  let dlFadeSent = false
   const downloadOptions = onProgress
     ? { onShardDownloaded: (ev) => {
         shardsLanded += 1
@@ -1945,7 +1964,27 @@ export async function downloadToDisk(sdk, objOrId, filename, onProgress) {
           'dl-shard i=' + (ev && ev.shardIndex) + ' n/M=' + shardsLanded + '/' + expectedShards +
           ' host8=' + host8 + ' dt_ms=' + (ev && ev.elapsedMs)
         )
-        onProgress({ hostKey: ev && ev.hostKey, direction: 'download', transferMs: ev && ev.elapsedMs, percent: pct })
+        // FADE-TOGETHER (2026-09-30, "tessera-web-dl-arc-fade"): "when
+        // this Download has 10 shards... fade every cyan trip for this
+        // job at once... If a late download tick arrives after that
+        // fade started, do not draw a new cyan line for this job."
+        // `crossedNow` is true on the exact tick that reaches
+        // minShardsTotal -- that tick's own arc still gets drawn AND
+        // triggers the fade-all (dlComplete), together, same frame.
+        // Every tick strictly after that has `dlFadeSent` already
+        // true, so `hostKey` is omitted from its payload -- web-ui.js's
+        // `if (mapController && hostKey)` guard (unchanged) then simply
+        // never draws that trip, with no new suppression flag needed
+        // on that side.
+        const crossedNow = !dlFadeSent && shardsLanded >= minShardsTotal
+        if (crossedNow) dlFadeSent = true
+        onProgress({
+          hostKey: (dlFadeSent && !crossedNow) ? undefined : (ev && ev.hostKey),
+          direction: 'download',
+          transferMs: ev && ev.elapsedMs,
+          percent: pct,
+          dlComplete: crossedNow,
+        })
       } }
     : {}
   // FIX (2026-09-16, "tessera-web-inflight-v2"): operator's stated
