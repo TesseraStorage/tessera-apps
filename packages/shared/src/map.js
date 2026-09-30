@@ -983,6 +983,14 @@ export function createUploadMap(canvas, captionEl, onLanded) {
       // fading it out on a fixed clock the attempt may have long
       // outlived.
       closeAttempt(hostKey)
+      // STOCK DOOR (2026-10-01, "tessera-web-stock-arcs"): Foundation's stock SDK has no
+      // onWriteAttemptStart, so attemptStart() above never fires and nothing else pushes an upload
+      // trip. On stock the gold arc is drawn HERE, at LAND (onShardUploaded) -- honest: stock cannot
+      // see dial start. Same trip shape and same LINE_FLOOR_MS (4 s) floor the shared path already
+      // uses; not open (nothing to hold), so tripFade() fades it on the existing SHARD_FADE_MS law.
+      // One arc per landed shard, only for a host with geo (skipped above otherwise). T-SDK bundle
+      // folds this branch away.
+      if (IS_STOCK) trips.push({ lat: geo.lat, lon: geo.lon, hostKey, dir: 'upload', startedAt: now, open: false, visibleUntil: now + LINE_FLOOR_MS, fadeAt: now })
     }
 
     // STATIONARY PIN: upload only (see the function-level comment above

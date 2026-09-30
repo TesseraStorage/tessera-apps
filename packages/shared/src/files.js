@@ -13,7 +13,15 @@
 import { PinnedObject, encodedSize } from './sdk.js'
 import { proxyOrigin } from './utils.js'
 import { DOOR, IS_STOCK } from './door.js'
-import { armCatalogTray, disarmCatalogTray } from './stock-catalog.js'
+import { armCatalogTray, disarmCatalogTray, catalogState } from './stock-catalog.js'
+
+// STOCK DOOR diary line: what the passive catalog tap has seen this tab (counters only, no keys).
+function stockTapLine() {
+  const c = catalogState()
+  return 'catalog-tap reqs=' + c.reqs + ' bodies=' + c.okBodies + ' status=' + c.lastStatus +
+    ' err=' + c.lastErr + ' list_n=' + (c.list ? c.list.length : 0) + ' geo_n=' + c.geoN +
+    ' age_ms=' + (c.ageMs == null ? '-' : c.ageMs)
+}
 import { checkTunnelReachable } from './interceptor.js'
 
 // SECTOR_SIZE (2026-09-17, "tessera-web-progress-denom"): fixed by the RHP4
@@ -1015,15 +1023,19 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
   // "no filename if that is awkward; size is enough" instruction.
   diaryReset()
   diaryPush('add-start size_bytes=' + (file ? file.size : '-'))
-  // STOCK DOOR (2026-09-30, "tessera-web-stock-face"): the catalog list THIS job's stock SDK fetched.
-  // Passive: stock-catalog.js hands us the body of the SDK's own GET /hosts response (clone) the
-  // moment it arrives -- no second GET /hosts, no sdk.hosts() call. 'tray n=' is only a label
-  // shared with the T-SDK diary; here it is the indexd usable catalog, not a Tessera plate.
+  // STOCK DOOR (2026-09-30, "tessera-web-stock-face"; REVISED 2026-10-01, "tessera-web-stock-arcs"):
+  // the catalog list the stock SDK fetched. Passive: stock-catalog.js hands us the body of the SDK's
+  // own GET /hosts response (clone) and REMEMBERS the latest one for this tab (unlock / page load /
+  // write all count). If a body was already seen, print it now as src=catalog-cached (age_ms=); if the
+  // SDK fetches a fresh one during this Add, print that too as src=catalog. No second GET /hosts, no
+  // sdk.hosts() call. 'tray n=' is only a label shared with the T-SDK diary; it is the indexd usable
+  // catalog, not a Tessera plate.
   let stockTrayPrinted = false
   if (IS_STOCK) {
-    armCatalogTray((list) => {
+    const printCatalogTray = (list, src, ageMs) => {
       stockTrayPrinted = true
-      if (!list || !list.length) { diaryPush('tray n=0 tray=- src=catalog'); return }
+      const tail = ' src=' + src + (ageMs != null ? ' age_ms=' + ageMs : '')
+      if (!list || !list.length) { diaryPush('tray n=0 tray=-' + tail); return }
       const entries = list.map((h) => {
         const key = hex8(h && h.publicKey)
         const cc = h && h.countryCode
@@ -1031,8 +1043,12 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
         if (typeof h.latitude === 'number' && typeof h.longitude === 'number') return key + ':' + cc + ':' + h.latitude + ':' + h.longitude
         return key + ':' + cc
       }).join(',')
-      diaryPush('tray n=' + list.length + ' tray=' + entries + ' src=catalog')
-    })
+      diaryPush('tray n=' + list.length + ' tray=' + entries + tail)
+    }
+    diaryPush(stockTapLine())
+    const seen = catalogState()
+    if (seen.list) printCatalogTray(seen.list, 'catalog-cached', seen.ageMs)
+    armCatalogTray((list, src) => printCatalogTray(list, src || 'catalog', null))
   }
   // BAR HOLD (2026-09-16, "tessera-web-encode-hold"): "The progress
   // bar does not exist yet. No bar during drop, Ready wait, or
@@ -1870,6 +1886,7 @@ export async function downloadToDisk(sdk, objOrId, filename, onProgress) {
     // actually finished buffering -- no invented intermediate ticks,
     // and the 100% is real completion, not a click-time lie.
     diaryPush('phase=downloading')
+  if (IS_STOCK) diaryPush(stockTapLine())
     if (onProgress) onProgress({ percent: 0 })
     const resp = await relayFetch('GET', 'download/' + objectId.replace(/\//g, ''))
     const blob = await resp.blob()
