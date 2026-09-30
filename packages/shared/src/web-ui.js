@@ -2933,16 +2933,35 @@ async function doUpload(file, destPathOverride) {
       // success/fail always has the freshest values, with no separate
       // "final tick" bookkeeping needed.
       if (marks) addMarks = marks
-      // ARC-AT-ATTEMPT (2026-09-29, "tessera-web-attempt-arcs-2"):
-      // files.js forwards T-SDK's onWriteAttemptStart through this
-      // SAME onProgress channel under a distinct 'attempt' stage so it
-      // can never be mistaken for a real landed tick below -- must
-      // not touch the encoding animation / sawRealShardProgress / any
-      // DOM label, only the map. files.js's own onWriteAttemptStart
-      // already checks addSettled before calling tick('attempt', ...),
-      // so a late attempt from this Add cannot reach here after
-      // settle; this branch has no further gate of its own.
+      // ARC-AT-ATTEMPT (2026-09-29, "tessera-web-attempt-arcs-2";
+      // REVISED 2026-09-30, live operator report -- "still seeing
+      // arcs while 'encoding...' shows... arc should start when the
+      // write file command is fired"): per-slab encoding always fully
+      // completes before that slab's shards are attempted (confirmed
+      // in upload::ShardUpload::spawn_slab -- encode_shards() runs to
+      // completion before any spawn_write for that slab), and the
+      // arc itself now fires post-warmup (see hosts.rs::write_sector,
+      // 2026-09-30 fix) -- so by the time ANY attempt tick reaches
+      // here, this Add's real encoding is genuinely done. The
+      // remaining problem was purely the STALE WORD: it used to only
+      // stop on the first LANDED shard, so it kept animating through
+      // the entire attempt-start-to-first-land window even though
+      // encoding had already finished. Fixed here: the first attempt
+      // tick now also stops the encoding animation, same as a real
+      // land tick does below -- but deliberately does NOT touch
+      // `sawRealShardProgress` (still land-gated further down) --
+      // an attempt that immediately fails before any real shard ever
+      // lands must still classify as "no real progress" in
+      // classifyAddFailure, not silently look like it shipped
+      // something.
       if (stage === 'attempt') {
+        stopEncodingAnim()
+        // Replace the now-frozen "encoding…" text so nothing stale
+        // lingers on screen while the arc is up -- real percent/N-of-M
+        // text arrives on the very next tick (first land) and
+        // overwrites this immediately via the normal patchState path
+        // below; this is just the bridge between the two.
+        r.progressLabel.textContent = 'uploading\u2026'
         if (mapController && hostKey) mapController.attemptStart(hostKey)
         return
       }
