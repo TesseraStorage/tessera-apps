@@ -47,6 +47,7 @@ import {
 } from './store.js'
 import { formatBytes, esc, fmtDateTime, $ } from './utils.js'
 import { hasWrappedVault, unwrapAppKey } from './vault.js'
+import { IS_STOCK } from './door.js'
 
 const PREFIX = 'tesseraweb'
 
@@ -62,6 +63,8 @@ const PREFIX = 'tesseraweb'
 // undefined (-> installFetchInterceptor's default 'proxy' mode) in
 // desktop, matching Drop's own desktop behavior exactly.
 function FETCH_MODE() {
+  // STOCK DOOR (2026-09-30): indexer calls go straight to catalog.tessera.storage (CORS *), no /idx/ rewrite.
+  if (IS_STOCK) return 'direct'
   return (window.tesseraDesktop && window.tesseraDesktop.isDesktop) ? undefined : 'idx'
 }
 
@@ -503,9 +506,19 @@ export async function mountApp(container) {
   root = typeof container === 'string' ? document.querySelector(container) : container
   if (!root) throw new Error('Container not found')
 
+  // STOCK DOOR (2026-09-30, "tessera-web-stock-face"): stock is for an ALREADY-LATCHED vault only
+  // (unlock -> files -> add / download). It cannot finish invite / Register on catalog, so with no
+  // tesseraweb.* vault we do not mount Welcome/Invite at all -- send the visitor to the Tessera door.
+  if (IS_STOCK && !hasWrappedVault(PREFIX)) { renderNeedTicket(); return }
+
   root.innerHTML = SKELETON
   root.classList.remove('boot-spinner')
   cacheRefs()
+  if (IS_STOCK) {
+    // Visible door label: "Stock" here vs "Tessera" on /web/.
+    document.title = 'Stock'
+    root.querySelectorAll('.logo, .welcome-brand').forEach(el => { el.textContent = 'Stock' })
+  }
 
   // wire events
   r.btnCreate.addEventListener('click', onShowInvite)
@@ -974,6 +987,19 @@ function kickoffPreload() {
 
 // ── boot ─────────────────────────────────────────────────
 
+// STOCK DOOR: no-vault landing. Plain link to the Tessera door; nothing is minted or registered here.
+function renderNeedTicket() {
+  root.classList.remove('boot-spinner')
+  document.title = 'Stock'
+  root.innerHTML = '<section class="panel welcome-panel">' +
+    '<span class="welcome-brand">Stock</span>' +
+    '<div class="welcome-center">' +
+    '<p>This browser is not set up yet.</p>' +
+    '<p style="margin-top:14px">Get your ticket on the Tessera page first, then come back here.</p>' +
+    '<p style="margin-top:14px"><a class="btn btn-outline btn-lg" href="/v2/tessera/web/">Go to Tessera</a></p>' +
+    '</div></section>'
+}
+
 async function doBoot() {
   kickoffPreload()  // fire-and-forget, after first paint
 
@@ -1022,6 +1048,8 @@ async function doBoot() {
     r.unlockStatus.textContent = ''
     r.unlockPassword.value = ''
     replaceScreen('unlock')
+  } else if (IS_STOCK) {
+    renderNeedTicket()   // e.g. after Forget this device: no vault -> back to the Tessera door
   } else {
     replaceScreen('welcome')
   }
@@ -1030,6 +1058,7 @@ async function doBoot() {
 // ── create: invite ────────────────────────────────────────
 
 function onShowInvite() {
+  if (IS_STOCK) { renderNeedTicket(); return }
   r.inviteInput.value = ''
   r.inviteStatus.textContent = ''
   goto('invite')
@@ -1180,6 +1209,7 @@ async function completeCreateAfterWords() {
 // ── i have my words (recover) ────────────────────────────
 
 function onShowRecover() {
+  if (IS_STOCK) { renderNeedTicket(); return }
   r.recoverPhraseInput.value = ''
   r.recoverStatus.textContent = ''
   goto('recover')

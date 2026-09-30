@@ -6,6 +6,8 @@ import {
   encodedSize,
 } from '../vendor/sia-storage/dist/index.js'
 import { installFetchInterceptor, installWebTransportShim, registerSdk } from './interceptor.js'
+import { IS_STOCK } from './door.js'
+import { installCatalogTap } from './stock-catalog.js'
 
 let _ready = false
 export async function initSia(fetchMode) {
@@ -20,7 +22,9 @@ export async function initSia(fetchMode) {
   // unchanged and keeps Drop's default (shimmed, tunnel-based) behavior
   // byte-for-byte identical -- only Web's initSia('idx') call skips the
   // shim install.
-  if (fetchMode !== 'idx') installWebTransportShim()    // must install BEFORE initWasm — WebTransport is called during WASM init
+  // STOCK DOOR (2026-09-30): native WebTransport too -- never shimmed, no /__tunnel__.
+  if (IS_STOCK) installCatalogTap()   // passive read of the SDK's own /hosts response (stock-catalog.js)
+  if (fetchMode !== 'idx' && !IS_STOCK) installWebTransportShim()    // must install BEFORE initWasm — WebTransport is called during WASM init
   installFetchInterceptor(fetchMode)
   await initWasm()
   _ready = true
@@ -38,4 +42,8 @@ export { Builder, AppKey, PinnedObject, generateRecoveryPhrase, validateRecovery
 // own nginx location block (drop's /idx/ vs web's /idx/) does the actual
 // routing, keyed off window.location.pathname at request time via
 // proxyOrigin() in utils.js. No prefix parameter needed here.
-export function getIndexerUrl() { return 'https://index.tessera.storage' }
+// STOCK DOOR (2026-09-30, "tessera-web-stock-face"): the stock face aims the SDK straight at
+// catalog.tessera.storage (nginx -> indexd :19982, no hostfilter, no plate, no occupy). The stock
+// build sets fetch mode 'direct' (interceptor returns immediately), so this URL leaves the browser as-is
+// (catalog answers Access-Control-Allow-Origin: *, verified). T-SDK build folds the ternary to index.
+export function getIndexerUrl() { return IS_STOCK ? 'https://catalog.tessera.storage' : 'https://index.tessera.storage' }

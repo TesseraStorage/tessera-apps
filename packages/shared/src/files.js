@@ -12,6 +12,8 @@
 
 import { PinnedObject, encodedSize } from './sdk.js'
 import { proxyOrigin } from './utils.js'
+import { DOOR, IS_STOCK } from './door.js'
+import { armCatalogTray, disarmCatalogTray } from './stock-catalog.js'
 import { checkTunnelReachable } from './interceptor.js'
 
 // SECTOR_SIZE (2026-09-17, "tessera-web-progress-denom"): fixed by the RHP4
@@ -74,6 +76,7 @@ function diaryReset() {
   // same Copy stays valid/readable under this header, per the packet's
   // own "old Add lines stay valid under it" instruction.
   const header = 'tessera-web-debug v=2 utc=' + new Date().toISOString() +
+    ' door=' + DOOR +
     ' url=' + window.location.href +
     ' bundle=' + (bundleSrc ? bundleSrc.getAttribute('src') : '-') +
     ' debug=1'
@@ -1012,6 +1015,25 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
   // "no filename if that is awkward; size is enough" instruction.
   diaryReset()
   diaryPush('add-start size_bytes=' + (file ? file.size : '-'))
+  // STOCK DOOR (2026-09-30, "tessera-web-stock-face"): the catalog list THIS job's stock SDK fetched.
+  // Passive: stock-catalog.js hands us the body of the SDK's own GET /hosts response (clone) the
+  // moment it arrives -- no second GET /hosts, no sdk.hosts() call. 'tray n=' is only a label
+  // shared with the T-SDK diary; here it is the indexd usable catalog, not a Tessera plate.
+  let stockTrayPrinted = false
+  if (IS_STOCK) {
+    armCatalogTray((list) => {
+      stockTrayPrinted = true
+      if (!list || !list.length) { diaryPush('tray n=0 tray=- src=catalog'); return }
+      const entries = list.map((h) => {
+        const key = hex8(h && h.publicKey)
+        const cc = h && h.countryCode
+        if (!cc) return key
+        if (typeof h.latitude === 'number' && typeof h.longitude === 'number') return key + ':' + cc + ':' + h.latitude + ':' + h.longitude
+        return key + ':' + cc
+      }).join(',')
+      diaryPush('tray n=' + list.length + ' tray=' + entries + ' src=catalog')
+    })
+  }
   // BAR HOLD (2026-09-16, "tessera-web-encode-hold"): "The progress
   // bar does not exist yet. No bar during drop, Ready wait, or
   // encoding." The OLD tick('preparing', 0) / tick('uploading', 5)
@@ -1166,6 +1188,14 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
   const printTrayLine = () => {
     if (trayPrinted) return
     trayPrinted = true
+    // STOCK DOOR: no Tessera plate exists (no sdk.lastWritePlate in Foundation's SDK). The
+    // catalog list was printed by the armed catalog tap at Add-start; at settle, only say so
+    // if no catalog /hosts response was ever observed for this job (SDK used its own cache).
+    if (IS_STOCK) {
+      disarmCatalogTray()
+      if (!stockTrayPrinted) diaryPush('tray n=0 tray=- src=catalog-none-observed')
+      return
+    }
     let plate = []
     try { plate = sdk.lastWritePlate() || [] } catch (e) { plate = [] }
     if (!plate.length) {
@@ -1290,7 +1320,10 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
     )
   }
 
-  const uploadOptions = { dataShards, parityShards, onShardUploaded, onWriteAttemptStart }
+  // STOCK DOOR: Foundation's stock SDK has no onWriteAttemptStart -- not passed, not imported.
+  const uploadOptions = IS_STOCK
+    ? { dataShards, parityShards, onShardUploaded }
+    : { dataShards, parityShards, onShardUploaded, onWriteAttemptStart }
   // FIX (2026-09-16, "tessera-web-inflight-v2" — REVISES/CORRECTS
   // "tessera-web-inflight" 2026-09-14): the OLD `maxInflight: 10` line
   // that used to sit here has been REMOVED, not just renamed --

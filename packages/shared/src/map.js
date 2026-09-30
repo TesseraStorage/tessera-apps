@@ -79,6 +79,8 @@ export function normalizeHostKey(key) {
 // Desktop's renderer is loaded via file:// though -- a relative fetch
 // there can never reach anything real, so only THAT case needs
 // redirecting to the local bundled proxy on :3099.
+import { IS_STOCK } from './door.js'
+import { catalogGeo } from './stock-catalog.js'
 const GEO_URL = '/v2/tessera/geo/geo.json'
 function geoFetchUrl() {
   if (typeof window !== 'undefined' && window.tesseraDesktop && window.tesseraDesktop.isDesktop) {
@@ -187,7 +189,9 @@ async function ensureAssets() {
   if (_loadPromise) return _loadPromise
   _loadPromise = (async () => {
     const [geoResp] = await Promise.all([
-      fetch(geoFetchUrl()).catch(() => null),
+      // STOCK DOOR: no geo.json (that is a Tessera-side fleet geo file). Pins come only from the
+      // catalog HostInfo the stock SDK itself fetched (stock-catalog.js catalogGeo).
+      IS_STOCK ? Promise.resolve(null) : fetch(geoFetchUrl()).catch(() => null),
       loadScript(TOPOJSON_CLIENT_URL).catch(() => null),
     ])
     if (geoResp && geoResp.ok) {
@@ -232,6 +236,7 @@ function geoLookup(hostKey) {
   if (!_geoCache) return null
   for (const candidate of normalizeHostKey(hostKey) || []) {
     if (_geoCache[candidate]) return _geoCache[candidate]
+    if (IS_STOCK && catalogGeo[candidate]) return catalogGeo[candidate]
   }
   return null
 }

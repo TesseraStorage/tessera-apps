@@ -11,6 +11,7 @@
     "proxy": "node packages/proxy/index.js",
     "dev:web": "node scripts/start-dev.js web",
     "build:web": "npm -w apps/web run build",
+    "build:stock": "cd apps/stock && ../../node_modules/.bin/vite build",
     "prod:web": "node packages/proxy/index.js --static apps/web/dist",
     "dev:desktop": "node scripts/start-dev.js desktop",
     "build:desktop": "npm -w apps/desktop run build",

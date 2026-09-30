@@ -4,6 +4,8 @@ import { resolve } from 'path'
 export default defineConfig({
   root: '.',
   base: './',
+  // DOOR (2026-09-30): T-SDK face. See packages/shared/src/door.js.
+  define: { __TESSERA_DOOR__: JSON.stringify('t-sdk') },
   build: {
     outDir: 'dist',
     target: 'esnext',
