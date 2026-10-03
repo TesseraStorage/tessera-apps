@@ -1061,6 +1061,17 @@ async function doBoot() {
   // so there is no "Back before the root" and a latched browser's Unlock
   // is never one Back-tap away from being skipped.
   if (hasWrappedVault(PREFIX)) {
+    // BUGFIX (2026-10-03, "tessera-web-unlock-stuck-disabled"): onUnlock()
+    // sets btnUnlock.disabled = true before its await and only ever resets
+    // it to false on a FAILURE path (wrong password / timeout) -- the
+    // SUCCESS path (enterFiles()) never re-enables it, because the button
+    // is simply hidden once Files is showing. Lock (onLock -> doBoot())
+    // re-enters this exact branch to show Unlock again, but this reset
+    // block only ever cleared unlockStatus/unlockPassword, not the
+    // disabled flag it inherited from the prior successful unlock -- so
+    // after one full unlock -> lock cycle, Unlock's button renders
+    // permanently gray/unclickable with no error text. Reset it here too.
+    r.btnUnlock.disabled = false
     r.unlockStatus.textContent = ''
     r.unlockPassword.value = ''
     replaceScreen('unlock')
