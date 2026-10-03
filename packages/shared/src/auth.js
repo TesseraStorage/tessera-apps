@@ -66,6 +66,23 @@ export function clearCredentials(prefix = 'tessera') {
   const LS = lsKeys(prefix)
   Object.values(LS).forEach(k => localStorage.removeItem(k))
   clearVault(prefix)
+  clearAccountScopedCache(prefix)
+}
+
+// BUGFIX (2026-10-03, "tessera-web-stale-map-cross-account"): files.js's
+// mapshards/folders/mapshown records are keyed ONLY by this browser's
+// PREFIX (`<prefix>.mapshards` etc, see files.js), never by appId --
+// they were written on the assumption of one account per browser/prefix
+// for life. Reported symptom: lock an account, then create a BRAND NEW
+// one on the same browser -- the new account's map still shows the old
+// account's shard pins, because nothing ever cleared those keys when the
+// old appId stopped being this browser's active account. Kept as inline
+// literal suffixes (not imported from files.js) to avoid a new
+// auth.js -> files.js import edge; must stay byte-identical to
+// files.js's own VIRTUAL_FOLDERS_KEY_SUFFIX / MAP_SHARDS_KEY_SUFFIX /
+// MAP_SHOWN_KEY_SUFFIX if those ever change.
+function clearAccountScopedCache(prefix) {
+  ;['.folders', '.mapshards', '.mapshown'].forEach(suffix => localStorage.removeItem(prefix + suffix))
 }
 
 /**
@@ -104,6 +121,12 @@ export async function beginConnection(prefix = 'tessera', fetchMode) {
 
   let { appId } = getSaved(prefix)
   if (!appId) {
+    // Minting a BRAND NEW identity for this browser/prefix -- wipe any
+    // mapshards/folders/mapshown cache left behind by whatever account
+    // previously occupied this prefix (see clearAccountScopedCache's own
+    // comment above). Without this, a fresh account inherits the prior
+    // occupant's map pins/folder tree on first boot.
+    clearAccountScopedCache(prefix)
     appId = randomAppId()
     persist({ appId }, prefix)
   }
@@ -287,6 +310,11 @@ export async function beginRecovery(phrase, onStatus, prefix = 'tessera', fetchM
 
   let { appId } = getSaved(prefix)
   if (!appId) {
+    // Same reasoning as beginConnection() above: recovering onto a
+    // browser/prefix slot with no current appId means whatever account
+    // last occupied it is gone -- wipe its leftover mapshards/folders
+    // cache before this recovery writes a new appId into it.
+    clearAccountScopedCache(prefix)
     appId = randomAppId()
     persist({ appId }, prefix)
   }
