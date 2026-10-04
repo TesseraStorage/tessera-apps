@@ -1419,7 +1419,23 @@ async function enterFiles(appKeyHex) {
   // "Show map" click needs it, without blocking refreshFiles() or
   // anything else on this screen. Previously this only ever ran lazily
   // on first Add or first manual "Show map" click.
-  ensureMapController()
+  // ACCOUNT-BOUNDARY RESEED (2026-10-03, "tessera-web-stale-map-cross-
+  // account"): ensureMapController()'s own seedPins() comment says it
+  // "only runs ONCE, at controller creation ... never re-seeded on every
+  // showMap()" -- true, but that assumed one account per page life.
+  // mapController is a module-level singleton that OUTLIVES Lock ->
+  // create-a-different-account on the same page (no full reload), so a
+  // second account's entry into Files reused the FIRST account's already-
+  // seeded pins forever. enterFiles() is the one call site that fires at
+  // every real account-session boundary (Unlock, Ready, first boot) --
+  // force a reset()+reseed here specifically (not inside
+  // ensureMapController()/showMap(), which must stay a no-op reseed so a
+  // live session's own landings are never double-counted, per that
+  // comment). Cheap and synchronous (localStorage-only), safe before any
+  // Add has started for this account's session.
+  const mc = ensureMapController()
+  mc.reset()
+  mc.seedPins(getMapShards())
   // MAP SHOW/HIDE PREFERENCE (2026-09-16, "tessera-web-handoff
   // adjustments"): "On first visit, initial state is hidden w/ the
   // link shown... If a user has chosen to hide map, then subsequent
@@ -3676,20 +3692,12 @@ function onLock() {
 }
 
 function onRemoveBrowser() {
-  // ⚠️ UNUSED AS OF 2026-09-16 ("tessera-web-handoff adjustments"):
-  // the "Remove from this browser" button + its horizontal separator
-  // line were removed from the #filesScreen skeleton (and this
-  // function's own event listener wire-up removed) per explicit
-  // operator instruction: "Remove both. The space freed up is now
-  // part of the files-list area." This function's LOGIC was
-  // deliberately kept, unused, at the operator's own request ("Leave
-  // it in the code. Note it prominently.") in case the capability
-  // needs to be re-exposed elsewhere later -- it is not dead code by
-  // accident, do not delete it as part of an unrelated cleanup pass
-  // without checking with the operator first. clearCredentials(PREFIX)
-  // is still a real, correct call (deletes tesseraweb.* -- see the
-  // "lock / remove from this browser" law above); only the UI entry
-  // point to reach this function is gone.
+  // RE-EXPOSED 2026-09-29 as "Forget this device" (btnForgetDevice, see
+  // the header skeleton above) -- the "UNUSED as of 2026-09-16" state
+  // this comment used to describe no longer applies; this IS live and
+  // reachable. clearCredentials(PREFIX) below deletes tesseraweb.aid/
+  // akey/vault AND (as of "tessera-web-stale-map-cross-account") the
+  // account-scoped mapshards/folders/mapshown cache.
   if (!confirm('Remove Tessera from this browser? You will need your 12 words to come back.')) return
   // DESKTOP PARITY: same as onLock() -- disconnect the native bridge too,
   // otherwise the main process keeps an authenticated native SDK instance
@@ -3698,6 +3706,38 @@ function onRemoveBrowser() {
     window.tesseraDesktop.siaDisconnect().catch(() => {})
   }
   clearCredentials(PREFIX)
+  // THOROUGH WIPE (2026-10-03, "tessera-web-stale-map-cross-account",
+  // operator instruction: "forget this device should remove all saved
+  // material from the browser, including cookies"). clearCredentials()
+  // only ever touched this app's OWN localStorage keys -- it left three
+  // other things that can carry one account's data into the next on the
+  // same browser/page life:
+  //   1. sessionStorage -- not currently written by this app, but a
+  //      future feature could use it; wipe it defensively so "forget
+  //      this device" is a real guarantee, not a list of keys someone
+  //      has to remember to extend.
+  //   2. document.cookie -- same reasoning; this app sets none today
+  //      (grepped, confirmed), but nginx/CDN/third-party scripts on this
+  //      origin could set one in the future, and a stale cookie is
+  //      exactly the kind of leftover this button exists to prevent.
+  //   3. mapController -- the module-level map canvas singleton (see
+  //      ensureMapController() below) OUTLIVES this call (no full page
+  //      reload happens here); its closure-scoped pins/trips arrays are
+  //      the actual rendered dots and are independent of the
+  //      localStorage this just cleared. Null it out (and mapShown's
+  //      cached boolean) so the NEXT account's first enterFiles() call
+  //      creates a genuinely fresh controller instead of reusing one
+  //      already painted with this account's shards.
+  try { sessionStorage.clear() } catch (_) {}
+  try {
+    document.cookie.split(';').forEach(c => {
+      const name = c.split('=')[0].trim()
+      if (!name) return
+      document.cookie = name + '=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/'
+    })
+  } catch (_) {}
+  mapController = null
+  mapShown = false
   patchState({
     sdk: null, accountReady: false,
     files: [], selectedIdx: -1, totals: { count: 0, totalBytes: 0 },
