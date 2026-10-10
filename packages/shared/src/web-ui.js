@@ -1332,7 +1332,7 @@ async function doBoot() {
       if (cliCfg && cliCfg.appId && cliCfg.appKey) {
         const saved = getSaved(PREFIX)
         if (saved.appId !== cliCfg.appId) {
-          const sdk = await reconnectWithAppKey(cliCfg.appId, cliCfg.appKey, FETCH_MODE())
+          const sdk = await reconnectWithAppKey(cliCfg.appId, cliCfg.appKey, FETCH_MODE(), PREFIX)
           if (sdk) {
             // adoptSharedIdentity() always clears any old vault first (see
             // its own comment in auth.js), so this browser never has a
@@ -1627,7 +1627,7 @@ async function onUnlock() {
     // does not add any new network call.
     let timer = null
     const sdk = await Promise.race([
-      reconnectWithAppKey(appId, appKeyHex, FETCH_MODE()),
+      reconnectWithAppKey(appId, appKeyHex, FETCH_MODE(), PREFIX),
       new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('reconnect timed out')), 10000) }),
     ]).finally(() => { if (timer) clearTimeout(timer) })
     if (!sdk) {
