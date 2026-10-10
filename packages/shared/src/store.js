@@ -44,6 +44,14 @@ let state = {
   status: '',
   toast: '',
 
+  // HANDOFF (P6 Decision 2): state machine state surfaced for the web shell
+  // (and later the FE re-mint button). Values come from handoff.js's
+  // HANDOFF_STATES — 'idle' | 'confirm_replace' | 'consuming' | 'consumed' |
+  // 'resuming' | 'resumed' | 'recovery' | 'already_linked' | 'link_expired' |
+  // 'activating' | 'linked' | 'linking_pending' | 'cancelled' | 'error'.
+  // Holds a STATE NAME only, never a code or key.
+  handoffState: 'idle',
+
   // Progress (upload)
   progress: null,              // { stage, percent, elapsed } | null
 }

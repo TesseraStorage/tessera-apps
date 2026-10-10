@@ -48,6 +48,13 @@ import {
 import { formatBytes, esc, fmtDateTime, $ } from './utils.js'
 import { hasWrappedVault, unwrapAppKey } from './vault.js'
 import { IS_STOCK } from './door.js'
+// HANDOFF (P6 Task 2, Decision 2): fragment consumption + resume marker +
+// best-effort activate. See handoff.js's own header for the secret rules.
+import {
+  HANDOFF_STATES, HANDOFF_PENDING_MESSAGE,
+  extractHandoffCode, mapLegacyHandoffToFragment, scrubHandoffFragment,
+  readHandoffMarker, createHandoffMachine,
+} from './handoff.js'
 
 const PREFIX = 'tesseraweb'
 
@@ -103,6 +110,7 @@ function cacheRefs() {
   const ids = [
     'header', 'readyDot', 'storageSummary', 'btnLock', 'btnForgetDevice',
     'welcomeScreen', 'btnCreate', 'btnHaveWords',
+    'handoffScreen', 'handoffTitle', 'handoffBody', 'btnHandoffPrimary', 'btnHandoffCancel', 'handoffStatus',
     'inviteScreen', 'inviteInput', 'btnInviteContinue', 'inviteRequestLink', 'inviteStatus',
     'requestStubScreen', 'btnRequestBack',
     'wordsScreen', 'wordsText', 'btnWordsSaved', 'wordsStatus',
@@ -171,6 +179,22 @@ const SKELETON = /*html*/`
         <button id="btnHaveWords" class="btn btn-outline btn-lg">I already have an account</button>
       </p>
     </div>
+  </section>
+
+  <!-- HANDOFF (P6 Decision 2): "#handoff=<code>" consumption + linking
+       state machine. One screen renders every state (replace-device
+       confirm, linking in progress, expired, error) — text/buttons only;
+       the code itself is never written into this markup or any diary. -->
+  <section id="handoffScreen" class="panel column-screen hidden">
+    <h2 id="handoffTitle">Link this device</h2>
+    <p id="handoffBody"></p>
+    <p style="margin-top:14px">
+      <button id="btnHandoffPrimary" class="btn btn-primary btn-lg hidden">Continue</button>
+    </p>
+    <p style="margin-top:8px">
+      <button id="btnHandoffCancel" class="btn btn-outline btn-lg hidden">Back</button>
+    </p>
+    <p id="handoffStatus" class="status-text"></p>
   </section>
 
   <!-- CREATE: INVITE -->
@@ -539,6 +563,8 @@ export async function mountApp(container) {
   // wire events
   r.btnCreate.addEventListener('click', onShowInvite)
   r.btnHaveWords.addEventListener('click', onShowRecover)
+  r.btnHandoffPrimary.addEventListener('click', onHandoffPrimary)
+  r.btnHandoffCancel.addEventListener('click', onHandoffCancel)
   r.btnInviteContinue.addEventListener('click', onInviteContinue)
   r.inviteRequestLink.addEventListener('click', e => { e.preventDefault(); onShowRequestStub() })
   r.btnRequestBack.addEventListener('click', () => history.back())
@@ -937,6 +963,7 @@ function gotoFolder(path) {
 
 function renderScreen(s) {
   r.welcomeScreen.classList.toggle('hidden', s !== 'welcome')
+  r.handoffScreen.classList.toggle('hidden', s !== 'handoff')
   r.inviteScreen.classList.toggle('hidden', s !== 'invite')
   r.requestStubScreen.classList.toggle('hidden', s !== 'requestStub')
   r.wordsScreen.classList.toggle('hidden', s !== 'words')
@@ -946,7 +973,7 @@ function renderScreen(s) {
   r.unlockScreen.classList.toggle('hidden', s !== 'unlock')
   r.filesScreen.classList.toggle('hidden', s !== 'files')
   r.filesLayout.classList.toggle('hidden', s !== 'files')
-  r.header.classList.toggle('hidden', s === 'loading' || s === 'welcome')
+  r.header.classList.toggle('hidden', s === 'loading' || s === 'welcome' || s === 'handoff')
   // VIEWPORT-CLAMPED PANEL (2026-09-16, "tessera-web-handoff
   // adjustments" bug report): re-measure every time Files becomes the
   // visible screen -- the panel was display:none an instant ago, so
@@ -1016,8 +1043,191 @@ function renderNeedTicket() {
     '</div></section>'
 }
 
+// ── handoff (P6 Decision 2) ──────────────────────────────
+//
+// FE mints a one-time code and redirects to /web/#handoff=<code> (fragment
+// only — see handoff.js). This block renders the linking state machine and
+// drives registration through the SAME connectWithInvite()/set-password
+// pipeline the invite screen uses. The code is never persisted (the marker
+// holds the returned connectKey), never logged, and never put into diary
+// lines; the legacy "?handoff=" query is remapped to the fragment by the
+// web shell before mount, and again here as defense-in-depth.
+
+let handoffMachine = null
+let _handoffAbandoned = false
+
+function handoffStorage() {
+  try { return window.sessionStorage } catch (_) { return null }
+}
+
+function hasLocalIdentity() {
+  return !!getSaved(PREFIX).appId || hasWrappedVault(PREFIX)
+}
+
+// Headless registration start (200 path and reload resume): the consumed
+// connectKey is used exactly like a typed invite — the in-page approval
+// POST — then the existing set-password screen finishes registration via
+// completeRegistration(). Never called before the marker is written.
+async function resumeHandoffRegistration(connectKey) {
+  const { builder, appId, phrase } = await connectWithInvite(connectKey, PREFIX, FETCH_MODE())
+  patchState({ builder, appId, phrase })
+  goToSetPassword('inviteRegister')
+}
+
+// renderHandoffState(): the machine's onState hook. Screens are driven from
+// STATE NAMES only — no handler here ever receives or displays the code.
+function renderHandoffState(state, detail = {}) {
+  patchState({ handoffState: state })
+  const onHandoffScreen = getState().screen === 'handoff'
+  switch (state) {
+    case HANDOFF_STATES.CONFIRM_REPLACE:
+      r.handoffTitle.textContent = 'Replace this device?'
+      r.handoffBody.textContent = 'This browser already has an account saved. Linking the account you chose will replace it on this device.'
+      r.btnHandoffPrimary.textContent = 'Replace this device'
+      r.btnHandoffPrimary.disabled = false
+      r.btnHandoffPrimary.classList.remove('hidden')
+      r.btnHandoffCancel.textContent = 'Keep this device'
+      r.btnHandoffCancel.classList.remove('hidden')
+      r.handoffStatus.textContent = ''
+      break
+    case HANDOFF_STATES.CONSUMING:
+    case HANDOFF_STATES.CONSUMED:
+    case HANDOFF_STATES.RESUMING:
+      if (!onHandoffScreen) break
+      r.handoffTitle.textContent = 'Linking this device'
+      r.handoffBody.textContent = 'Setting up your account on this browser.'
+      r.btnHandoffPrimary.classList.add('hidden')
+      r.btnHandoffCancel.classList.add('hidden')
+      r.handoffStatus.textContent = state === HANDOFF_STATES.RESUMING ? 'Finishing setup\u2026' : 'Connecting\u2026'
+      break
+    case HANDOFF_STATES.RESUMED:
+      // connectWithInvite() done; the set-password screen owns the flow now.
+      // Update this screen's own text anyway (minus the now-stale status) in
+      // case browser Back lands here after leaving for the password screen.
+      r.handoffTitle.textContent = 'Linking this device'
+      r.handoffBody.textContent = 'Almost done \u2014 finish setup on the password screen.'
+      r.btnHandoffPrimary.classList.add('hidden')
+      r.btnHandoffCancel.classList.add('hidden')
+      r.handoffStatus.textContent = ''
+      break
+    case HANDOFF_STATES.RECOVERY:
+      // 409 with no local identity: the account is already registered — the
+      // 12 words are the only way onto this device. Reuse the recovery screen
+      // (replace, not push: Back must not return to the stale linking screen).
+      r.recoverStatus.textContent = 'This account is already set up on another device. Enter your 12 words to bring it to this browser.'
+      r.recoverPhraseStep.classList.remove('hidden')
+      r.recoverApprovalStep.classList.add('hidden')
+      replaceScreen('recover')
+      break
+    case HANDOFF_STATES.ALREADY_LINKED:
+      // 409 with a local identity (or activate 409): no-op, nothing to do.
+      showToast(detail.message || 'This device already has an account.')
+      if (onHandoffScreen) resumeNormalBoot()
+      break
+    case HANDOFF_STATES.LINK_EXPIRED:
+      if (!onHandoffScreen) break
+      r.handoffTitle.textContent = 'Link expired'
+      r.handoffBody.textContent = 'This link is no longer valid \u2014 links last 5 minutes. Go back to your account page and choose "Connect this device" again.'
+      r.btnHandoffPrimary.classList.add('hidden')
+      r.btnHandoffCancel.textContent = 'Back'
+      r.btnHandoffCancel.classList.remove('hidden')
+      r.handoffStatus.textContent = ''
+      break
+    case HANDOFF_STATES.ACTIVATING:
+      if (!onHandoffScreen) break
+      r.handoffTitle.textContent = 'Linking this device'
+      r.handoffBody.textContent = 'Finishing the link.'
+      r.btnHandoffPrimary.classList.add('hidden')
+      r.btnHandoffCancel.classList.add('hidden')
+      r.handoffStatus.textContent = 'Almost done\u2026'
+      break
+    case HANDOFF_STATES.LINKED:
+      if (onHandoffScreen) {
+        showToast(detail.message || 'This device is linked.')
+        resumeNormalBoot()
+      }
+      break
+    case HANDOFF_STATES.LINKING_PENDING:
+      showToast(detail.message || HANDOFF_PENDING_MESSAGE)
+      if (onHandoffScreen) resumeNormalBoot()
+      break
+    case HANDOFF_STATES.ERROR:
+      if (!onHandoffScreen) {
+        showToast('Could not link this device. You can still use it with your 12 words.')
+        break
+      }
+      r.handoffTitle.textContent = 'Could not link'
+      r.handoffBody.textContent = detail.phase === 'resume'
+        ? 'Setup did not finish. Check your connection and try again.'
+        : 'The link could not be used. Check your connection and try again, or create a new link from your account page.'
+      r.btnHandoffPrimary.textContent = 'Try again'
+      r.btnHandoffPrimary.disabled = false
+      r.btnHandoffPrimary.classList.remove('hidden')
+      r.btnHandoffCancel.textContent = 'Back'
+      r.btnHandoffCancel.classList.remove('hidden')
+      r.handoffStatus.textContent = ''
+      break
+    case HANDOFF_STATES.CANCELLED:
+    case HANDOFF_STATES.IDLE:
+      if (onHandoffScreen) resumeNormalBoot()
+      break
+    default:
+      break
+  }
+}
+
+function onHandoffPrimary() {
+  if (!handoffMachine) return
+  const current = getState().handoffState
+  if (current !== HANDOFF_STATES.CONFIRM_REPLACE && current !== HANDOFF_STATES.ERROR) return
+  const action = current === HANDOFF_STATES.ERROR ? handoffMachine.retry : handoffMachine.confirmReplace
+  r.btnHandoffPrimary.disabled = true
+  Promise.resolve(action()).finally(() => { r.btnHandoffPrimary.disabled = false })
+}
+
+function onHandoffCancel() {
+  if (handoffMachine) handoffMachine.cancel()
+}
+
+// Leave the handoff flow for good (Back/expired/cancelled/already-linked):
+// scrub any leftover fragment, remember the abandonment so a re-entrant
+// doBoot() never loops back into it, then boot normally.
+function resumeNormalBoot() {
+  _handoffAbandoned = true
+  scrubHandoffFragment(window)
+  handoffMachine = null
+  doBoot()
+}
+
+// Boot entry. Returns true when a handoff was present and owns the boot.
+async function initHandoff() {
+  if (_handoffAbandoned || IS_STOCK || isDesktop()) return false
+  mapLegacyHandoffToFragment(window)  // shell already did this; idempotent
+  const marker = readHandoffMarker(handoffStorage())
+  const code = extractHandoffCode(window.location.hash)
+  if (!marker && !code) return false
+
+  replaceScreen('handoff')  // also scrubs "#handoff=<code>" from the URL
+  handoffMachine = createHandoffMachine({
+    storage: handoffStorage(),
+    hasLocalIdentity,
+    resumeRegistration: resumeHandoffRegistration,
+    onState: renderHandoffState,
+    log: line => console.warn('[tessera-web] handoff: ' + line),
+    scrubUrl: () => scrubHandoffFragment(window),
+  })
+  await handoffMachine.start({ code })
+  return true
+}
+
 async function doBoot() {
   kickoffPreload()  // fire-and-forget, after first paint
+
+  // HANDOFF (P6 Decision 2): a "#handoff=<code>" fragment or a same-tab
+  // resume marker takes precedence over every other boot path — the user
+  // just asked FE to link THIS device. Web-only: stock has no account
+  // session and desktop never fetches /api/v1 (Decision 3).
+  if (await initHandoff()) return
 
   // SHARED IDENTITY, DESKTOP ONLY (2026-09-30): if a standalone
   // tessera-cli login already exists in ~/.tessera, that is the
@@ -1177,6 +1387,12 @@ async function onSetPassword() {
       const sdk = await completeRegistration(builder, phrase, PREFIX)
       patchState({ sdk, builder: null })
       registerSdk(sdk)
+      // HANDOFF (P6 Decision 2b/c): registration is now complete — move the
+      // same-tab resume marker to "registered" and run the best-effort
+      // activate (401/403/404 → "linking now, refresh shortly"; 409 →
+      // already-linked no-op). No-op outside the handoff flow. Never
+      // awaited: activation must not delay the words screen.
+      if (handoffMachine) handoffMachine.noteRegistrationComplete().catch(() => {})
       _pendingPassword = pw  // wrap happens after words are confirmed, once the key exists
       r.wordsText.textContent = phrase
       goto('words')

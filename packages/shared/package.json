@@ -5,8 +5,12 @@
   "main": "src/index.js",
   "exports": {
     ".": "./src/index.js",
+    "./handoff": "./src/handoff.js",
     "./web-ui": "./src/web-ui.js",
     "./style.css": "./src/style.css"
+  },
+  "scripts": {
+    "test": "node --test"
   },
   "files": [
     "src",

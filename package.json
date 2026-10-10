@@ -8,6 +8,7 @@
     "apps/desktop"
   ],
   "scripts": {
+    "test": "npm -w @tessera/shared run test",
     "proxy": "node packages/proxy/index.js",
     "dev:web": "node scripts/start-dev.js web",
     "build:web": "npm -w apps/web run build",

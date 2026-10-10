@@ -23,9 +23,17 @@
 </head>
 <body>
 <div id="app-root" class="boot-spinner">Loading Tessera&hellip;</div>
+<!-- HANDOFF (P6 Decision 2): legacy "?handoff=<code>" links (spec §6.3) are
+     remapped to the fragment immediately, before the app boots, so the code
+     leaves the query string at once and no later request/Referer/diary line
+     can carry it. The initial request that carried the query is loggable by
+     design (plan ruling); from here on the code is fragment-only, and
+     fragments are never sent to the server. -->
 <script type="module">
+  import { mapLegacyHandoffToFragment } from '@tessera/shared/handoff'
   import { mountApp } from '@tessera/shared/web-ui'
   import '@tessera/shared/style.css'
+  mapLegacyHandoffToFragment(window)
   mountApp('#app-root')
 </script>
 </body>
