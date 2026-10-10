@@ -15,6 +15,15 @@ import { fileURLToPath } from 'url'
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const TESSERA_CLI_VERSION = process.env.TESSERA_CLI_VERSION || 'v1.5.0'
 
+// Build-time-only override (Decision 6 / Task 6): when set, bundle the named
+// local tessera-cli binary instead of downloading a pinned release. It exists
+// so the pinned v1.5.0 (which lacks `account`) can be swapped for a locally
+// built HEAD during development/testing of the balance panel. This is a
+// build-time scaffolding hook, NOT a runtime switch: it is never set in the
+// CI defaults (release builds always take the pinned download above), and the
+// binary it copies is the ordinary resource that fetch:cli already publishes.
+const TESSERA_CLI_PATH = process.env.TESSERA_CLI_PATH || ''
+
 const ASSET_BY_PLATARCH = {
   'darwin-x64': 'tessera-darwin-amd64',
   'darwin-arm64': 'tessera-darwin-arm64',
@@ -48,14 +57,30 @@ function download(url, dest) {
 }
 
 async function main() {
+  const outDir = path.join(__dirname, '..', 'resources', 'cli')
+  fs.mkdirSync(outDir, { recursive: true })
+
+  // Build-time override: copy a locally built binary instead of downloading.
+  // Taken before the platform/asset check so a local build for the host is
+  // enough (no release asset needed). Never reached in CI defaults.
+  if (TESSERA_CLI_PATH) {
+    if (!fs.existsSync(TESSERA_CLI_PATH)) {
+      throw new Error(`TESSERA_CLI_PATH set but not found: ${TESSERA_CLI_PATH}`)
+    }
+    const isWin = process.platform === 'win32'
+    const outFile = path.join(outDir, isWin ? 'tessera-cli.exe' : 'tessera-cli')
+    fs.copyFileSync(TESSERA_CLI_PATH, outFile)
+    if (!isWin) fs.chmodSync(outFile, 0o755)
+    console.log(`[fetch-cli] TESSERA_CLI_PATH override: ${TESSERA_CLI_PATH} -> ${outFile} (${fs.statSync(outFile).size} bytes)`)
+    return
+  }
+
   const k = key()
   const asset = ASSET_BY_PLATARCH[k]
   if (!asset) {
     console.error(`[fetch-cli] no tessera-cli asset mapping for ${k} — skipping bundling`)
     return
   }
-  const outDir = path.join(__dirname, '..', 'resources', 'cli')
-  fs.mkdirSync(outDir, { recursive: true })
   const isWin = asset.endsWith('.exe')
   const outFile = path.join(outDir, isWin ? 'tessera-cli.exe' : 'tessera-cli')
 

@@ -324,7 +324,7 @@ test('desktop bridge throw maps to desktop_bridge_error, still no fetch', async 
   assert.equal(counter.calls, 0)
 })
 
-test('desktop createTopup rejects without any fetch call', async () => {
+test('desktop createTopup rejects as desktop_topup_unsupported without any fetch call', async () => {
   const counter = { calls: 0 }
   const client = createBillingClient({
     isDesktop: true,
@@ -332,7 +332,7 @@ test('desktop createTopup rejects without any fetch call', async () => {
     fetchFn: explodingFetch(counter),
   })
   await assert.rejects(client.createTopup('5'), (err) => {
-    assert.equal(err.code, 'desktop_bridge_unavailable')
+    assert.equal(err.code, 'desktop_topup_unsupported')
     return true
   })
   assert.equal(counter.calls, 0)

@@ -339,11 +339,17 @@ export function createBillingClient(opts = {}) {
       return request('/account')
     },
 
-    /** Creates a hosted invoice; desktop has no session and never POSTs. */
+    /**
+     * Creates a hosted invoice; web-only. The desktop shell never POSTs
+     * /api/v1 and does not render the top-up form (canTopup=false links to
+     * `topup_url` instead), so reaching here is a programming error, not a
+     * bridge outage — reject with an explicit unsupported code rather than
+     * reusing `desktop_bridge_unavailable` (which means "no bridge").
+     */
     createTopup(amountUsd) {
       if (isDesktop()) {
         return Promise.reject(
-          new BillingApiError(0, { detail: { error: 'desktop_bridge_unavailable' } }),
+          new BillingApiError(0, { detail: { error: 'desktop_topup_unsupported' } }),
         )
       }
       return request('/billing/topup', {
