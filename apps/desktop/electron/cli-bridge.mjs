@@ -150,7 +150,14 @@ export function readConfig() {
 //
 // Error mapping is deliberately narrow so the renderer can pick the right
 // state (web-ui.js loadBilling):
-//   - no_credentials      → no/expired credential: "run `tessera login`".
+//   - no_credentials      → no/expired/unusable credential: "run `tessera
+//                           login`". The CLI has three dead-credential
+//                           messages: errNoBillingCredentials ("no billing
+//                           credentials"), describeBillingError's 401
+//                           ("authentication failed"), and errSessionExpired
+//                           ("session expired", a stored-but-rejected human
+//                           session that the CLI clears). All three mean the
+//                           same thing to the user.
 //   - desktop_bridge_*    → the bridge itself failed (binary missing, spawn
 //                           error, unparseable JSON).
 //   - account_unavailable → the CLI reached the service and it answered with
@@ -167,7 +174,7 @@ export async function account() {
     return { ok: false, code, error: r.error }
   }
   const text = `${r.stderr || ''}\n${r.stdout || ''}`
-  const code = /no billing credentials|authentication failed/i.test(text)
+  const code = /no billing credentials|authentication failed|session expired/i.test(text)
     ? 'no_credentials'
     : 'account_unavailable'
   return { ok: false, code, error: (r.stderr || text).trim() }

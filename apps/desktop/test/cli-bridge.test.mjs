@@ -19,6 +19,7 @@
 import { register } from 'node:module'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -30,11 +31,20 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const { app } = await import('electron')
 const cli = await import('../electron/cli-bridge.mjs')
 
-const BIN = process.platform === 'win32' ? 'tessera-cli.exe' : 'tessera-cli'
+const WINDOWS = process.platform === 'win32'
+const BIN = WINDOWS ? 'tessera-cli.exe' : 'tessera-cli'
 
-// A tiny stand-in for the real binary: behaviour keys off STUB_ACCOUNT_MODE,
-// which the bridge forwards through process.env. It is a Node script so the
-// test stays portable across the CI matrix (no shell assumed).
+// The stub stand-in for the real binary is a POSIX executable (shebang Node
+// script). Windows cannot CreateProcess a non-PE `tessera-cli.exe`, and Node
+// refuses to spawn a `.cmd`/`.bat` without `shell:true`, which the bridge does
+// not use — so the stub-based mapping tests are skipped on win32 and covered
+// on Linux/macOS. Windows still exercises the real bundled PE binary via the
+// integration test at the bottom (skipped only when none is bundled).
+const STUB_SKIP = WINDOWS
+  ? 'POSIX CLI stub cannot run on win32; mapping logic covered on Linux/macOS'
+  : false
+
+// Behaviour keys off STUB_ACCOUNT_MODE, forwarded through process.env.
 const STUB = `#!/usr/bin/env node
 'use strict'
 const mode = process.env.STUB_ACCOUNT_MODE || 'ok'
@@ -46,6 +56,10 @@ if (mode === 'auth') {
   process.stderr.write("ERROR: authentication failed — run 'tessera signup' or 'tessera login' to sign in\\n")
   process.exit(1)
 }
+if (mode === 'session') {
+  process.stderr.write('ERROR: session expired \\u2014 run \\u0060tessera login --email \\u2026\\u0060\\n')
+  process.exit(1)
+}
 if (mode === 'service') {
   process.stderr.write('ERROR: billing API error (HTTP 503): processor_error\\n')
   process.exit(1)
@@ -53,6 +67,10 @@ if (mode === 'service') {
 if (mode === 'badjson') {
   process.stdout.write('not json')
   process.exit(0)
+}
+if (mode === 'unknownfail') {
+  process.stdout.write('garbage, not a known error')
+  process.exit(1)
 }
 process.stdout.write(JSON.stringify({
   billing_id: 'b_1', kind: 'human', status: 'active', balance_usd: '7.50',
@@ -91,7 +109,7 @@ async function withStub(mode, fn) {
   }
 }
 
-test('account() returns {ok:true, account} from tessera account --json', async () => {
+test('account() returns {ok:true, account} from tessera account --json', { skip: STUB_SKIP }, async () => {
   await withStub('ok', async () => {
     const r = await cli.account()
     assert.equal(r.ok, true)
@@ -101,7 +119,7 @@ test('account() returns {ok:true, account} from tessera account --json', async (
   })
 })
 
-test('account() maps a missing credential to no_credentials', async () => {
+test('account() maps a missing credential to no_credentials', { skip: STUB_SKIP }, async () => {
   await withStub('no_creds', async () => {
     const r = await cli.account()
     assert.equal(r.ok, false)
@@ -109,7 +127,7 @@ test('account() maps a missing credential to no_credentials', async () => {
   })
 })
 
-test('account() maps a rejected/expired credential to no_credentials', async () => {
+test('account() maps a rejected credential (authentication failed) to no_credentials', { skip: STUB_SKIP }, async () => {
   await withStub('auth', async () => {
     const r = await cli.account()
     assert.equal(r.ok, false)
@@ -117,7 +135,15 @@ test('account() maps a rejected/expired credential to no_credentials', async () 
   })
 })
 
-test('account() maps a service error to account_unavailable (retryable, not "login")', async () => {
+test('account() maps an expired stored session to no_credentials', { skip: STUB_SKIP }, async () => {
+  await withStub('session', async () => {
+    const r = await cli.account()
+    assert.equal(r.ok, false)
+    assert.equal(r.code, 'no_credentials')
+  })
+})
+
+test('account() maps a service error to account_unavailable (retryable, not "login")', { skip: STUB_SKIP }, async () => {
   await withStub('service', async () => {
     const r = await cli.account()
     assert.equal(r.ok, false)
@@ -125,7 +151,15 @@ test('account() maps a service error to account_unavailable (retryable, not "log
   })
 })
 
-test('account() maps unparseable stdout to desktop_bridge_error', async () => {
+test('account() maps an unrecognized non-zero exit with unparseable stdout to account_unavailable', { skip: STUB_SKIP }, async () => {
+  await withStub('unknownfail', async () => {
+    const r = await cli.account()
+    assert.equal(r.ok, false)
+    assert.equal(r.code, 'account_unavailable')
+  })
+})
+
+test('account() maps unparseable stdout to desktop_bridge_error', { skip: STUB_SKIP }, async () => {
   await withStub('badjson', async () => {
     const r = await cli.account()
     assert.equal(r.ok, false)
@@ -153,10 +187,38 @@ test('account() maps a missing bundled binary to desktop_bridge_unavailable', as
 
 // Integration: the real bundled binary (fetch:cli / TESSERA_CLI_PATH) with an
 // empty TESSERA_HOME must report no_credentials offline and deterministically.
+//
+// Gated on the binary actually supporting `account`, not merely existing:
+// the pinned release v1.5.0 predates `account`, so a matrix leg that only ran
+// `fetch:cli` (no TESSERA_CLI_PATH local build / Task 7 stub) must skip rather
+// than fail on "Unknown command: account".
 const bundled = path.join(__dirname, '..', 'resources', 'cli', BIN)
+function bundledAccountSupported() {
+  if (!fs.existsSync(bundled)) return false
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'tessera-probe-'))
+  try {
+    execFileSync(bundled, ['account', '--json'], {
+      env: { ...process.env, TESSERA_HOME: home },
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    return true
+  } catch (e) {
+    // v1.5.0 answers "Unknown command: account"; a capable build answers
+    // "no billing credentials" and exits 1 too, so probe the output.
+    return !/unknown command/i.test(`${e.stdout || ''}${e.stderr || ''}`)
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+}
+const BUNDLED_SKIP = !fs.existsSync(bundled)
+  ? 'no bundled tessera-cli (run npm run fetch:cli / TESSERA_CLI_PATH)'
+  : bundledAccountSupported()
+    ? false
+    : 'bundled tessera-cli lacks `account` (pinned release; needs a local build or Task 7 stub)'
 test(
   'bundled binary reports no_credentials against an empty TESSERA_HOME',
-  { skip: !fs.existsSync(bundled) ? 'no bundled tessera-cli (run npm run fetch:cli)' : false },
+  { skip: BUNDLED_SKIP },
   async () => {
     const savedHome = process.env.TESSERA_HOME
     const savedPackaged = app.isPackaged

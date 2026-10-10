@@ -410,6 +410,8 @@ function describeTopupError(err) {
       return 'Checkout is not switched on yet. Please try again later.'
     case 'processor_error':
       return 'The payment processor refused to open an invoice. Try again in a moment.'
+    case 'desktop_topup_unsupported':
+      return 'Top-ups are created from your account page in a browser.'
     case 'desktop_bridge_unavailable':
     case 'desktop_bridge_error':
     case 'no_credentials':
