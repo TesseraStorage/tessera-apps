@@ -140,6 +140,46 @@ export function readConfig() {
   return { appId: cfg.app_id, appKey: seedHex, indexerUrl: cfg.indexer_url || INDEXER_URL }
 }
 
+// ── Billing account (P6 Decision 6) ──────────────────────
+//
+// The desktop balance panel is fed by the bundled CLI's `tessera account
+// --json`, never by a desktop fetch of /api/v1 (billing.js's desktop branch
+// makes no request at all). The CLI prints the moneyd account object
+// unchanged (plus a non-secret `credential` tag) on success, and a
+// human-readable error on stderr with a non-zero status otherwise.
+//
+// Error mapping is deliberately narrow so the renderer can pick the right
+// state (web-ui.js loadBilling):
+//   - no_credentials      → no/expired/unusable credential: "run `tessera
+//                           login`". The CLI has three dead-credential
+//                           messages: errNoBillingCredentials ("no billing
+//                           credentials"), describeBillingError's 401
+//                           ("authentication failed"), and errSessionExpired
+//                           ("session expired", a stored-but-rejected human
+//                           session that the CLI clears). All three mean the
+//                           same thing to the user.
+//   - desktop_bridge_*    → the bridge itself failed (binary missing, spawn
+//                           error, unparseable JSON).
+//   - account_unavailable → the CLI reached the service and it answered with
+//                           an error (network/server); retryable, so it must
+//                           NOT look like a missing credential.
+export async function account() {
+  const r = await runJSON(['account', '--json'])
+  if (r.ok) return { ok: true, account: r.data }
+  if (r.error) {
+    // Binary not bundled, spawn failure, or the CLI's stdout was not JSON.
+    const code = /bad JSON/i.test(r.error)
+      ? 'desktop_bridge_error'
+      : 'desktop_bridge_unavailable'
+    return { ok: false, code, error: r.error }
+  }
+  const text = `${r.stderr || ''}\n${r.stdout || ''}`
+  const code = /no billing credentials|authentication failed|session expired/i.test(text)
+    ? 'no_credentials'
+    : 'account_unavailable'
+  return { ok: false, code, error: (r.stderr || text).trim() }
+}
+
 function env() {
   return { ...process.env }
 }

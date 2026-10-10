@@ -12,6 +12,16 @@
 
 import { PinnedObject, encodedSize } from './sdk.js'
 import { proxyOrigin } from './utils.js'
+import { DOOR, IS_STOCK } from './door.js'
+import { armCatalogTray, disarmCatalogTray, catalogState } from './stock-catalog.js'
+
+// STOCK DOOR diary line: what the passive catalog tap has seen this tab (counters only, no keys).
+function stockTapLine() {
+  const c = catalogState()
+  return 'catalog-tap reqs=' + c.reqs + ' bodies=' + c.okBodies + ' status=' + c.lastStatus +
+    ' err=' + c.lastErr + ' list_n=' + (c.list ? c.list.length : 0) + ' geo_n=' + c.geoN +
+    ' age_ms=' + (c.ageMs == null ? '-' : c.ageMs)
+}
 import { checkTunnelReachable } from './interceptor.js'
 
 // SECTOR_SIZE (2026-09-17, "tessera-web-progress-denom"): fixed by the RHP4
@@ -22,6 +32,17 @@ import { checkTunnelReachable } from './interceptor.js'
 // (see UPLOAD_MAX_BUFFERED_SLABS's own comment above for the same 4 MiB
 // figure used in its byte-budget math).
 const SECTOR_SIZE = 4 * 1024 * 1024
+
+// DOWNLOAD FADE FLOOR (2026-09-30, "tessera-web-dl-arc-floor"): "2.5s
+// is 2500ms. Do not reuse the write 4000ms constant. Name a download
+// floor constant." A deliberately separate value from map.js's
+// LINE_FLOOR_MS (which governs write/gold attempt-hold minimums, a
+// different trip family entirely) -- this one governs how long the
+// download's own together-fade (fadeDownloadTrips) must wait before
+// firing, so a fast one-sector read still shows its cyan arc for a
+// human-visible moment instead of vanishing before the eye registers
+// it.
+const DL_FADE_FLOOR_MS = 2500
 
 // DEBUG DIARY (2026-09-24, "tessera-web-debug-log"): "Instrumented diary is
 // on only when the page URL has query debug=1." Read LIVE from
@@ -63,6 +84,7 @@ function diaryReset() {
   // same Copy stays valid/readable under this header, per the packet's
   // own "old Add lines stay valid under it" instruction.
   const header = 'tessera-web-debug v=2 utc=' + new Date().toISOString() +
+    ' door=' + DOOR +
     ' url=' + window.location.href +
     ' bundle=' + (bundleSrc ? bundleSrc.getAttribute('src') : '-') +
     ' debug=1'
@@ -1001,6 +1023,33 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
   // "no filename if that is awkward; size is enough" instruction.
   diaryReset()
   diaryPush('add-start size_bytes=' + (file ? file.size : '-'))
+  // STOCK DOOR (2026-09-30, "tessera-web-stock-face"; REVISED 2026-10-01, "tessera-web-stock-arcs"):
+  // the catalog list the stock SDK fetched. Passive: stock-catalog.js hands us the body of the SDK's
+  // own GET /hosts response (clone) and REMEMBERS the latest one for this tab (unlock / page load /
+  // write all count). If a body was already seen, print it now as src=catalog-cached (age_ms=); if the
+  // SDK fetches a fresh one during this Add, print that too as src=catalog. No second GET /hosts, no
+  // sdk.hosts() call. 'tray n=' is only a label shared with the T-SDK diary; it is the indexd usable
+  // catalog, not a Tessera plate.
+  let stockTrayPrinted = false
+  if (IS_STOCK) {
+    const printCatalogTray = (list, src, ageMs) => {
+      stockTrayPrinted = true
+      const tail = ' src=' + src + (ageMs != null ? ' age_ms=' + ageMs : '')
+      if (!list || !list.length) { diaryPush('tray n=0 tray=-' + tail); return }
+      const entries = list.map((h) => {
+        const key = hex8(h && h.publicKey)
+        const cc = h && h.countryCode
+        if (!cc) return key
+        if (typeof h.latitude === 'number' && typeof h.longitude === 'number') return key + ':' + cc + ':' + h.latitude + ':' + h.longitude
+        return key + ':' + cc
+      }).join(',')
+      diaryPush('tray n=' + list.length + ' tray=' + entries + tail)
+    }
+    diaryPush(stockTapLine())
+    const seen = catalogState()
+    if (seen.list) printCatalogTray(seen.list, 'catalog-cached', seen.ageMs)
+    armCatalogTray((list, src) => printCatalogTray(list, src || 'catalog', null))
+  }
   // BAR HOLD (2026-09-16, "tessera-web-encode-hold"): "The progress
   // bar does not exist yet. No bar during drop, Ready wait, or
   // encoding." The OLD tick('preparing', 0) / tick('uploading', 5)
@@ -1139,6 +1188,73 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
   // onShardUploaded event below -- never a fresh hosts()/GET call. Read
   // at Add-end (both success and fail) to print bag_n + an 8-hex list.
   const bagHosts = new Set()
+  // DEBUG DIARY (2026-09-29, "tessera-web-attempt-arcs-2"): the FULL
+  // tray this write was handed, not tick hosts. trayHosts (the Set of
+  // hosts actually dialed so far, via onWriteAttemptStart below) exists
+  // to answer "did ANY attempt ever start" for the tray n=0 fallback;
+  // the printed line itself reads the full plate back from
+  // sdk.lastWritePlate() (a RAM read of this write's own one GET
+  // /hosts, never a second fetch) the first time any attempt fires --
+  // by then refresh_hosts() has unconditionally already completed,
+  // since upload_object can't pick a host to dial before its queue is
+  // populated. "bag= on add-end stays tick hosts. Do not merge tray
+  // into bag" -- kept fully separate from bagHosts above.
+  const trayHosts = new Set()
+  let trayPrinted = false
+  const printTrayLine = () => {
+    if (trayPrinted) return
+    trayPrinted = true
+    // STOCK DOOR: no Tessera plate exists (no sdk.lastWritePlate in Foundation's SDK). The
+    // catalog list was printed by the armed catalog tap at Add-start; at settle, only say so
+    // if no catalog /hosts response was ever observed for this job (SDK used its own cache).
+    if (IS_STOCK) {
+      disarmCatalogTray()
+      if (!stockTrayPrinted) diaryPush('tray n=0 tray=- src=catalog-none-observed')
+      return
+    }
+    let plate = []
+    try { plate = sdk.lastWritePlate() || [] } catch (e) { plate = [] }
+    if (!plate.length) {
+      diaryPush('tray n=0 tray=-')
+      return
+    }
+    const entries = plate.map((h) => {
+      const key = hex8(h && h.publicKey)
+      const cc = h && h.countryCode
+      // "If the body has keys and no country, print 8hex only and cite
+      // the missing field. Do not invent CC." -- countryCode always
+      // exists per the Host TS interface, but may be an empty string
+      // for a host that genuinely has none; that is the "missing
+      // field" case, not an invented one.
+      if (!cc) return key
+      if (typeof h.latitude === 'number' && typeof h.longitude === 'number') {
+        return key + ':' + cc + ':' + h.latitude + ':' + h.longitude
+      }
+      return key + ':' + cc
+    }).join(',')
+    diaryPush('tray n=' + plate.length + ' tray=' + entries)
+  }
+  // ARC-AT-ATTEMPT (2026-09-29, "tessera-web-attempt-arcs-2"): T-SDK's
+  // onWriteAttemptStart fires once per write attempt, at dial /
+  // WriteSector start (see sia_storage::upload::ShardUpload::
+  // spawn_write) -- the beginning of the effort, not the shard land.
+  // Forwarded to web-ui.js's mapController via the SAME onProgress
+  // channel onShardUploaded already uses, under a distinct stage
+  // string ('attempt') so it can never be confused with a real landed
+  // tick. "After this Add settles (ok or fail), no new arcs for it" --
+  // addSettled (below) is checked here, at the source, so a late
+  // attempt from this write's own still-running background WASM task
+  // (which has no cancel hook -- see the uploadPromise.catch() comment
+  // further down) can never reach the map once this function has
+  // already returned/thrown.
+  const onWriteAttemptStart = (attempt) => {
+    const hostKey = attempt && attempt.hostKey
+    if (!hostKey) return
+    trayHosts.add(hostKey)
+    printTrayLine()
+    if (addSettled) return
+    tick('attempt', 0, hostKey)
+  }
   // DEBUG DIARY: dt_ms on the per-shard line below is a diary-only delta
   // (Date.now() - the previous onShardUploaded call), separate from the
   // stall watchdog's own lastProgressAt clock further down -- observability
@@ -1220,7 +1336,10 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
     )
   }
 
-  const uploadOptions = { dataShards, parityShards, onShardUploaded }
+  // STOCK DOOR: Foundation's stock SDK has no onWriteAttemptStart -- not passed, not imported.
+  const uploadOptions = IS_STOCK
+    ? { dataShards, parityShards, onShardUploaded }
+    : { dataShards, parityShards, onShardUploaded, onWriteAttemptStart }
   // FIX (2026-09-16, "tessera-web-inflight-v2" — REVISES/CORRECTS
   // "tessera-web-inflight" 2026-09-14): the OLD `maxInflight: 10` line
   // that used to sit here has been REMOVED, not just renamed --
@@ -1640,6 +1759,13 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
     // is the exact instant (win or lose) after which a late/orphan
     // onShardUploaded tick must never repaint the row to 'pinning'.
     addSettled = true
+    // TRAY FALLBACK (2026-09-29, "tessera-web-attempt-arcs-2"): "If the
+    // write dies before any list exists: tray n=0 tray=- at settle."
+    // Normal case already printed this via onWriteAttemptStart's first
+    // call; this only fires when zero attempts ever happened at all
+    // (e.g. NoMoreHosts immediately) -- printTrayLine()'s own
+    // trayPrinted guard makes this a no-op otherwise.
+    printTrayLine()
   }
   // SERIAL LOCK release (2026-09-20, "tessera-web-add-overlap-stall";
   // extended 2026-09-24 to run on EVERY exit, not just success -- see
@@ -1760,6 +1886,7 @@ export async function downloadToDisk(sdk, objOrId, filename, onProgress) {
     // actually finished buffering -- no invented intermediate ticks,
     // and the 100% is real completion, not a click-time lie.
     diaryPush('phase=downloading')
+  if (IS_STOCK) diaryPush(stockTapLine())
     if (onProgress) onProgress({ percent: 0 })
     const resp = await relayFetch('GET', 'download/' + objectId.replace(/\//g, ''))
     const blob = await resp.blob()
@@ -1864,6 +1991,25 @@ export async function downloadToDisk(sdk, objOrId, filename, onProgress) {
   }
 
   if (onProgress) onProgress({ percent: 0 })
+  // ASSEMBLE-READY THRESHOLD (2026-09-30, "tessera-web-dl-arc-fade"):
+  // "10 shards (or the SDK/object-ready signal that already means we
+  // can assemble)... 10 is MinShards for 10+20." No richer SDK signal
+  // exists for this -- `DownloadOptions.onShardDownloaded` (this same
+  // handler) and the returned `ReadableStream` are the only download
+  // events sia_storage_wasm.d.ts exposes; there is no isComplete flag
+  // on ShardProgress and no separate "assembled" event. `expectedShards`
+  // (above) is the WRITE-side denominator (encodedSize()'s full 10+20
+  // = 30-shards-per-slab count, used only for the percent bar -- left
+  // untouched, not this packet's job). The real per-object MinShards
+  // total is `slabs_len(obj) * dataShards` -- reusing the SAME
+  // obj.slabs() accessor the diary code just above already calls, not
+  // a second counter that could disagree with the SDK's own object
+  // metadata. Falls back to a bare `dataShards` (one slab) if slab
+  // metadata is ever unreadable, matching the same single-slab
+  // assumption `expectedShards`'s own fallback (line ~1881) already
+  // makes.
+  const minShardsTotal = (slabs_len(obj) || 1) * dataShards
+  let dlFadeSent = false
   const downloadOptions = onProgress
     ? { onShardDownloaded: (ev) => {
         shardsLanded += 1
@@ -1879,7 +2025,54 @@ export async function downloadToDisk(sdk, objOrId, filename, onProgress) {
           'dl-shard i=' + (ev && ev.shardIndex) + ' n/M=' + shardsLanded + '/' + expectedShards +
           ' host8=' + host8 + ' dt_ms=' + (ev && ev.elapsedMs)
         )
-        onProgress({ hostKey: ev && ev.hostKey, direction: 'download', transferMs: ev && ev.elapsedMs, percent: pct })
+        // FADE-TOGETHER (2026-09-30, "tessera-web-dl-arc-fade";
+        // FLOOR added 2026-09-30, "tessera-web-dl-arc-floor"): "when
+        // this Download has 10 shards... fade every cyan trip for this
+        // job at once... If a late download tick arrives after that
+        // fade started, do not draw a new cyan line for this job."
+        // `crossedNow` is true on the exact tick that reaches
+        // minShardsTotal -- that tick's own arc still gets drawn.
+        // Every tick strictly after that has `dlFadeSent` already
+        // true, so `hostKey` is omitted from its payload -- web-ui.js's
+        // `if (mapController && hostKey)` guard (unchanged) then simply
+        // never draws that trip, with no new suppression flag needed
+        // on that side. This suppression takes effect immediately on
+        // crossing, regardless of the floor wait below -- "late ticks
+        // still draw no new blue" is unconditional.
+        //
+        // FLOOR: "that together-fade must not start before this
+        // Download has been visible for 2.5 seconds... Clock starts at
+        // the first cyan trip for this job." Reuses `dlFirstTickAt`
+        // (set on the very first tick, above) rather than inventing a
+        // second clock -- every tick up to and including the crossing
+        // tick draws a real cyan arc, so "first tick" and "first cyan
+        // trip" are the same instant here. "Visible time before the
+        // pack-fade = max(2.5s, time-to-MinShards)": if the floor is
+        // already satisfied by the time MinShards lands, fire
+        // dlComplete on this same tick/frame (unchanged from
+        // dl-arc-fade); otherwise schedule ONE deferred synthetic tick
+        // (dlComplete only, no hostKey, no percent -- so it cannot
+        // repaint the success label if the Add has already finished by
+        // then) for exactly the remaining wait.
+        const crossedNow = !dlFadeSent && shardsLanded >= minShardsTotal
+        if (crossedNow) dlFadeSent = true
+        let fireNow = false
+        if (crossedNow) {
+          const elapsedSinceFirstTrip = Date.now() - (dlFirstTickAt || Date.now())
+          const remaining = DL_FADE_FLOOR_MS - elapsedSinceFirstTrip
+          if (remaining <= 0) {
+            fireNow = true
+          } else if (onProgress) {
+            setTimeout(() => { onProgress({ direction: 'download', dlComplete: true }) }, remaining)
+          }
+        }
+        onProgress({
+          hostKey: (dlFadeSent && !crossedNow) ? undefined : (ev && ev.hostKey),
+          direction: 'download',
+          transferMs: ev && ev.elapsedMs,
+          percent: pct,
+          dlComplete: fireNow,
+        })
       } }
     : {}
   // FIX (2026-09-16, "tessera-web-inflight-v2"): operator's stated

@@ -1,0 +1,16 @@
+{
+  "name": "@tessera/stock",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "vite build"
+  },
+  "dependencies": {
+    "@tessera/shared": "*",
+    "@siafoundation/sia-storage": "0.0.14"
+  },
+  "devDependencies": {
+    "vite": "^6.0.0"
+  }
+}

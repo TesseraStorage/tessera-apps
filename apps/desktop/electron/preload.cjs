@@ -44,6 +44,7 @@ contextBridge.exposeInMainWorld('tesseraDesktop', {
   syncConflicts: () => ipcRenderer.invoke('tessera-sync-conflicts'),
   serviceStatus: () => ipcRenderer.invoke('tessera-service-status'),
   getCliConfig: () => ipcRenderer.invoke('tessera-cli-config'),
+  billingAccount: () => ipcRenderer.invoke('tessera-billing-account'),
   serviceInstall: () => ipcRenderer.invoke('tessera-service-install'),
   serviceUninstall: () => ipcRenderer.invoke('tessera-service-uninstall'),
   trashList: () => ipcRenderer.invoke('tessera-trash-list'),

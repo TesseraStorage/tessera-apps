@@ -47,6 +47,20 @@ import {
 } from './store.js'
 import { formatBytes, esc, fmtDateTime, $ } from './utils.js'
 import { hasWrappedVault, unwrapAppKey } from './vault.js'
+import { IS_STOCK } from './door.js'
+// HANDOFF (P6 Task 2, Decision 2): fragment consumption + resume marker +
+// best-effort activate. See handoff.js's own header for the secret rules.
+import {
+  HANDOFF_STATES, HANDOFF_PENDING_MESSAGE,
+  extractHandoffCode, mapLegacyHandoffToFragment, scrubHandoffFragment,
+  readHandoffMarker, createHandoffMachine,
+} from './handoff.js'
+// BILLING (P6 Task 3, Decision 3): account dashboard fields, closed top-up,
+// signed-out state, desktop bridge hook. billing.js owns the /api/v1 client
+// and the rendering; this file only wires the screen and the header button.
+import {
+  BillingApiError, createBillingClient, createBillingView,
+} from './billing.js'
 
 const PREFIX = 'tesseraweb'
 
@@ -62,6 +76,8 @@ const PREFIX = 'tesseraweb'
 // undefined (-> installFetchInterceptor's default 'proxy' mode) in
 // desktop, matching Drop's own desktop behavior exactly.
 function FETCH_MODE() {
+  // STOCK DOOR (2026-09-30): indexer calls go straight to catalog.tessera.storage (CORS *), no /idx/ rewrite.
+  if (IS_STOCK) return 'direct'
   return (window.tesseraDesktop && window.tesseraDesktop.isDesktop) ? undefined : 'idx'
 }
 
@@ -98,8 +114,10 @@ const r = {}
 
 function cacheRefs() {
   const ids = [
-    'header', 'readyDot', 'storageSummary', 'btnLock', 'btnForgetDevice',
+    'header', 'readyDot', 'storageSummary', 'btnBilling', 'btnLock', 'btnForgetDevice',
     'welcomeScreen', 'btnCreate', 'btnHaveWords',
+    'handoffScreen', 'handoffTitle', 'handoffBody', 'btnHandoffPrimary', 'btnHandoffCancel', 'handoffStatus',
+    'billingScreen', 'billingBody', 'btnBillingBack',
     'inviteScreen', 'inviteInput', 'btnInviteContinue', 'inviteRequestLink', 'inviteStatus',
     'requestStubScreen', 'btnRequestBack',
     'wordsScreen', 'wordsText', 'btnWordsSaved', 'wordsStatus',
@@ -112,6 +130,7 @@ function cacheRefs() {
     'filesScreen', 'dropzone', 'fileInput', 'fileList', 'fileActions',
     'btnDownload', 'btnShare', 'btnDelete',
     'btnMove', 'btnRename', 'btnCancelSelection',
+    'confirmModal', 'confirmBody', 'btnConfirmYes', 'btnConfirmNo',
     'fileMenu', 'fileMenuDownload', 'fileMenuShare', 'fileMenuMove', 'fileMenuRename', 'fileMenuDelete',
     'btnNewFolder', 'breadcrumb', 'newFolderInline', 'newFolderInput',
     'btnNewFolderConfirm', 'btnNewFolderCancel',
@@ -145,6 +164,11 @@ const SKELETON = /*html*/`
          isDesktop() (see wireEvents() below), never in the browser build,
          since there is no local filesystem or bundled CLI to drive there. -->
     <button id="btnSyncFolders" class="btn btn-ghost hidden">Synced Folders</button>
+    <!-- BILLING (P6 Task 3, Decision 3): account dashboard entry point.
+         Web-only data comes from same-origin /api/v1 with the moneyd
+         session cookie; desktop answers through the CLI bridge and never
+         fetches /api/v1. Hidden in the stock door (no billing session). -->
+    <button id="btnBilling" class="btn btn-ghost btn-logout hidden">Account</button>
     <button id="btnLock" class="btn btn-ghost btn-logout">Lock</button>
     <!-- FORGET THIS DEVICE (2026-09-29): re-exposes onRemoveBrowser(),
          which was already correct and kept in code on purpose after its
@@ -167,6 +191,22 @@ const SKELETON = /*html*/`
         <button id="btnHaveWords" class="btn btn-outline btn-lg">I already have an account</button>
       </p>
     </div>
+  </section>
+
+  <!-- HANDOFF (P6 Decision 2): "#handoff=<code>" consumption + linking
+       state machine. One screen renders every state (replace-device
+       confirm, linking in progress, expired, error) — text/buttons only;
+       the code itself is never written into this markup or any diary. -->
+  <section id="handoffScreen" class="panel column-screen hidden">
+    <h2 id="handoffTitle">Link this device</h2>
+    <p id="handoffBody"></p>
+    <p style="margin-top:14px">
+      <button id="btnHandoffPrimary" class="btn btn-primary btn-lg hidden">Continue</button>
+    </p>
+    <p style="margin-top:8px">
+      <button id="btnHandoffCancel" class="btn btn-outline btn-lg hidden">Back</button>
+    </p>
+    <p id="handoffStatus" class="status-text"></p>
   </section>
 
   <!-- CREATE: INVITE -->
@@ -270,6 +310,18 @@ const SKELETON = /*html*/`
     <p id="unlockStatus" class="status-text"></p>
   </section>
 
+
+  <!-- BILLING (P6 Task 3, Decision 3): balance, plan, period end, days left,
+       open slabs, egress used/allowance, warnings, status/kind/topup_url.
+       billing.js renders the content into #billingBody; the top-up form is
+       only ever built when the API's topup_open === true. -->
+  <section id="billingScreen" class="panel column-screen hidden">
+    <h2>Account</h2>
+    <div id="billingBody"></div>
+    <p style="margin-top:14px">
+      <button id="btnBillingBack" class="btn btn-outline btn-lg">Back</button>
+    </p>
+  </section>
 
   <!-- FILES + MAP -->
   <div id="filesLayout" class="files-layout">
@@ -443,6 +495,21 @@ const SKELETON = /*html*/`
   <!-- RENAME MODAL (Apple A, 2026-09-16): "In-page name. Same collision
        rule in the current folder. Metadata only. No re-upload." Reuses
        the same modal-card look as Share -- no new component family. -->
+  <!-- DELETE CONFIRM (2026-10-01, "tessera-web-delete-silent"): an in-page confirm. The native
+       window.confirm() this replaces returns false WITHOUT showing anything in a browser that
+       suppresses dialogs ("prevent this page from creating more dialogs", in-app webviews) --
+       Delete then looked like it did nothing at all. Same modal-card look as Rename/Share. -->
+  <div id="confirmModal" class="modal-overlay hidden">
+    <div class="modal-card">
+      <h3>Delete</h3>
+      <p id="confirmBody" style="white-space:pre-line"></p>
+      <div class="modal-buttons">
+        <button id="btnConfirmYes" class="btn btn-primary">Delete</button>
+        <button id="btnConfirmNo" class="btn btn-ghost">Cancel</button>
+      </div>
+    </div>
+  </div>
+
   <div id="textInputModal" class="modal-overlay hidden">
     <div class="modal-card">
       <h3 id="textInputTitle">Rename</h3>
@@ -503,13 +570,35 @@ export async function mountApp(container) {
   root = typeof container === 'string' ? document.querySelector(container) : container
   if (!root) throw new Error('Container not found')
 
+  // STOCK DOOR (2026-09-30, "tessera-web-stock-face"): stock is for an ALREADY-LATCHED vault only
+  // (unlock -> files -> add / download). It cannot finish invite / Register on catalog, so with no
+  // tesseraweb.* vault we do not mount Welcome/Invite at all -- send the visitor to the Tessera door.
+  if (IS_STOCK && !hasWrappedVault(PREFIX)) { renderNeedTicket(); return }
+
   root.innerHTML = SKELETON
   root.classList.remove('boot-spinner')
   cacheRefs()
+  if (IS_STOCK) {
+    // Visible door label: "Stock" here vs "Tessera" on /web/.
+    document.title = 'Stock'
+    root.querySelectorAll('.logo, .welcome-brand').forEach(el => { el.textContent = 'Stock' })
+  }
+
+  // BILLING (P6 Decision 3): one client for this page life. The web app
+  // talks to same-origin /api/v1 with the moneyd session cookie; desktop
+  // resolves window.tesseraDesktop.billingAccount (Task 6's CLI bridge) and
+  // never fetches /api/v1. The stock door has no billing session.
+  billingClient = createBillingClient({})
+  if (!IS_STOCK) r.btnBilling.classList.remove('hidden')
 
   // wire events
   r.btnCreate.addEventListener('click', onShowInvite)
   r.btnHaveWords.addEventListener('click', onShowRecover)
+  r.btnHandoffPrimary.addEventListener('click', onHandoffPrimary)
+  r.btnHandoffCancel.addEventListener('click', onHandoffCancel)
+  // BILLING (P6 Decision 3): header entry point + Back, web and desktop.
+  r.btnBilling.addEventListener('click', onShowBilling)
+  r.btnBillingBack.addEventListener('click', () => history.back())
   r.btnInviteContinue.addEventListener('click', onInviteContinue)
   r.inviteRequestLink.addEventListener('click', e => { e.preventDefault(); onShowRequestStub() })
   r.btnRequestBack.addEventListener('click', () => history.back())
@@ -738,6 +827,9 @@ export async function mountApp(container) {
     // can change across, so re-read it here every time, not just once
     // at boot.
     syncDebugPane()
+    // BILLING (P6 Decision 3): Back/Forward into the Account screen
+    // re-reads the summary (balance may have moved while away).
+    if (screen === 'billing') loadBilling()
     setScreen(screen)
   })
 
@@ -908,6 +1000,8 @@ function gotoFolder(path) {
 
 function renderScreen(s) {
   r.welcomeScreen.classList.toggle('hidden', s !== 'welcome')
+  r.handoffScreen.classList.toggle('hidden', s !== 'handoff')
+  r.billingScreen.classList.toggle('hidden', s !== 'billing')
   r.inviteScreen.classList.toggle('hidden', s !== 'invite')
   r.requestStubScreen.classList.toggle('hidden', s !== 'requestStub')
   r.wordsScreen.classList.toggle('hidden', s !== 'words')
@@ -917,7 +1011,7 @@ function renderScreen(s) {
   r.unlockScreen.classList.toggle('hidden', s !== 'unlock')
   r.filesScreen.classList.toggle('hidden', s !== 'files')
   r.filesLayout.classList.toggle('hidden', s !== 'files')
-  r.header.classList.toggle('hidden', s === 'loading' || s === 'welcome')
+  r.header.classList.toggle('hidden', s === 'loading' || s === 'welcome' || s === 'handoff')
   // VIEWPORT-CLAMPED PANEL (2026-09-16, "tessera-web-handoff
   // adjustments" bug report): re-measure every time Files becomes the
   // visible screen -- the panel was display:none an instant ago, so
@@ -974,8 +1068,252 @@ function kickoffPreload() {
 
 // ── boot ─────────────────────────────────────────────────
 
+// STOCK DOOR: no-vault landing. Plain link to the Tessera door; nothing is minted or registered here.
+function renderNeedTicket() {
+  root.classList.remove('boot-spinner')
+  document.title = 'Stock'
+  root.innerHTML = '<section class="panel welcome-panel">' +
+    '<span class="welcome-brand">Stock</span>' +
+    '<div class="welcome-center">' +
+    '<p>This browser is not set up yet.</p>' +
+    '<p style="margin-top:14px">Get your ticket on the Tessera page first, then come back here.</p>' +
+    '<p style="margin-top:14px"><a class="btn btn-outline btn-lg" href="/v2/tessera/web/">Go to Tessera</a></p>' +
+    '</div></section>'
+}
+
+// ── handoff (P6 Decision 2) ──────────────────────────────
+//
+// FE mints a one-time code and redirects to /web/#handoff=<code> (fragment
+// only — see handoff.js). This block renders the linking state machine and
+// drives registration through the SAME connectWithInvite()/set-password
+// pipeline the invite screen uses. The code is never persisted (the marker
+// holds the returned connectKey), never logged, and never put into diary
+// lines; the legacy "?handoff=" query is remapped to the fragment by the
+// web shell before mount, and again here as defense-in-depth.
+
+let handoffMachine = null
+let _handoffAbandoned = false
+
+function handoffStorage() {
+  try { return window.sessionStorage } catch (_) { return null }
+}
+
+function hasLocalIdentity() {
+  return !!getSaved(PREFIX).appId || hasWrappedVault(PREFIX)
+}
+
+// Headless registration start (200 path and reload resume): the consumed
+// connectKey is used exactly like a typed invite — the in-page approval
+// POST — then the existing set-password screen finishes registration via
+// completeRegistration(). Never called before the marker is written.
+async function resumeHandoffRegistration(connectKey) {
+  const { builder, appId, phrase } = await connectWithInvite(connectKey, PREFIX, FETCH_MODE())
+  patchState({ builder, appId, phrase })
+  goToSetPassword('inviteRegister')
+}
+
+// renderHandoffState(): the machine's onState hook. Screens are driven from
+// STATE NAMES only — no handler here ever receives or displays the code.
+function renderHandoffState(state, detail = {}) {
+  patchState({ handoffState: state })
+  const onHandoffScreen = getState().screen === 'handoff'
+  switch (state) {
+    case HANDOFF_STATES.CONFIRM_REPLACE:
+      r.handoffTitle.textContent = 'Replace this device?'
+      r.handoffBody.textContent = 'This browser already has an account saved. Linking the account you chose will replace it on this device.'
+      r.btnHandoffPrimary.textContent = 'Replace this device'
+      r.btnHandoffPrimary.disabled = false
+      r.btnHandoffPrimary.classList.remove('hidden')
+      r.btnHandoffCancel.textContent = 'Keep this device'
+      r.btnHandoffCancel.classList.remove('hidden')
+      r.handoffStatus.textContent = ''
+      break
+    case HANDOFF_STATES.CONSUMING:
+    case HANDOFF_STATES.CONSUMED:
+    case HANDOFF_STATES.RESUMING:
+      if (!onHandoffScreen) break
+      r.handoffTitle.textContent = 'Linking this device'
+      r.handoffBody.textContent = 'Setting up your account on this browser.'
+      r.btnHandoffPrimary.classList.add('hidden')
+      r.btnHandoffCancel.classList.add('hidden')
+      r.handoffStatus.textContent = state === HANDOFF_STATES.RESUMING ? 'Finishing setup\u2026' : 'Connecting\u2026'
+      break
+    case HANDOFF_STATES.RESUMED:
+      // connectWithInvite() done; the set-password screen owns the flow now.
+      // Update this screen's own text anyway (minus the now-stale status) in
+      // case browser Back lands here after leaving for the password screen.
+      r.handoffTitle.textContent = 'Linking this device'
+      r.handoffBody.textContent = 'Almost done \u2014 finish setup on the password screen.'
+      r.btnHandoffPrimary.classList.add('hidden')
+      r.btnHandoffCancel.classList.add('hidden')
+      r.handoffStatus.textContent = ''
+      break
+    case HANDOFF_STATES.RECOVERY:
+      // 409 with no local identity: the account is already registered — the
+      // 12 words are the only way onto this device. Reuse the recovery screen
+      // (replace, not push: Back must not return to the stale linking screen).
+      r.recoverStatus.textContent = 'This account is already set up on another device. Enter your 12 words to bring it to this browser.'
+      r.recoverPhraseStep.classList.remove('hidden')
+      r.recoverApprovalStep.classList.add('hidden')
+      replaceScreen('recover')
+      break
+    case HANDOFF_STATES.ALREADY_LINKED:
+      // 409 with a local identity (or activate 409): no-op, nothing to do.
+      showToast(detail.message || 'This device already has an account.')
+      if (onHandoffScreen) resumeNormalBoot()
+      break
+    case HANDOFF_STATES.LINK_EXPIRED:
+      if (!onHandoffScreen) break
+      r.handoffTitle.textContent = 'Link expired'
+      r.handoffBody.textContent = 'This link is no longer valid \u2014 links last 5 minutes. Go back to your account page and choose "Connect this device" again.'
+      r.btnHandoffPrimary.classList.add('hidden')
+      r.btnHandoffCancel.textContent = 'Back'
+      r.btnHandoffCancel.classList.remove('hidden')
+      r.handoffStatus.textContent = ''
+      break
+    case HANDOFF_STATES.ACTIVATING:
+      if (!onHandoffScreen) break
+      r.handoffTitle.textContent = 'Linking this device'
+      r.handoffBody.textContent = 'Finishing the link.'
+      r.btnHandoffPrimary.classList.add('hidden')
+      r.btnHandoffCancel.classList.add('hidden')
+      r.handoffStatus.textContent = 'Almost done\u2026'
+      break
+    case HANDOFF_STATES.LINKED:
+      if (onHandoffScreen) {
+        showToast(detail.message || 'This device is linked.')
+        resumeNormalBoot()
+      }
+      break
+    case HANDOFF_STATES.LINKING_PENDING:
+      showToast(detail.message || HANDOFF_PENDING_MESSAGE)
+      if (onHandoffScreen) resumeNormalBoot()
+      break
+    case HANDOFF_STATES.ERROR:
+      if (!onHandoffScreen) {
+        showToast('Could not link this device. You can still use it with your 12 words.')
+        break
+      }
+      r.handoffTitle.textContent = 'Could not link'
+      r.handoffBody.textContent = detail.phase === 'resume'
+        ? 'Setup did not finish. Check your connection and try again.'
+        : 'The link could not be used. Check your connection and try again, or create a new link from your account page.'
+      r.btnHandoffPrimary.textContent = 'Try again'
+      r.btnHandoffPrimary.disabled = false
+      r.btnHandoffPrimary.classList.remove('hidden')
+      r.btnHandoffCancel.textContent = 'Back'
+      r.btnHandoffCancel.classList.remove('hidden')
+      r.handoffStatus.textContent = ''
+      break
+    case HANDOFF_STATES.CANCELLED:
+    case HANDOFF_STATES.IDLE:
+      if (onHandoffScreen) resumeNormalBoot()
+      break
+    default:
+      break
+  }
+}
+
+function onHandoffPrimary() {
+  if (!handoffMachine) return
+  const current = getState().handoffState
+  if (current !== HANDOFF_STATES.CONFIRM_REPLACE && current !== HANDOFF_STATES.ERROR) return
+  const action = current === HANDOFF_STATES.ERROR ? handoffMachine.retry : handoffMachine.confirmReplace
+  r.btnHandoffPrimary.disabled = true
+  Promise.resolve(action()).finally(() => { r.btnHandoffPrimary.disabled = false })
+}
+
+function onHandoffCancel() {
+  if (handoffMachine) handoffMachine.cancel()
+}
+
+// Leave the handoff flow for good (Back/expired/cancelled/already-linked):
+// scrub any leftover fragment, remember the abandonment so a re-entrant
+// doBoot() never loops back into it, then boot normally.
+function resumeNormalBoot() {
+  _handoffAbandoned = true
+  scrubHandoffFragment(window)
+  handoffMachine = null
+  doBoot()
+}
+
+// Boot entry. Returns true when a handoff was present and owns the boot.
+async function initHandoff() {
+  if (_handoffAbandoned || IS_STOCK || isDesktop()) return false
+  mapLegacyHandoffToFragment(window)  // shell already did this; idempotent
+  const marker = readHandoffMarker(handoffStorage())
+  const code = extractHandoffCode(window.location.hash)
+  if (!marker && !code) return false
+
+  replaceScreen('handoff')  // also scrubs "#handoff=<code>" from the URL
+  handoffMachine = createHandoffMachine({
+    storage: handoffStorage(),
+    hasLocalIdentity,
+    resumeRegistration: resumeHandoffRegistration,
+    onState: renderHandoffState,
+    log: line => console.warn('[tessera-web] handoff: ' + line),
+    scrubUrl: () => scrubHandoffFragment(window),
+  })
+  await handoffMachine.start({ code })
+  return true
+}
+
+// ── billing (P6 Decision 3) ──────────────────────────────
+//
+// The Account screen is web and desktop (unlike handoff): the web client
+// reads same-origin /api/v1/account with the moneyd session cookie, while
+// the desktop client answers through window.tesseraDesktop.billingAccount
+// (Task 6) and never fetches /api/v1. billing.js owns all field rendering;
+// this block only drives the screen: load on entry, map 401 to the sign-in
+// copy, map a missing/broken desktop bridge to the "run tessera login"
+// empty state, everything else to a retryable load error.
+
+let billingClient = null
+let billingView = null
+
+function onShowBilling() {
+  goto('billing')
+  loadBilling()
+}
+
+async function loadBilling() {
+  if (!billingView) {
+    billingView = createBillingView({
+      client: billingClient,
+      canTopup: !isDesktop(),
+      onRetry: () => loadBilling(),
+    })
+    r.billingBody.textContent = ''
+    r.billingBody.appendChild(billingView.el)
+  }
+  billingView.showLoading()
+  try {
+    const account = await billingClient.getAccount()
+    billingView.showAccount(account)
+  } catch (e) {
+    if (e instanceof BillingApiError && e.status === 401) {
+      billingView.showSignedOut()
+    } else if (
+      e instanceof BillingApiError &&
+      (e.code === 'desktop_bridge_unavailable' ||
+        e.code === 'desktop_bridge_error' ||
+        e.code === 'no_credentials')
+    ) {
+      billingView.showDesktopUnavailable()
+    } else {
+      billingView.showError('The account service did not answer. It may be temporarily unavailable.')
+    }
+  }
+}
+
 async function doBoot() {
   kickoffPreload()  // fire-and-forget, after first paint
+
+  // HANDOFF (P6 Decision 2): a "#handoff=<code>" fragment or a same-tab
+  // resume marker takes precedence over every other boot path — the user
+  // just asked FE to link THIS device. Web-only: stock has no account
+  // session and desktop never fetches /api/v1 (Decision 3).
+  if (await initHandoff()) return
 
   // SHARED IDENTITY, DESKTOP ONLY (2026-09-30): if a standalone
   // tessera-cli login already exists in ~/.tessera, that is the
@@ -994,7 +1332,7 @@ async function doBoot() {
       if (cliCfg && cliCfg.appId && cliCfg.appKey) {
         const saved = getSaved(PREFIX)
         if (saved.appId !== cliCfg.appId) {
-          const sdk = await reconnectWithAppKey(cliCfg.appId, cliCfg.appKey, FETCH_MODE())
+          const sdk = await reconnectWithAppKey(cliCfg.appId, cliCfg.appKey, FETCH_MODE(), PREFIX)
           if (sdk) {
             // adoptSharedIdentity() always clears any old vault first (see
             // its own comment in auth.js), so this browser never has a
@@ -1019,9 +1357,22 @@ async function doBoot() {
   // so there is no "Back before the root" and a latched browser's Unlock
   // is never one Back-tap away from being skipped.
   if (hasWrappedVault(PREFIX)) {
+    // BUGFIX (2026-10-03, "tessera-web-unlock-stuck-disabled"): onUnlock()
+    // sets btnUnlock.disabled = true before its await and only ever resets
+    // it to false on a FAILURE path (wrong password / timeout) -- the
+    // SUCCESS path (enterFiles()) never re-enables it, because the button
+    // is simply hidden once Files is showing. Lock (onLock -> doBoot())
+    // re-enters this exact branch to show Unlock again, but this reset
+    // block only ever cleared unlockStatus/unlockPassword, not the
+    // disabled flag it inherited from the prior successful unlock -- so
+    // after one full unlock -> lock cycle, Unlock's button renders
+    // permanently gray/unclickable with no error text. Reset it here too.
+    r.btnUnlock.disabled = false
     r.unlockStatus.textContent = ''
     r.unlockPassword.value = ''
     replaceScreen('unlock')
+  } else if (IS_STOCK) {
+    renderNeedTicket()   // e.g. after Forget this device: no vault -> back to the Tessera door
   } else {
     replaceScreen('welcome')
   }
@@ -1030,6 +1381,7 @@ async function doBoot() {
 // ── create: invite ────────────────────────────────────────
 
 function onShowInvite() {
+  if (IS_STOCK) { renderNeedTicket(); return }
   r.inviteInput.value = ''
   r.inviteStatus.textContent = ''
   goto('invite')
@@ -1121,6 +1473,12 @@ async function onSetPassword() {
       const sdk = await completeRegistration(builder, phrase, PREFIX)
       patchState({ sdk, builder: null })
       registerSdk(sdk)
+      // HANDOFF (P6 Decision 2b/c): registration is now complete — move the
+      // same-tab resume marker to "registered" and run the best-effort
+      // activate (401/403/404 → "linking now, refresh shortly"; 409 →
+      // already-linked no-op). No-op outside the handoff flow. Never
+      // awaited: activation must not delay the words screen.
+      if (handoffMachine) handoffMachine.noteRegistrationComplete().catch(() => {})
       _pendingPassword = pw  // wrap happens after words are confirmed, once the key exists
       r.wordsText.textContent = phrase
       goto('words')
@@ -1180,6 +1538,7 @@ async function completeCreateAfterWords() {
 // ── i have my words (recover) ────────────────────────────
 
 function onShowRecover() {
+  if (IS_STOCK) { renderNeedTicket(); return }
   r.recoverPhraseInput.value = ''
   r.recoverStatus.textContent = ''
   goto('recover')
@@ -1268,7 +1627,7 @@ async function onUnlock() {
     // does not add any new network call.
     let timer = null
     const sdk = await Promise.race([
-      reconnectWithAppKey(appId, appKeyHex, FETCH_MODE()),
+      reconnectWithAppKey(appId, appKeyHex, FETCH_MODE(), PREFIX),
       new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('reconnect timed out')), 10000) }),
     ]).finally(() => { if (timer) clearTimeout(timer) })
     if (!sdk) {
@@ -1362,7 +1721,23 @@ async function enterFiles(appKeyHex) {
   // "Show map" click needs it, without blocking refreshFiles() or
   // anything else on this screen. Previously this only ever ran lazily
   // on first Add or first manual "Show map" click.
-  ensureMapController()
+  // ACCOUNT-BOUNDARY RESEED (2026-10-03, "tessera-web-stale-map-cross-
+  // account"): ensureMapController()'s own seedPins() comment says it
+  // "only runs ONCE, at controller creation ... never re-seeded on every
+  // showMap()" -- true, but that assumed one account per page life.
+  // mapController is a module-level singleton that OUTLIVES Lock ->
+  // create-a-different-account on the same page (no full reload), so a
+  // second account's entry into Files reused the FIRST account's already-
+  // seeded pins forever. enterFiles() is the one call site that fires at
+  // every real account-session boundary (Unlock, Ready, first boot) --
+  // force a reset()+reseed here specifically (not inside
+  // ensureMapController()/showMap(), which must stay a no-op reseed so a
+  // live session's own landings are never double-counted, per that
+  // comment). Cheap and synchronous (localStorage-only), safe before any
+  // Add has started for this account's session.
+  const mc = ensureMapController()
+  mc.reset()
+  mc.seedPins(getMapShards())
   // MAP SHOW/HIDE PREFERENCE (2026-09-16, "tessera-web-handoff
   // adjustments"): "On first visit, initial state is hidden w/ the
   // link shown... If a user has chosen to hide map, then subsequent
@@ -1948,7 +2323,7 @@ async function moveFileToQuiet(objectId, destPath) {
 // from onDeleteFolder's single-folder confirm, which counts the files
 // INSIDE that one folder instead; this is the top-level "how many things
 // did you check" number).
-function onSelectManyDelete() {
+async function onSelectManyDelete() {
   const { selectedIds } = getState()
   if (!selectedIds.length) return  // "Empty selection: Move/Delete do nothing."
   const n = selectedIds.length
@@ -1956,7 +2331,7 @@ function onSelectManyDelete() {
   const question = hasFolders
     ? 'Delete ' + n + ' item' + (n === 1 ? '' : 's') + ' including folders and their files?\n\nThis cannot be undone.'
     : 'Delete ' + n + ' item' + (n === 1 ? '' : 's') + '?\n\nThis cannot be undone.'
-  if (!confirm(question)) return  // Cancel keeps everything -- no state touched above this line
+  if (!(await askDeleteConfirm(question))) return  // Cancel keeps everything -- no state touched above this line
   deleteSelected()
 }
 
@@ -2001,6 +2376,7 @@ async function deleteSelected() {
     showToast('\u{1F5D1}\uFE0F Deleted ' + selectedIds.length + ' item' + (selectedIds.length === 1 ? '' : 's'))
   } catch (e) {
     patchState({ status: 'Delete failed: ' + (e.message || 'error') })
+    showToast('Could not delete everything selected. Try again.')
     console.error(e)
   } finally { setBusy(false) }
 }
@@ -2933,6 +3309,38 @@ async function doUpload(file, destPathOverride) {
       // success/fail always has the freshest values, with no separate
       // "final tick" bookkeeping needed.
       if (marks) addMarks = marks
+      // ARC-AT-ATTEMPT (2026-09-29, "tessera-web-attempt-arcs-2";
+      // REVISED 2026-09-30, live operator report -- "still seeing
+      // arcs while 'encoding...' shows... arc should start when the
+      // write file command is fired"): per-slab encoding always fully
+      // completes before that slab's shards are attempted (confirmed
+      // in upload::ShardUpload::spawn_slab -- encode_shards() runs to
+      // completion before any spawn_write for that slab), and the
+      // arc itself now fires post-warmup (see hosts.rs::write_sector,
+      // 2026-09-30 fix) -- so by the time ANY attempt tick reaches
+      // here, this Add's real encoding is genuinely done. The
+      // remaining problem was purely the STALE WORD: it used to only
+      // stop on the first LANDED shard, so it kept animating through
+      // the entire attempt-start-to-first-land window even though
+      // encoding had already finished. Fixed here: the first attempt
+      // tick now also stops the encoding animation, same as a real
+      // land tick does below -- but deliberately does NOT touch
+      // `sawRealShardProgress` (still land-gated further down) --
+      // an attempt that immediately fails before any real shard ever
+      // lands must still classify as "no real progress" in
+      // classifyAddFailure, not silently look like it shipped
+      // something.
+      if (stage === 'attempt') {
+        stopEncodingAnim()
+        // Replace the now-frozen "encoding…" text so nothing stale
+        // lingers on screen while the arc is up -- real percent/N-of-M
+        // text arrives on the very next tick (first land) and
+        // overwrites this immediately via the normal patchState path
+        // below; this is just the bridge between the two.
+        r.progressLabel.textContent = 'uploading\u2026'
+        if (mapController && hostKey) mapController.attemptStart(hostKey)
+        return
+      }
       // ENCODING WORD (2026-09-16, "tessera-web-encoding-word", MOVED
       // + ANIMATED same day per operator instruction): "'encoding...'
       // messaging, move it to the same line as the progress bar. When
@@ -3195,8 +3603,17 @@ async function onDownload() {
   // exists, Download respects it exactly like every other action.
   if (getMapShownPref() === null) showMap()
   try {
-    await downloadToDisk(sdk, sf.id, sf.name, ({ hostKey, direction, transferMs, percent }) => {
+    await downloadToDisk(sdk, sf.id, sf.name, ({ hostKey, direction, transferMs, percent, dlComplete }) => {
       if (mapController && hostKey) mapController.landedHost(hostKey, direction, transferMs)
+      // FADE-TOGETHER (2026-09-30, "tessera-web-dl-arc-fade"): files.js
+      // flags the exact tick that reaches MinShards (10 on 10+20) with
+      // dlComplete:true -- fade every still-visible cyan trip for this
+      // job at once, rather than each one guttering out on its own
+      // separate staggered 4s floor well after the file is already
+      // back. Gold write arcs (mapController.attemptStart's own hold
+      // logic) are a completely separate trip set (`dir==='upload'`)
+      // and untouched by this call.
+      if (mapController && dlComplete) mapController.fadeDownloadTrips()
       // COPY (2026-09-19, "tessera-web-download-progress"): "downloading
       // (N%)" -- same family as upload's "uploading (N/M)", no word
       // "shards" per law. percent is always present on every tick
@@ -3239,10 +3656,46 @@ async function onDownload() {
 }
 
 
+// askDeleteConfirm(message): in-page Delete / Cancel. Resolves true only on an explicit Delete click;
+// Cancel, Escape and a click on the dim overlay all resolve false (nothing is touched). Never a
+// native dialog, so it can never be silently suppressed by the browser.
+let _confirmResolve = null
+function askDeleteConfirm(message) {
+  if (_confirmResolve) { _confirmResolve(false); _confirmResolve = null }
+  r.confirmBody.textContent = message
+  r.confirmModal.classList.remove('hidden')
+  return new Promise((resolve) => {
+    const done = (v) => {
+      r.confirmModal.classList.add('hidden')
+      r.btnConfirmYes.removeEventListener('click', yes)
+      r.btnConfirmNo.removeEventListener('click', no)
+      r.confirmModal.removeEventListener('click', overlay)
+      document.removeEventListener('keydown', key)
+      _confirmResolve = null
+      resolve(v)
+    }
+    const yes = () => done(true)
+    const no = () => done(false)
+    const overlay = (e) => { if (e.target === r.confirmModal) done(false) }
+    const key = (e) => { if (e.key === 'Escape') done(false) }
+    _confirmResolve = done
+    r.btnConfirmYes.addEventListener('click', yes)
+    r.btnConfirmNo.addEventListener('click', no)
+    r.confirmModal.addEventListener('click', overlay)
+    document.addEventListener('keydown', key)
+    r.btnConfirmNo.focus()
+  })
+}
+
 async function onDelete() {
   const sf = selectedFile(); if (!sf) return
   const sdk = getState().sdk; if (!sdk) return
-  if (!confirm('Delete "' + sf.name + '"?\n\nThis cannot be undone.')) return
+  diaryPush('delete-confirm shown obj=' + hex8(sf.id))
+  if (!(await askDeleteConfirm('Delete "' + sf.name + '"?\n\nThis cannot be undone.'))) {
+    diaryPush('delete-confirm cancel obj=' + hex8(sf.id))
+    return
+  }
+  diaryPush('delete-confirm yes obj=' + hex8(sf.id))
   setBusy(true); patchState({ status: 'Deleting\u2026' })
   try {
     await deleteFile(sdk, sf.id)
@@ -3252,9 +3705,20 @@ async function onDelete() {
     // never the filename (matches Download's own dl-start convention).
     diaryPush('delete-end ok obj=' + hex8(sf.id))
     await refreshFiles()
+    // Used-storage evidence (debug only, one READ of the existing indexer account call sdk.account(),
+    // never a host fetch): the footer total is computeTotals(listFiles) -- the sum of the object
+    // list the indexer just returned -- and Account.pinnedData is the indexer's own counter.
+    if (isDebugOn()) {
+      try {
+        const a = await getAccount(sdk)
+        diaryPush('delete-usage list_files=' + getState().totals.count + ' list_bytes=' + getState().totals.totalBytes +
+          ' pinned_data=' + (a && a.pinnedData != null ? a.pinnedData : '-'))
+      } catch (_) { diaryPush('delete-usage account-read-failed') }
+    }
     patchState({ status: '' })
   } catch (e) {
     patchState({ status: 'Delete failed: ' + (e.message || 'error') })
+    showToast('Could not delete "' + sf.name + '". Try again.')
     diaryPush('delete-end fail obj=' + hex8(sf.id) + ' err=' + String(e.message || e).slice(0, 80))
     console.error(e)
   } finally { setBusy(false) }
@@ -3291,7 +3755,7 @@ async function onDeleteFolder(path, name) {
   const question = n > 0
     ? 'Delete "' + name + '" and ' + n + (n === 1 ? ' file' : ' files') + '?\n\nThis cannot be undone.'
     : 'Delete "' + name + '"?\n\nThis cannot be undone.'
-  if (!confirm(question)) return  // Cancel leaves everything -- no state touched above this line
+  if (!(await askDeleteConfirm(question))) return  // Cancel leaves everything -- no state touched above this line
   const sdk = getState().sdk
   if (n > 0 && !sdk) return  // real objects to delete but no sdk -- nothing safe to do
   setBusy(true); patchState({ status: 'Deleting\u2026' })
@@ -3336,6 +3800,7 @@ async function onDeleteFolder(path, name) {
     showToast('\u{1F5D1}\uFE0F Deleted: ' + name)
   } catch (e) {
     patchState({ status: 'Delete failed: ' + (e.message || 'error') })
+    showToast('Could not delete "' + name + '". Try again.')
     console.error(e)
   } finally { setBusy(false) }
 }
@@ -3529,20 +3994,12 @@ function onLock() {
 }
 
 function onRemoveBrowser() {
-  // ⚠️ UNUSED AS OF 2026-09-16 ("tessera-web-handoff adjustments"):
-  // the "Remove from this browser" button + its horizontal separator
-  // line were removed from the #filesScreen skeleton (and this
-  // function's own event listener wire-up removed) per explicit
-  // operator instruction: "Remove both. The space freed up is now
-  // part of the files-list area." This function's LOGIC was
-  // deliberately kept, unused, at the operator's own request ("Leave
-  // it in the code. Note it prominently.") in case the capability
-  // needs to be re-exposed elsewhere later -- it is not dead code by
-  // accident, do not delete it as part of an unrelated cleanup pass
-  // without checking with the operator first. clearCredentials(PREFIX)
-  // is still a real, correct call (deletes tesseraweb.* -- see the
-  // "lock / remove from this browser" law above); only the UI entry
-  // point to reach this function is gone.
+  // RE-EXPOSED 2026-09-29 as "Forget this device" (btnForgetDevice, see
+  // the header skeleton above) -- the "UNUSED as of 2026-09-16" state
+  // this comment used to describe no longer applies; this IS live and
+  // reachable. clearCredentials(PREFIX) below deletes tesseraweb.aid/
+  // akey/vault AND (as of "tessera-web-stale-map-cross-account") the
+  // account-scoped mapshards/folders/mapshown cache.
   if (!confirm('Remove Tessera from this browser? You will need your 12 words to come back.')) return
   // DESKTOP PARITY: same as onLock() -- disconnect the native bridge too,
   // otherwise the main process keeps an authenticated native SDK instance
@@ -3551,6 +4008,38 @@ function onRemoveBrowser() {
     window.tesseraDesktop.siaDisconnect().catch(() => {})
   }
   clearCredentials(PREFIX)
+  // THOROUGH WIPE (2026-10-03, "tessera-web-stale-map-cross-account",
+  // operator instruction: "forget this device should remove all saved
+  // material from the browser, including cookies"). clearCredentials()
+  // only ever touched this app's OWN localStorage keys -- it left three
+  // other things that can carry one account's data into the next on the
+  // same browser/page life:
+  //   1. sessionStorage -- not currently written by this app, but a
+  //      future feature could use it; wipe it defensively so "forget
+  //      this device" is a real guarantee, not a list of keys someone
+  //      has to remember to extend.
+  //   2. document.cookie -- same reasoning; this app sets none today
+  //      (grepped, confirmed), but nginx/CDN/third-party scripts on this
+  //      origin could set one in the future, and a stale cookie is
+  //      exactly the kind of leftover this button exists to prevent.
+  //   3. mapController -- the module-level map canvas singleton (see
+  //      ensureMapController() below) OUTLIVES this call (no full page
+  //      reload happens here); its closure-scoped pins/trips arrays are
+  //      the actual rendered dots and are independent of the
+  //      localStorage this just cleared. Null it out (and mapShown's
+  //      cached boolean) so the NEXT account's first enterFiles() call
+  //      creates a genuinely fresh controller instead of reusing one
+  //      already painted with this account's shards.
+  try { sessionStorage.clear() } catch (_) {}
+  try {
+    document.cookie.split(';').forEach(c => {
+      const name = c.split('=')[0].trim()
+      if (!name) return
+      document.cookie = name + '=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/'
+    })
+  } catch (_) {}
+  mapController = null
+  mapShown = false
   patchState({
     sdk: null, accountReady: false,
     files: [], selectedIdx: -1, totals: { count: 0, totalBytes: 0 },

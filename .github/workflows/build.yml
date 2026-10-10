@@ -17,6 +17,18 @@ jobs:
         with:
           node-version: 20
       - run: npm ci
+
+      # The committed sia-storage vendor (wasm + dist) must match the
+      # Task 4 marker before any build consumes it. Relative paths in
+      # VERSION mean `sha256sum -c` must run from the vendor dir.
+      - name: Verify vendored sia-storage hashes
+        working-directory: packages/shared/vendor/sia-storage
+        run: sha256sum -c VERSION
+
+      # Shared workspace tests (root `npm test` -> @tessera/shared).
+      - name: Shared tests
+        run: npm test
+
       - run: npm run build:web
       - uses: actions/upload-artifact@v4
         with:
@@ -85,6 +97,15 @@ jobs:
         run: |
           cd apps/desktop
           npm run fetch:cli
+
+      # Hermetic CLI-bridge tests (Task 6): stub-binary mapping tests run on
+      # Linux/macOS, win32 stub tests self-skip (POSIX shebang), and the
+      # real-binary integration test self-skips unless the bundled CLI
+      # advertises `account` (the pinned v1.5.0 does not). Node 20 here
+      # accepts the bare directory form; under Node >= 23 use
+      # `node --test apps/desktop/test/*.test.mjs`.
+      - name: Desktop CLI-bridge tests
+        run: node --test apps/desktop/test
 
       - name: Package Electron app (${{ matrix.target }} ${{ matrix.electron-arch }})
         shell: bash

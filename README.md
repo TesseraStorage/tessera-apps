@@ -23,8 +23,13 @@ and a **cross-platform desktop app** (macOS, Windows, Linux).
   - [Recovery phrase](#recovery-phrase)
   - [Recovering an existing account](#recovering-an-existing-account)
   - [Upload, download, share, delete](#upload-download-share-delete)
+- [Account linking, billing, and egress](#account-linking-billing-and-egress)
+  - [One-time handoff (Tessera Web)](#one-time-handoff-tessera-web)
+  - [Billing views](#billing-views)
+  - [Egress reporting](#egress-reporting)
 - [Installing the desktop app](#installing-the-desktop-app)
 - [Building release artifacts](#building-release-artifacts)
+- [Testing](#testing)
 - [Continuous integration](#continuous-integration)
 - [Environment variables](#environment-variables)
 
@@ -63,7 +68,7 @@ desktop app ships the native SDK inside Electron and talks to hosts directly.
 
 | Path | Role |
 |------|------|
-| `packages/shared/` | Shared UI, store, auth, SDK wrapper, and file operations used by both apps |
+| `packages/shared/` | Shared UI, store, auth, SDK wrapper, file operations, the handoff and billing modules, and egress reporting used by both apps |
 | `packages/proxy/` | CORS proxy + `/__sia__/*` relay endpoints (serves web app + proxies indexer + uploads/downloads via native SDK) |
 | `apps/web/` | Web app (Vite SPA) |
 | `apps/desktop/` | Electron desktop app |
@@ -169,6 +174,74 @@ approval flow again before returning you to your files.
 
 ---
 
+## Account linking, billing, and egress
+
+Tessera Web and the desktop app share the same handoff, billing, and SDK code
+from `packages/shared`.
+
+### One-time handoff (Tessera Web)
+
+From `/account` on tessera.storage, **Connect this device** mints a one-time
+code (`POST /api/v1/handoff/mint`, session cookie only) and redirects to
+`https://tessera.storage/web/#handoff=<code>`. The code travels only in the URL
+fragment — never a query string — so it is not sent to the server, and the web
+shell consumes it with `POST /handoff/consume` (single use, 300 s TTL).
+`packages/shared/src/handoff.js` owns the client flow:
+
+- `200` → the returned `connectKey` is kept in a same-tab `sessionStorage`
+  marker and registration resumes from it on reload (the code is never
+  re-consumed);
+- `409` → recovery screen (no local identity) or already-linked no-op;
+- `410` → "link expired"; mint a new link from `/account`;
+- if the device already holds an identity, the flow first asks for explicit
+  confirmation before consuming.
+
+Handoff codes and connect keys are never logged, persisted outside the same-tab
+marker, or placed in a URL query. Legacy `?handoff=` links are re-written to
+the fragment immediately, but the initial request that carried the query
+remains loggable server-side — use fragment links.
+
+### Billing views
+
+`packages/shared/src/billing.js` is the account view: balance, plan, period
+end, days left, open slabs, egress usage/allowance, warnings, and
+`status`/`kind`/`topup_url`. On the web it fetches same-origin `/api/v1` with
+the ambient `tessera_session` cookie; the top-up form renders only when
+`topup_open === true` (public top-up is closed by default). On desktop the
+module never calls `fetch`: it reads account data through
+`window.tesseraDesktop.billingAccount()`, implemented in
+`apps/desktop/electron/` by `cli-bridge.mjs` (IPC `tessera-billing-account`,
+preload bridge) from the bundled CLI's `tessera account --json`. Bridge errors
+map to `no_credentials` (the "run `tessera login`" empty state),
+`desktop_bridge_unavailable`, `desktop_bridge_error`, and `account_unavailable`
+(retryable, not a login prompt). Top-up creation is web-only
+(`desktop_topup_unsupported`).
+
+**CLI dependency:** desktop account data requires a bundled `tessera-cli` that
+supports `account`. The pinned default (`TESSERA_CLI_VERSION`, currently
+`v1.5.0`) predates it, so a release build shows the "run `tessera login`" empty
+state to end users until a new CLI release is tagged and pinned. For local
+development/testing you can bundle a locally built binary with the
+build-time-only override:
+
+```bash
+TESSERA_CLI_PATH=/path/to/tessera-cli npm -w apps/desktop run fetch:cli
+```
+
+`TESSERA_CLI_PATH` is never set in CI defaults and is not read at runtime by
+the packaged app; release builds always take the pinned download.
+
+### Egress reporting
+
+Tessera Web reports served-shard egress to its own origin: `wireEgress()` in
+`packages/shared/src/auth.js` calls
+`builder.egressUrl(location.origin + '/api/v1/usage/egress')` (nginx → moneyd)
+when the app prefix is `tesseraweb`, the fetch mode is `idx`, the page is
+`http(s):`, and it is neither the stock door nor desktop. Desktop egress from
+`file://` is deferred; the desktop and stock builds never configure it.
+
+---
+
 ## Installing the desktop app
 
 Download the appropriate asset from the
@@ -226,6 +299,33 @@ Desktop output lands in `apps/desktop/dist-electron/`.
 
 ---
 
+## Testing
+
+```bash
+# Shared workspace tests: handoff, billing, views, store (node:test)
+npm test
+
+# Vendored wasm hash marker (CI runs this before building the web app)
+(cd packages/shared/vendor/sia-storage && sha256sum -c VERSION)
+
+# Builds
+npm run build:web
+npm run build:desktop
+
+# Desktop CLI-bridge tests
+node --test apps/desktop/test                  # Node 20 (what CI pins)
+node --test apps/desktop/test/*.test.mjs       # Node >= 23 (glob, not a directory)
+
+# Local E2E: handoff + billing against scratch DBs and a stub indexer
+python3 test/e2e/e2e_handoff_billing.py
+```
+
+The desktop bridge tests are hermetic and portable: stub-binary mapping tests
+skip on Windows (POSIX shebang), and the real-binary integration test skips
+unless the bundled CLI advertises `account`.
+
+---
+
 ## Continuous integration
 
 `.github/workflows/build.yml` builds on every push/PR and creates a GitHub Release on tag
@@ -256,6 +356,8 @@ git push origin v0.0.x
 |----------|---------|-------------|
 | `PORT` / `TESSERA_PORT` | `3099` | Proxy/relay port |
 | `VITE_DEV_SERVER_URL` | — | Set by `start-dev.js` so Electron loads the Vite dev server |
+| `TESSERA_CLI_VERSION` | `v1.5.0` | Pinned `tessera-cli` release downloaded by `fetch:cli` and bundled into the desktop app |
+| `TESSERA_CLI_PATH` | — | Build-time-only override: copy this local CLI binary instead of downloading a pinned release; never set in CI defaults |
 
 ---
 

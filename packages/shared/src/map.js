@@ -79,6 +79,8 @@ export function normalizeHostKey(key) {
 // Desktop's renderer is loaded via file:// though -- a relative fetch
 // there can never reach anything real, so only THAT case needs
 // redirecting to the local bundled proxy on :3099.
+import { IS_STOCK } from './door.js'
+import { catalogGeo } from './stock-catalog.js'
 const GEO_URL = '/v2/tessera/geo/geo.json'
 function geoFetchUrl() {
   if (typeof window !== 'undefined' && window.tesseraDesktop && window.tesseraDesktop.isDesktop) {
@@ -144,7 +146,23 @@ const SHARD_FADE_MS = 1000
 // completion check, no whole-object override. tripFade() is fully
 // opaque until `t.visibleUntil`, then fades linearly to 0 over
 // SHARD_FADE_MS -- unchanged mechanically from before.
+//
+// ARC HOLDS (2026-09-29, "tessera-web-arc-holds" -- REVISES the
+// "every line lasts a flat 4s" framing above for OPEN attempt lines
+// only): an attempt line that hasn't ended yet (`t.open === true`)
+// is always fully opaque, full stop -- no floor countdown, no fade,
+// regardless of how long it's been open. Operator: "Live first-shard
+// was 9.6s. LINE_FLOOR_MS is 5s and the clock starts at attempt...
+// three seconds before the first shard... That picture is a lie."
+// `closeAttempt()` (below) is what ends the hold, at land or Add
+// settle, and it is the one place that computes the real
+// `visibleUntil` (= max(now, startedAt+LINE_FLOOR_MS), i.e. "a 200ms
+// success still shows the floor"). Only THEN does the normal fade
+// clock below apply. Download trips are never opened (no attempt
+// seam instruments them) -- they keep the exact old flat-floor
+// behavior untouched.
 function tripFade(t, now) {
+  if (t.open) return 1
   if (now < t.visibleUntil) return 1
   return Math.max(0, 1 - (now - t.visibleUntil) / SHARD_FADE_MS)
 }
@@ -171,7 +189,9 @@ async function ensureAssets() {
   if (_loadPromise) return _loadPromise
   _loadPromise = (async () => {
     const [geoResp] = await Promise.all([
-      fetch(geoFetchUrl()).catch(() => null),
+      // STOCK DOOR: no geo.json (that is a Tessera-side fleet geo file). Pins come only from the
+      // catalog HostInfo the stock SDK itself fetched (stock-catalog.js catalogGeo).
+      IS_STOCK ? Promise.resolve(null) : fetch(geoFetchUrl()).catch(() => null),
       loadScript(TOPOJSON_CLIENT_URL).catch(() => null),
     ])
     if (geoResp && geoResp.ok) {
@@ -216,6 +236,7 @@ function geoLookup(hostKey) {
   if (!_geoCache) return null
   for (const candidate of normalizeHostKey(hostKey) || []) {
     if (_geoCache[candidate]) return _geoCache[candidate]
+    if (IS_STOCK && catalogGeo[candidate]) return catalogGeo[candidate]
   }
   return null
 }
@@ -817,6 +838,104 @@ export function createUploadMap(canvas, captionEl, onLanded) {
     render()
   }
 
+  // attemptStart: the per-ATTEMPT entry point (2026-09-29,
+  // "tessera-web-attempt-arcs-2"). Draws exactly one gold outbound trip
+  // the moment the client BEGINS an effort toward a host -- fed by the
+  // T-SDK's `onWriteAttemptStart` callback (fired from
+  // `upload::ShardUpload::spawn_write`, before `write_sector` dials --
+  // see that Rust comment for the exact seam), never waiting for that
+  // shard to land. One call here = one trip start, same fields/floor/
+  // fade as the old land-time push (LINE_FLOOR_MS, fade not snap --
+  // unchanged), just moved to the earlier, honest moment. Caller
+  // (files.js via web-ui.js's window.__tesseraOnAttemptStart forwarder)
+  // is responsible for NOT calling this once the Add has settled -- see
+  // that call site's own comment for the "map ignores this Add after
+  // settle" gate; this function itself has no notion of settle and
+  // unconditionally draws whatever it is given, same fail-quiet
+  // contract as shardLanded (skip silently if there is no geo, never
+  // invent a pin/placement).
+  //
+  // ARC HOLDS (2026-09-29, "tessera-web-arc-holds"): the pushed trip
+  // starts `open: true` -- tripFade() (above) holds it fully visible
+  // for as long as it stays open, regardless of LINE_FLOOR_MS. It is
+  // closed by closeAttempt() below, at land (shardLanded) or Add
+  // settle (completeWrite), never by simple elapsed time.
+  function attemptStart(hostKey) {
+    if (!hostKey) return
+    const geo = geoLookup(hostKey)
+    if (!geo) return
+    const now = Date.now()
+    trips.push({ lat: geo.lat, lon: geo.lon, hostKey, dir: 'upload', startedAt: now, open: true, visibleUntil: now + LINE_FLOOR_MS, fadeAt: now })
+    if (!rafId) render()
+  }
+
+  // closeAttempt: ends an open attempt line -- "An attempt line stays
+  // up for as long as that attempt is open... Visible time = max(5s,
+  // attempt-open)." Finds the OLDEST still-open upload trip for this
+  // hostKey (a retry to the same host after a prior attempt to it was
+  // already closed would have started a fresh trip; this only ever
+  // matches a trip that is still genuinely in flight) and gives it its
+  // real `visibleUntil`: never before its own LINE_FLOOR_MS floor from
+  // when it started, but also never in the past relative to now (a
+  // long-open attempt lands immediately, not "3 seconds ago"). Silent
+  // no-op if there is no matching open trip (e.g. a download hostKey,
+  // or an attempt this map instance never saw) -- same fail-quiet
+  // contract as the rest of this module.
+  function closeAttempt(hostKey) {
+    if (!hostKey) return
+    const now = Date.now()
+    for (let i = 0; i < trips.length; i++) {
+      const t = trips[i]
+      if (t.dir === 'upload' && t.hostKey === hostKey && t.open) {
+        t.open = false
+        t.visibleUntil = Math.max(now, t.startedAt + LINE_FLOOR_MS)
+        return
+      }
+    }
+  }
+
+  // closeAllOpenAttempts: the Add-settle sweep -- "this Add settles
+  // (ok/fail -- addSettled already stops new arcs; also fade/remove
+  // open attempt lines for this Add)." Closes every still-open upload
+  // trip at once (a host whose attempt never got a land tick before
+  // settle, e.g. it lost the shard race or the Add failed outright).
+  function closeAllOpenAttempts() {
+    const now = Date.now()
+    for (let i = 0; i < trips.length; i++) {
+      const t = trips[i]
+      if (t.dir === 'upload' && t.open) {
+        t.open = false
+        t.visibleUntil = Math.max(now, t.startedAt + LINE_FLOOR_MS)
+      }
+    }
+  }
+
+  // fadeDownloadTrips: (2026-09-30, "tessera-web-dl-arc-fade") -- "when
+  // this Download has 10 shards... fade every cyan trip for this job
+  // at once... Do not leave blue lines sitting on the 4s floor after
+  // the file is already back." Download trips are never `open` (no
+  // attempt-start seam instruments reads -- see shardLanded's own
+  // comment), so each one already carries its own independent
+  // `visibleUntil` set at ITS OWN creation time, which is exactly the
+  // staggering the operator is calling out. This just collapses every
+  // still-active cyan trip's `visibleUntil` down to `now` -- "same fade
+  // already used on write close (not a snap), start that fade now" --
+  // so they all begin the SAME SHARD_FADE_MS clock on the SAME frame.
+  // Trips already past their own visibleUntil (already fading or
+  // already gone) are left alone -- this can only pull a floor IN, it
+  // never pushes one out. Gold upload trips (`dir==='upload'`) are
+  // untouched, open or not.
+  function fadeDownloadTrips() {
+    const now = Date.now()
+    for (let i = 0; i < trips.length; i++) {
+      const t = trips[i]
+      if (t.dir === 'download' && t.visibleUntil > now) {
+        t.visibleUntil = now
+      }
+    }
+    if (!rafId) render()
+  }
+
   // shardLanded: the per-shard entry point (2026-09-15, "tessera-web-
   // map-follow"). Draws one trip (arc + DOTS_PER_ARC traveling dots).
   //
@@ -837,6 +956,15 @@ export function createUploadMap(canvas, captionEl, onLanded) {
   // from a real write. The fix is scoped exactly to that push, not to
   // the animation: trips (arc+traveling dot) fire for both directions,
   // pins fire for uploads only.
+  //
+  // ARC-AT-ATTEMPT (2026-09-29, "tessera-web-attempt-arcs-2"): upload
+  // trips are no longer pushed HERE -- attemptStart() (above) now owns
+  // them, fired from T-SDK's onWriteAttemptStart at dial start, per
+  // operator law ("Arc means... the beginning of that effort... not
+  // when the shard completes"). Download keeps the exact prior
+  // behavior unchanged (isDownload branch below) -- "Cyan inbound
+  // stays download-only" -- downloads have no attempt-start seam this
+  // packet instruments.
   function shardLanded(hostKey, dir, transferMs) {
     if (!hostKey) return
     const isDownload = (dir || 'upload') === 'download'
@@ -845,7 +973,25 @@ export function createUploadMap(canvas, captionEl, onLanded) {
     // hosts() to fill gaps." -- no fallback placement.
     if (!geo) return
     const now = Date.now()
-    trips.push({ lat: geo.lat, lon: geo.lon, hostKey, dir: dir || 'upload', startedAt: now, visibleUntil: now + LINE_FLOOR_MS, fadeAt: now })
+    if (isDownload) {
+      trips.push({ lat: geo.lat, lon: geo.lon, hostKey, dir: 'download', startedAt: now, visibleUntil: now + LINE_FLOOR_MS, fadeAt: now })
+    } else {
+      // ARC HOLDS (2026-09-29, "tessera-web-arc-holds"): "Shard tick =
+      // confirmation that attempt landed" -- this is the land signal
+      // that ends the hold attemptStart() opened, giving it its real
+      // (possibly much-later-than-the-floor) end time instead of
+      // fading it out on a fixed clock the attempt may have long
+      // outlived.
+      closeAttempt(hostKey)
+      // STOCK DOOR (2026-10-01, "tessera-web-stock-arcs"): Foundation's stock SDK has no
+      // onWriteAttemptStart, so attemptStart() above never fires and nothing else pushes an upload
+      // trip. On stock the gold arc is drawn HERE, at LAND (onShardUploaded) -- honest: stock cannot
+      // see dial start. Same trip shape and same LINE_FLOOR_MS (4 s) floor the shared path already
+      // uses; not open (nothing to hold), so tripFade() fades it on the existing SHARD_FADE_MS law.
+      // One arc per landed shard, only for a host with geo (skipped above otherwise). T-SDK bundle
+      // folds this branch away.
+      if (IS_STOCK) trips.push({ lat: geo.lat, lon: geo.lon, hostKey, dir: 'upload', startedAt: now, open: false, visibleUntil: now + LINE_FLOOR_MS, fadeAt: now })
+    }
 
     // STATIONARY PIN: upload only (see the function-level comment above
     // for why download is excluded). A download never places anything
@@ -896,6 +1042,13 @@ export function createUploadMap(canvas, captionEl, onLanded) {
   // flight), not a map-drawing concern; that messaging lives in
   // web-ui.js/files.js's own status-string plumbing, not here.
   function completeWrite() {
+    // ARC HOLDS (2026-09-29, "tessera-web-arc-holds"): "this Add
+    // settles (ok/fail -- addSettled already stops new arcs; also
+    // fade/remove open attempt lines for this Add)." Any attempt that
+    // never got its own land tick (lost the shard race, or the Add
+    // failed outright) gets closed here instead of staying open
+    // forever.
+    closeAllOpenAttempts()
     if (!rafId) render()
   }
 
@@ -917,6 +1070,8 @@ export function createUploadMap(canvas, captionEl, onLanded) {
     showCandidates,
     shardLanded,
     landedHost,
+    attemptStart,
+    fadeDownloadTrips,
     completeWrite,
     reset,
     seedPins,

@@ -264,6 +264,7 @@ ipcMain.handle('tessera-sync-add', async (_e, localPath, remotePrefix) => {
   return result
 })
 
+ipcMain.handle('tessera-billing-account', async () => cliBridge.account())
 ipcMain.handle('tessera-sync-list', async () => cliBridge.syncList())
 ipcMain.handle('tessera-sync-run', async (_e, rootId) => cliBridge.syncRun(rootId))
 ipcMain.handle('tessera-sync-remove', async (_e, rootId) => cliBridge.syncRemove(rootId))

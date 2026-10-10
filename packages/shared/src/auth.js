@@ -18,6 +18,30 @@ import {
 } from './sdk.js'
 import { randomAppId, fromHex, toHex } from './utils.js'
 import { hasWrappedVault, clearVault, wrapAppKey } from './vault.js'
+import { IS_STOCK } from './door.js'
+
+// ── egress reporting (P6 Task 4, Decision 5) ────────────
+//
+// Tessera Web reports served-shard egress to its own origin
+// (`/api/v1/usage/egress`, nginx -> moneyd; ingest is not gated by the
+// top-up switch). Web ONLY:
+//   - Drop and any non-'tesseraweb' prefix are excluded;
+//   - the stock door aliases the untouched Foundation SDK, which has no
+//     egressUrl(); IS_STOCK is compile-time, so the branch is dropped
+//     entirely from the stock bundle;
+//   - desktop (Electron loads file://, or window.tesseraDesktop even on
+//     the dev server) passes fetchMode undefined -- never 'idx' -- and is
+//     excluded twice over by the fetchMode and window checks.
+// The wasm builder refuses egress config once finalized, so this must run
+// before requestConnection()/register()/connected().
+function wireEgress(builder, prefix, fetchMode) {
+  if (IS_STOCK || prefix !== 'tesseraweb' || fetchMode !== 'idx') return
+  if (typeof location === 'undefined') return
+  if (location.protocol !== 'http:' && location.protocol !== 'https:') return
+  if (typeof window !== 'undefined' && window.tesseraDesktop && window.tesseraDesktop.isDesktop) return
+  if (typeof builder.egressUrl !== 'function') return
+  builder.egressUrl(location.origin + '/api/v1/usage/egress')
+}
 
 // ── local-storage keys ──────────────────────────────────
 function lsKeys(prefix) {
@@ -66,6 +90,23 @@ export function clearCredentials(prefix = 'tessera') {
   const LS = lsKeys(prefix)
   Object.values(LS).forEach(k => localStorage.removeItem(k))
   clearVault(prefix)
+  clearAccountScopedCache(prefix)
+}
+
+// BUGFIX (2026-10-03, "tessera-web-stale-map-cross-account"): files.js's
+// mapshards/folders/mapshown records are keyed ONLY by this browser's
+// PREFIX (`<prefix>.mapshards` etc, see files.js), never by appId --
+// they were written on the assumption of one account per browser/prefix
+// for life. Reported symptom: lock an account, then create a BRAND NEW
+// one on the same browser -- the new account's map still shows the old
+// account's shard pins, because nothing ever cleared those keys when the
+// old appId stopped being this browser's active account. Kept as inline
+// literal suffixes (not imported from files.js) to avoid a new
+// auth.js -> files.js import edge; must stay byte-identical to
+// files.js's own VIRTUAL_FOLDERS_KEY_SUFFIX / MAP_SHARDS_KEY_SUFFIX /
+// MAP_SHOWN_KEY_SUFFIX if those ever change.
+function clearAccountScopedCache(prefix) {
+  ;['.folders', '.mapshards', '.mapshown'].forEach(suffix => localStorage.removeItem(prefix + suffix))
 }
 
 /**
@@ -104,6 +145,12 @@ export async function beginConnection(prefix = 'tessera', fetchMode) {
 
   let { appId } = getSaved(prefix)
   if (!appId) {
+    // Minting a BRAND NEW identity for this browser/prefix -- wipe any
+    // mapshards/folders/mapshown cache left behind by whatever account
+    // previously occupied this prefix (see clearAccountScopedCache's own
+    // comment above). Without this, a fresh account inherits the prior
+    // occupant's map pins/folder tree on first boot.
+    clearAccountScopedCache(prefix)
     appId = randomAppId()
     persist({ appId }, prefix)
   }
@@ -115,6 +162,7 @@ export async function beginConnection(prefix = 'tessera', fetchMode) {
     description: 'Tessera storage client',
     serviceUrl: idxUrl,
   })
+  wireEgress(builder, prefix, fetchMode)
 
   await builder.requestConnection()
   const approvalUrl = builder.responseUrl()
@@ -214,7 +262,7 @@ export async function completeRegistration(builder, phrase, prefix = 'tessera') 
 export async function tryReconnect(prefix = 'tessera', fetchMode) {
   const saved = getSaved(prefix)
   if (!saved.appKey || !saved.appId) return null
-  return reconnectWithAppKey(saved.appId, saved.appKey, fetchMode)
+  return reconnectWithAppKey(saved.appId, saved.appKey, fetchMode, prefix)
 }
 
 /**
@@ -230,8 +278,12 @@ export async function tryReconnect(prefix = 'tessera', fetchMode) {
  * initSia() with fetchMode===undefined, which still installed the
  * WebTransport shim regardless of the invite-connect path's 'idx' mode.
  * Now threads fetchMode through like every other auth.js function.
+ *
+ * PREFIX (P6 Task 4): threaded through for the same reason -- Unlock is
+ * Tessera Web's primary path back into an existing account, so the egress
+ * reporter has to be configured here too (see wireEgress).
  */
-export async function reconnectWithAppKey(appId, appKeyHex, fetchMode) {
+export async function reconnectWithAppKey(appId, appKeyHex, fetchMode, prefix = 'tessera') {
   await initSia(fetchMode)
   try {
     const idxUrl = getIndexerUrl()
@@ -241,6 +293,7 @@ export async function reconnectWithAppKey(appId, appKeyHex, fetchMode) {
       description: 'Tessera storage client',
       serviceUrl: idxUrl,
     })
+    wireEgress(builder, prefix, fetchMode)
     const key = new AppKey(fromHex(appKeyHex))
     const sdk = await builder.connected(key)
     if (sdk) registerSdk(sdk)
@@ -287,6 +340,11 @@ export async function beginRecovery(phrase, onStatus, prefix = 'tessera', fetchM
 
   let { appId } = getSaved(prefix)
   if (!appId) {
+    // Same reasoning as beginConnection() above: recovering onto a
+    // browser/prefix slot with no current appId means whatever account
+    // last occupied it is gone -- wipe its leftover mapshards/folders
+    // cache before this recovery writes a new appId into it.
+    clearAccountScopedCache(prefix)
     appId = randomAppId()
     persist({ appId }, prefix)
   }
@@ -298,6 +356,7 @@ export async function beginRecovery(phrase, onStatus, prefix = 'tessera', fetchM
     description: 'Tessera storage client',
     serviceUrl: idxUrl,
   })
+  wireEgress(builder, prefix, fetchMode)
 
   // Try direct recovery first (no approval needed)
   try {
@@ -334,6 +393,7 @@ export async function beginRecovery(phrase, onStatus, prefix = 'tessera', fetchM
     description: 'Tessera storage client',
     serviceUrl: idxUrl,
   })
+  wireEgress(approvalBuilder, prefix, fetchMode)
 
   await approvalBuilder.requestConnection()
   const approvalUrl = approvalBuilder.responseUrl()
