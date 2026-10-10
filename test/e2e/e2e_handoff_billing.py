@@ -82,6 +82,24 @@ FLEET_DB = "tessera_e2e_task8_fleet"
 INDEXD_DB = "tessera_e2e_task8_indexd"
 MAINTENANCE_DB = "postgres"
 FORBIDDEN_DB_NAMES = {"fleet", "indexd"}
+SCRATCH_DB_PREFIX = "tessera_e2e_"
+REQUIRED_CAPTURES = (
+    "harness.log",
+    "moneyd.out",
+    "front.access.log",
+    "stub.access.log",
+    "happy.stdout",
+    "happy.stderr",
+    "render.stdout",
+    "render.stderr",
+    "consume409.stdout",
+    "consume409.stderr",
+    "consume410.stdout",
+    "consume410.stderr",
+    "node-happy-diary.log",
+    "node-consume-409.log",
+    "node-consume-410.log",
+)
 QUOTA_MAX_PINNED = {
     "default": 10**12,
     "plan-pending": 0,
@@ -705,6 +723,13 @@ class Harness:
         finally:
             conn.close()
 
+    def guarded_dsn(self, dsn: str, dbname: str) -> str:
+        if dbname in FORBIDDEN_DB_NAMES or not dbname.startswith(
+            SCRATCH_DB_PREFIX
+        ):
+            raise Fail(f"refusing to target database name {dbname!r}")
+        return with_dbname(dsn, dbname)
+
     def create_databases(self) -> None:
         live = os.environ.get("TESSERA_FLEET_DSN") or read_env_file(
             TESSERAD_ENV_FILE
@@ -714,11 +739,8 @@ class Harness:
                 "TESSERA_FLEET_DSN is not set and not found in "
                 f"{TESSERAD_ENV_FILE}"
             )
-        for name in (FLEET_DB, INDEXD_DB):
-            if name in FORBIDDEN_DB_NAMES:
-                raise Fail(f"refusing to touch live database name {name}")
-        self.fleet_dsn = with_dbname(live, FLEET_DB)
-        self.indexd_dsn = with_dbname(live, INDEXD_DB)
+        self.fleet_dsn = self.guarded_dsn(live, FLEET_DB)
+        self.indexd_dsn = self.guarded_dsn(live, INDEXD_DB)
         self.admin_dsn = with_dbname(live, MAINTENANCE_DB)
         admin = psycopg2.connect(self.admin_dsn)
         admin.autocommit = True
@@ -1206,31 +1228,43 @@ class Harness:
         self.scan_captures()
 
     def scan_captures(self) -> None:
-        seen: set[Path] = set()
-        paths = []
+        texts: dict[str, str] = {}
+        missing_files: list[str] = []
         for path in self.captured:
-            if path in seen or not path.is_file():
+            if path.name in texts or path.name in missing_files:
                 continue
-            seen.add(path)
-            paths.append(path)
-        for code in self.codes:
-            for path in paths:
-                text = path.read_text(errors="replace")
-                if code in text:
-                    raise Fail(
-                        f"handoff code sha256:{fingerprint(code)} leaked "
-                        f"into captured artifact {path.name}"
-                    )
-            for path in paths:
-                text = path.read_text(errors="replace")
-                if urllib.parse.quote(code, safe="") != code and urllib.parse.quote(code, safe="") in text:
-                    raise Fail(
-                        f"url-encoded handoff code sha256:{fingerprint(code)} "
-                        f"leaked into captured artifact {path.name}"
-                    )
+            if not path.is_file():
+                missing_files.append(path.name)
+                continue
+            texts[path.name] = path.read_text(errors="replace")
+        if missing_files:
+            raise Fail(
+                "captured artifacts listed but missing on disk: "
+                + ", ".join(sorted(missing_files))
+            )
+        missing_required = [
+            name for name in REQUIRED_CAPTURES if name not in texts
+        ]
         self.check(
-            len(self.codes) >= 3,
-            f"scanned {len(paths)} captured artifacts for {len(self.codes)} codes",
+            not missing_required,
+            "required artifacts present and scanned "
+            f"({len(REQUIRED_CAPTURES)}: {', '.join(REQUIRED_CAPTURES)})",
+        )
+        forms: dict[str, list[str]] = {}
+        for code in self.codes:
+            forms[fingerprint(code)] = sorted({code, urllib.parse.quote(code, safe="")})
+        for code_id, code_forms in forms.items():
+            for form in code_forms:
+                for name, text in texts.items():
+                    if form in text:
+                        raise Fail(
+                            "handoff code sha256:"
+                            f"{code_id} leaked into captured artifact {name}"
+                        )
+        self.check(
+            len(texts) >= len(REQUIRED_CAPTURES),
+            f"scanned {len(texts)} captured artifacts for "
+            f"{len(self.codes)} codes (raw + URL-encoded forms)",
         )
         network_logs = [
             self.tmp / "moneyd.out",
