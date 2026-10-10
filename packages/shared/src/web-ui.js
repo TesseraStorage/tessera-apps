@@ -55,6 +55,12 @@ import {
   extractHandoffCode, mapLegacyHandoffToFragment, scrubHandoffFragment,
   readHandoffMarker, createHandoffMachine,
 } from './handoff.js'
+// BILLING (P6 Task 3, Decision 3): account dashboard fields, closed top-up,
+// signed-out state, desktop bridge hook. billing.js owns the /api/v1 client
+// and the rendering; this file only wires the screen and the header button.
+import {
+  BillingApiError, createBillingClient, createBillingView,
+} from './billing.js'
 
 const PREFIX = 'tesseraweb'
 
@@ -108,9 +114,10 @@ const r = {}
 
 function cacheRefs() {
   const ids = [
-    'header', 'readyDot', 'storageSummary', 'btnLock', 'btnForgetDevice',
+    'header', 'readyDot', 'storageSummary', 'btnBilling', 'btnLock', 'btnForgetDevice',
     'welcomeScreen', 'btnCreate', 'btnHaveWords',
     'handoffScreen', 'handoffTitle', 'handoffBody', 'btnHandoffPrimary', 'btnHandoffCancel', 'handoffStatus',
+    'billingScreen', 'billingBody', 'btnBillingBack',
     'inviteScreen', 'inviteInput', 'btnInviteContinue', 'inviteRequestLink', 'inviteStatus',
     'requestStubScreen', 'btnRequestBack',
     'wordsScreen', 'wordsText', 'btnWordsSaved', 'wordsStatus',
@@ -157,6 +164,11 @@ const SKELETON = /*html*/`
          isDesktop() (see wireEvents() below), never in the browser build,
          since there is no local filesystem or bundled CLI to drive there. -->
     <button id="btnSyncFolders" class="btn btn-ghost hidden">Synced Folders</button>
+    <!-- BILLING (P6 Task 3, Decision 3): account dashboard entry point.
+         Web-only data comes from same-origin /api/v1 with the moneyd
+         session cookie; desktop answers through the CLI bridge and never
+         fetches /api/v1. Hidden in the stock door (no billing session). -->
+    <button id="btnBilling" class="btn btn-ghost btn-logout hidden">Account</button>
     <button id="btnLock" class="btn btn-ghost btn-logout">Lock</button>
     <!-- FORGET THIS DEVICE (2026-09-29): re-exposes onRemoveBrowser(),
          which was already correct and kept in code on purpose after its
@@ -298,6 +310,18 @@ const SKELETON = /*html*/`
     <p id="unlockStatus" class="status-text"></p>
   </section>
 
+
+  <!-- BILLING (P6 Task 3, Decision 3): balance, plan, period end, days left,
+       open slabs, egress used/allowance, warnings, status/kind/topup_url.
+       billing.js renders the content into #billingBody; the top-up form is
+       only ever built when the API's topup_open === true. -->
+  <section id="billingScreen" class="panel column-screen hidden">
+    <h2>Account</h2>
+    <div id="billingBody"></div>
+    <p style="margin-top:14px">
+      <button id="btnBillingBack" class="btn btn-outline btn-lg">Back</button>
+    </p>
+  </section>
 
   <!-- FILES + MAP -->
   <div id="filesLayout" class="files-layout">
@@ -560,11 +584,21 @@ export async function mountApp(container) {
     root.querySelectorAll('.logo, .welcome-brand').forEach(el => { el.textContent = 'Stock' })
   }
 
+  // BILLING (P6 Decision 3): one client for this page life. The web app
+  // talks to same-origin /api/v1 with the moneyd session cookie; desktop
+  // resolves window.tesseraDesktop.billingAccount (Task 6's CLI bridge) and
+  // never fetches /api/v1. The stock door has no billing session.
+  billingClient = createBillingClient({})
+  if (!IS_STOCK) r.btnBilling.classList.remove('hidden')
+
   // wire events
   r.btnCreate.addEventListener('click', onShowInvite)
   r.btnHaveWords.addEventListener('click', onShowRecover)
   r.btnHandoffPrimary.addEventListener('click', onHandoffPrimary)
   r.btnHandoffCancel.addEventListener('click', onHandoffCancel)
+  // BILLING (P6 Decision 3): header entry point + Back, web and desktop.
+  r.btnBilling.addEventListener('click', onShowBilling)
+  r.btnBillingBack.addEventListener('click', () => history.back())
   r.btnInviteContinue.addEventListener('click', onInviteContinue)
   r.inviteRequestLink.addEventListener('click', e => { e.preventDefault(); onShowRequestStub() })
   r.btnRequestBack.addEventListener('click', () => history.back())
@@ -793,6 +827,9 @@ export async function mountApp(container) {
     // can change across, so re-read it here every time, not just once
     // at boot.
     syncDebugPane()
+    // BILLING (P6 Decision 3): Back/Forward into the Account screen
+    // re-reads the summary (balance may have moved while away).
+    if (screen === 'billing') loadBilling()
     setScreen(screen)
   })
 
@@ -964,6 +1001,7 @@ function gotoFolder(path) {
 function renderScreen(s) {
   r.welcomeScreen.classList.toggle('hidden', s !== 'welcome')
   r.handoffScreen.classList.toggle('hidden', s !== 'handoff')
+  r.billingScreen.classList.toggle('hidden', s !== 'billing')
   r.inviteScreen.classList.toggle('hidden', s !== 'invite')
   r.requestStubScreen.classList.toggle('hidden', s !== 'requestStub')
   r.wordsScreen.classList.toggle('hidden', s !== 'words')
@@ -1218,6 +1256,54 @@ async function initHandoff() {
   })
   await handoffMachine.start({ code })
   return true
+}
+
+// ── billing (P6 Decision 3) ──────────────────────────────
+//
+// The Account screen is web and desktop (unlike handoff): the web client
+// reads same-origin /api/v1/account with the moneyd session cookie, while
+// the desktop client answers through window.tesseraDesktop.billingAccount
+// (Task 6) and never fetches /api/v1. billing.js owns all field rendering;
+// this block only drives the screen: load on entry, map 401 to the sign-in
+// copy, map a missing/broken desktop bridge to the "run tessera login"
+// empty state, everything else to a retryable load error.
+
+let billingClient = null
+let billingView = null
+
+function onShowBilling() {
+  goto('billing')
+  loadBilling()
+}
+
+async function loadBilling() {
+  if (!billingView) {
+    billingView = createBillingView({
+      client: billingClient,
+      canTopup: !isDesktop(),
+      onRetry: () => loadBilling(),
+    })
+    r.billingBody.textContent = ''
+    r.billingBody.appendChild(billingView.el)
+  }
+  billingView.showLoading()
+  try {
+    const account = await billingClient.getAccount()
+    billingView.showAccount(account)
+  } catch (e) {
+    if (e instanceof BillingApiError && e.status === 401) {
+      billingView.showSignedOut()
+    } else if (
+      e instanceof BillingApiError &&
+      (e.code === 'desktop_bridge_unavailable' ||
+        e.code === 'desktop_bridge_error' ||
+        e.code === 'no_credentials')
+    ) {
+      billingView.showDesktopUnavailable()
+    } else {
+      billingView.showError('The account service did not answer. It may be temporarily unavailable.')
+    }
+  }
 }
 
 async function doBoot() {

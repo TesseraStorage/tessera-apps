@@ -6,6 +6,7 @@
   "exports": {
     ".": "./src/index.js",
     "./handoff": "./src/handoff.js",
+    "./billing": "./src/billing.js",
     "./web-ui": "./src/web-ui.js",
     "./style.css": "./src/style.css"
   },
