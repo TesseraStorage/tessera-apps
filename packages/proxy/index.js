@@ -19,7 +19,10 @@ const CORS = { 'access-control-allow-origin':'*','access-control-allow-methods':
 // Used for all host operations (upload/download) because new user
 // accounts don't have contracts formed yet.
 const SERVICE_APP_ID = '1483449cb22e73c9936cc4153bf071c4008c0787faf078d35bf95f702b326f23'
-const SERVICE_APP_KEY = '6be4f21d5a4da5ab422077cb8188885e947f10aced92cded35c5aa9afad9d42c'
+// The service-account seed is a secret and is never committed: supply it via
+// the proxy environment. A previous value was committed to this repo's history
+// and must be treated as compromised (rotate/revoke before use).
+const SERVICE_APP_KEY = process.env.TESSERA_PROXY_SERVICE_APP_KEY || ''
 
 let nativeSdk = null
 let serviceSdk = null  // cached service account SDK for host ops
@@ -40,6 +43,14 @@ async function getNativeSdk() {
 
 async function getServiceSdk() {
   if (serviceSdk) return serviceSdk
+
+  if (!/^[0-9a-fA-F]{64}$/.test(SERVICE_APP_KEY)) {
+    throw new Error(
+      'TESSERA_PROXY_SERVICE_APP_KEY is not set: the proxy needs the indexd ' +
+        'service-account seed (64 hex chars) for host operations. Set it in the ' +
+        'proxy environment; never commit it.'
+    )
+  }
 
   const { AppKey, Builder } = await getNativeSdk()
   const appIdBytes = new Uint8Array(Buffer.from(SERVICE_APP_ID, 'hex'))
