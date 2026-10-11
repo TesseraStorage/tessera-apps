@@ -125,6 +125,12 @@ Then open **http://localhost:3099**.
 > proxy (port `3099`) handles indexer CORS and relays raw file bytes to hosts via the
 > native SDK. Without it running, upload/download won't work in the browser.
 
+> **Proxy service-account key:** `packages/proxy/index.js` funds host operations with an
+> indexd service account. Its 64-hex seed is not in the repo — set
+> `TESSERA_PROXY_SERVICE_APP_KEY` in the proxy environment (the proxy fails fast with a
+> clear error when it is missing or malformed). A previous value was committed to this
+> repository's history; treat it as compromised and rotate/revoke it before any use.
+
 ### Desktop app (development)
 
 ```bash
