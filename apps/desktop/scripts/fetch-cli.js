@@ -13,7 +13,7 @@ import https from 'https'
 import { fileURLToPath } from 'url'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const TESSERA_CLI_VERSION = process.env.TESSERA_CLI_VERSION || 'v1.6.0'
+const TESSERA_CLI_VERSION = process.env.TESSERA_CLI_VERSION || 'v1.6.1'
 
 // Build-time-only override (Decision 6 / Task 6): when set, bundle the named
 // local tessera-cli binary instead of downloading a pinned release. It exists
