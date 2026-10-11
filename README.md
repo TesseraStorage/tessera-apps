@@ -219,8 +219,9 @@ map to `no_credentials` (the "run `tessera login`" empty state),
 
 **CLI dependency:** desktop account data requires a bundled `tessera-cli` that
 supports `account`. The pinned default (`TESSERA_CLI_VERSION`, currently
-`v1.5.0`) predates it, so a release build shows the "run `tessera login`" empty
-state to end users until a new CLI release is tagged and pinned. For local
+`v1.6.0`) includes it, so a release build feeds the balance panel from the
+bundled CLI; with no billing credential it shows the "run `tessera login`"
+empty state. For local
 development/testing you can bundle a locally built binary with the
 build-time-only override:
 
@@ -356,7 +357,7 @@ git push origin v0.0.x
 |----------|---------|-------------|
 | `PORT` / `TESSERA_PORT` | `3099` | Proxy/relay port |
 | `VITE_DEV_SERVER_URL` | — | Set by `start-dev.js` so Electron loads the Vite dev server |
-| `TESSERA_CLI_VERSION` | `v1.5.0` | Pinned `tessera-cli` release downloaded by `fetch:cli` and bundled into the desktop app |
+| `TESSERA_CLI_VERSION` | `v1.6.0` | Pinned `tessera-cli` release downloaded by `fetch:cli` and bundled into the desktop app |
 | `TESSERA_CLI_PATH` | — | Build-time-only override: copy this local CLI binary instead of downloading a pinned release; never set in CI defaults |
 
 ---

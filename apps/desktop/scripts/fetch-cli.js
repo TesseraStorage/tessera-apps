@@ -13,11 +13,11 @@ import https from 'https'
 import { fileURLToPath } from 'url'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const TESSERA_CLI_VERSION = process.env.TESSERA_CLI_VERSION || 'v1.5.0'
+const TESSERA_CLI_VERSION = process.env.TESSERA_CLI_VERSION || 'v1.6.0'
 
 // Build-time-only override (Decision 6 / Task 6): when set, bundle the named
 // local tessera-cli binary instead of downloading a pinned release. It exists
-// so the pinned v1.5.0 (which lacks `account`) can be swapped for a locally
+// so the pinned release can be swapped for a locally
 // built HEAD during development/testing of the balance panel. This is a
 // build-time scaffolding hook, NOT a runtime switch: it is never set in the
 // CI defaults (release builds always take the pinned download above), and the

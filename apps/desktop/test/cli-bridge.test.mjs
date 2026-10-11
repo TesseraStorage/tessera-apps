@@ -189,9 +189,9 @@ test('account() maps a missing bundled binary to desktop_bridge_unavailable', as
 // empty TESSERA_HOME must report no_credentials offline and deterministically.
 //
 // Gated on the binary actually supporting `account`, not merely existing:
-// the pinned release v1.5.0 predates `account`, so a matrix leg that only ran
-// `fetch:cli` (no TESSERA_CLI_PATH local build / Task 7 stub) must skip rather
-// than fail on "Unknown command: account".
+// a matrix leg that only ran `fetch:cli` (no TESSERA_CLI_PATH local build /
+// Task 7 stub) must skip rather than fail on "Unknown command: account" when
+// the pinned release happens to predate `account`.
 const bundled = path.join(__dirname, '..', 'resources', 'cli', BIN)
 function bundledAccountSupported() {
   if (!fs.existsSync(bundled)) return false
@@ -204,7 +204,7 @@ function bundledAccountSupported() {
     })
     return true
   } catch (e) {
-    // v1.5.0 answers "Unknown command: account"; a capable build answers
+    // An older CLI answers "Unknown command: account"; a capable build answers
     // "no billing credentials" and exits 1 too, so probe the output.
     return !/unknown command/i.test(`${e.stdout || ''}${e.stderr || ''}`)
   } finally {
