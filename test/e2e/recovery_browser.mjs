@@ -9,8 +9,10 @@
 // Secrets (the phrase, the session cookie) are read from files/env and are
 // never written to stdout, the capture log, or the result file.
 
-import { readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
+
+const shotsDir = process.env.SHOTS_DIR || ''
 
 const pw = await import(pathToFileURL(process.env.PW_CORE).href)
 const chromium = pw.chromium || pw.default?.chromium
@@ -42,6 +44,13 @@ try {
     },
   ])
   page = await context.newPage()
+  // Packet 3: optional screenshots at each key screen (visual proof runs).
+  const shot = async (name) => {
+    if (!shotsDir) return
+    mkdirSync(shotsDir, { recursive: true })
+    await page.screenshot({ path: `${shotsDir}/${name}.png`, fullPage: true })
+    log('shot ' + name)
+  }
   page.on('pageerror', (e) => { logs.push('pageerror: ' + e.message); log('pageerror: ' + e.message) })
   page.on('console', (m) => {
     logs.push(m.type() + ': ' + m.text())
@@ -57,8 +66,12 @@ try {
 
   // Welcome -> "I already have an account".
   await page.waitForSelector('#welcomeScreen:not(.hidden)', { timeout: 30000 })
+  await page.waitForTimeout(300)
+  await shot('welcome')
   await page.click('#btnHaveWords')
   await page.waitForSelector('#recoverScreen:not(.hidden)', { timeout: 30000 })
+  await page.waitForTimeout(300)
+  await shot('recover')
 
   await page.fill('#recoverPhraseInput', phrase)
   await page.click('#btnRecoverContinue')
@@ -83,6 +96,8 @@ try {
   }
 
   // Set a browser password, then land on files.
+  await page.waitForTimeout(300)
+  await shot('setpassword')
   await page.fill('#newPassword', 'e2e-throwaway-password')
   await page.fill('#newPasswordConfirm', 'e2e-throwaway-password')
   await page.click('#btnSetPassword')
@@ -97,6 +112,14 @@ try {
     { timeout: 120000 },
   )
   result.filesText = (await page.textContent('#fileList')) || ''
+  await shot('files')
+  // Packet 3: the signed-in shell (header + actions) and the account screen.
+  const bill = await page.$('#btnBilling:not(.hidden)')
+  if (bill) {
+    await page.click('#btnBilling')
+    await page.waitForTimeout(1200)
+    await shot('account')
+  }
   result.ok = true
 } catch (e) {
   result.error = String(e.message || e)

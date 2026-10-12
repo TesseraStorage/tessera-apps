@@ -384,6 +384,7 @@ class Harness:
         self.agent_pepper = secrets.token_urlsafe(48)
         self.public_base = ""
         self.advertise_url = ""
+        self.shots_dir = ""
         self.hosts = 15
         self.email = "recovery-e2e@example.test"
         self.billing_id = "TESS-E2E-REC-" + secrets.token_hex(4)
@@ -731,6 +732,7 @@ class Harness:
             "PHRASE_FILE": str(phrase_file),
             "EXPECT_FILE": expect_file,
             "OUT_FILE": str(out_file),
+            "SHOTS_DIR": self.shots_dir,
         }
         proc = subprocess.run(
             ["node", str(BROWSER_DRIVER)], env=env, capture_output=True,
@@ -809,6 +811,12 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--cli-root", type=Path, default=DEFAULT_CLI_ROOT)
     ap.add_argument("--client", choices=("both", "cli", "web"), default="both")
     ap.add_argument("--keep", action="store_true")
+    ap.add_argument(
+        "--screenshots",
+        type=Path,
+        default=None,
+        help="capture PNGs of the browser screens into this directory (visual proof)",
+    )
     return ap.parse_args()
 
 
@@ -817,6 +825,8 @@ def main() -> int:
     h = Harness(args.tessera_root, args.cli_root, args.keep, args.client)
     phrase = generate_phrase(h.tmp)
     h.secrets_scan = [phrase]
+    if args.screenshots:
+        h.shots_dir = str(args.screenshots)
 
     def on_signal(signum, frame):
         h.cleanup()
