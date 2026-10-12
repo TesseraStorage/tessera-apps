@@ -1,6 +1,6 @@
 {
   "name": "tessera-desktop",
-  "version": "1.0.0",
+  "version": "0.0.0",
   "description": "Tessera desktop client — decentralized storage on Sia",
   "homepage": "https://github.com/TesseraStorage/tessera-apps",
   "author": {
@@ -13,10 +13,10 @@
   "scripts": {
     "dev": "node scripts/dev.js",
     "build": "vite build",
-    "package": "npm run build && electron-builder",
-    "package:mac": "npm run build && electron-builder --mac",
-    "package:linux": "npm run build && electron-builder --linux",
-    "package:win": "npm run build && electron-builder --win",
+    "package": "npm run build && node scripts/package.mjs",
+    "package:mac": "npm run build && node scripts/package.mjs --mac",
+    "package:linux": "npm run build && node scripts/package.mjs --linux",
+    "package:win": "npm run build && node scripts/package.mjs --win",
     "fetch:cli": "node scripts/fetch-cli.js"
   },
   "build": {
