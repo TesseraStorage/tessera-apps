@@ -318,19 +318,147 @@ export function adoptSharedIdentity(appId, appKeyHex, prefix = 'tessera') {
   persist({ appId, appKey: appKeyHex }, prefix)
 }
 
-// ── recovery flow ───────────────────────────────────────
+// ── server-assisted recovery (2026-10-12, "seed-phrase recovery") ──
+//
+// The app key is derived from (phrase, app_id, shared secret); the shared
+// secret only exists after an app connect-key approval, and app_id used to be
+// a random per-browser value lost with browser data. A seed-only user could
+// therefore never recover: the old "direct register" attempt always failed
+// and the fallback approval page demanded a connect key ("App password") that
+// web users never received.
+//
+// moneyd now returns the account's own recovery material to an authenticated
+// session (POST /api/v1/credentials/recovery): the ORIGINAL app_id, the
+// account public key, and the raw connect key. The client rebuilds with the
+// original app_id, approves the connection headlessly with the connect key
+// (the same POST auth.html's form makes, already used by connectWithInvite),
+// and registers the user's phrase -- re-deriving the same app key and the
+// same account. The phrase stays the only key material; the connect key only
+// authorizes the connection, and the public-key check rejects a wrong phrase
+// before anything is persisted.
+const RECOVERY_PATH = '/api/v1/credentials/recovery'
+
+function recoveryUrl(base) {
+  return (base ? String(base).replace(/\/+$/, '') : '') + RECOVERY_PATH
+}
 
 /**
- * Recover an existing account from a 12-word BIP-39 recovery phrase.
+ * Ask moneyd for this session's recovery material.
+ * Returns { status, appId?, publicKey?, connectKey?, error? }; transport
+ * failures reject. 401 means no authenticated session on this browser;
+ * 404 means the billing account has no active storage identity.
+ */
+export async function fetchRecoveryCredential(opts = {}) {
+  const fetchFn = opts.fetchFn || ((...args) => globalThis.fetch(...args))
+  const res = await fetchFn(recoveryUrl(opts.apiBase), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
+  })
+  let body = null
+  try {
+    body = await res.json()
+  } catch (_) {}
+  if (res.status === 200) {
+    if (body && typeof body.connect_key === 'string' && body.connect_key) {
+      return {
+        status: 200,
+        appId: body.app_id || null,
+        publicKey: body.public_key || null,
+        connectKey: body.connect_key,
+      }
+    }
+    return { status: 0, error: 'malformed_response' }
+  }
+  const detailError = body && body.detail && body.detail.error
+  if (res.status === 401) return { status: 401, error: detailError || 'unauthorized' }
+  if (res.status === 404) return { status: 404, error: detailError || 'identity_not_found' }
+  return { status: res.status, error: detailError || 'unexpected' }
+}
+
+/**
+ * Restore an account on this device with the recovery phrase, given the
+ * account's recovery material. Reuses the connectWithInvite mechanics but
+ * with the ORIGINAL app_id and the user's own phrase, so the derived app key
+ * -- and therefore the account -- is the same one the phrase always had.
  *
- * First attempts direct recovery (without approval) by calling
- * builder.register() which derives the AppKey from the mnemonic.
- * If that fails (account needs re-approval), falls back to the
- * approval-based flow.
+ * opts (tests / E2E): initSia, makeBuilder, fetchFn, indexerUrl,
+ * expectedPublicKey.
+ */
+export async function recoverWithConnectKey(
+  appId,
+  connectKey,
+  phrase,
+  prefix = 'tessera',
+  fetchMode,
+  opts = {},
+) {
+  const init = opts.initSia || initSia
+  const makeBuilder =
+    opts.makeBuilder || ((url, meta) => new Builder(url, meta))
+  const fetchFn = opts.fetchFn || ((...args) => globalThis.fetch(...args))
+  const idxUrl = opts.indexerUrl || getIndexerUrl()
+
+  await init(fetchMode)
+
+  const builder = makeBuilder(idxUrl, {
+    appId,
+    name: 'Tessera',
+    description: 'Tessera storage client',
+    serviceUrl: idxUrl,
+  })
+  wireEgress(builder, prefix, fetchMode)
+
+  await builder.requestConnection()
+  const approvalUrl = builder.responseUrl()
+  const res = await fetchFn(approvalUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: 'Basic ' + btoa(':' + connectKey),
+    },
+    body: JSON.stringify({ approve: true }),
+  })
+  if (!res.ok) {
+    throw new Error('approval failed (HTTP ' + res.status + ')')
+  }
+
+  await builder.waitForApproval()
+  const sdk = await builder.register(phrase)
+
+  // A wrong phrase derives a different key; refuse before persisting so this
+  // device never silently becomes a brand-new, empty identity.
+  if (opts.expectedPublicKey && typeof sdk.appKey().publicKey === 'function') {
+    if (sdk.appKey().publicKey() !== opts.expectedPublicKey) {
+      throw new Error('that recovery phrase does not match this account')
+    }
+  }
+
+  const appKeyHex = toHex(sdk.appKey().export())
+  // Same clear-then-persist order as completeRecovery()/completeRegistration().
+  clearCredentials(prefix)
+  persist({ appId, appKey: appKeyHex }, prefix)
+  registerSdk(sdk)
+  return sdk
+}
+
+// ── recovery flow (approval-link path; desktop only now) ──
+
+/**
+ * Start the approval-based recovery flow for a 12-word phrase.
  *
- * Returns { sdk, needsApproval, builder, appId, approvalUrl }.
- * When needsApproval is true, the caller must show the approval URL
- * and then call completeRecovery().
+ * NOTE (2026-10-12): the old "direct recovery" attempt here called
+ * builder.register() on a disconnected builder, which the SDK always
+ * rejects ("must be in approved state") -- it could never succeed. More
+ * fundamentally, the app key is NOT derived from the phrase alone; it also
+ * needs the server-side app_id and shared secret, so there is no
+ * approval-free path to implement. Tessera Web now uses
+ * fetchRecoveryCredential()/recoverWithConnectKey() (same account, no app
+ * password); this approval-link flow remains for desktop, which has no
+ * moneyd session, until its own session-backed recovery ships.
+ *
+ * Returns { builder, appId, approvalUrl, phrase, needsApproval: true }.
+ * The caller shows the approval URL and then calls completeRecovery().
  */
 export async function beginRecovery(phrase, onStatus, prefix = 'tessera', fetchMode) {
   await initSia(fetchMode)
@@ -350,41 +478,6 @@ export async function beginRecovery(phrase, onStatus, prefix = 'tessera', fetchM
   }
 
   const idxUrl = getIndexerUrl()
-  const builder = new Builder(idxUrl, {
-    appId,
-    name: 'Tessera',
-    description: 'Tessera storage client',
-    serviceUrl: idxUrl,
-  })
-  wireEgress(builder, prefix, fetchMode)
-
-  // Try direct recovery first (no approval needed)
-  try {
-    if (onStatus) onStatus('Validating recovery phrase\u2026')
-    const sdk = await builder.register(phrase)
-    const appKeyHex = toHex(sdk.appKey().export())
-    // REPLACE, DON'T COEXIST (2026-09-29): recovering an account on this
-    // device is an explicit "this device's identity is now THIS
-    // account" action. If a vault from a DIFFERENT previous account
-    // already existed here, persist()'s latch (see its own comment)
-    // would otherwise silently drop this new plaintext key next to the
-    // old vault -- the account looks "recovered" but nothing was
-    // actually saved, and the stale old vault + old password keeps
-    // logging back into the OLD account after every restart. Only clear
-    // the old vault/plaintext AFTER register() above has already
-    // confirmed the phrase is real and we have a live session -- a
-    // syntactically-valid-but-wrong phrase must never destroy a working
-    // old account for nothing.
-    clearCredentials(prefix)
-    persist({ appId, appKey: appKeyHex }, prefix)
-    registerSdk(sdk)
-    if (onStatus) onStatus('Account recovered!')
-    return { sdk, needsApproval: false }
-  } catch (e) {
-    console.warn('Direct recovery failed, falling back to approval flow:', e.message)
-  }
-
-  // Fall back to approval-based recovery with a fresh builder
   if (onStatus) onStatus('Requesting approval\u2026')
 
   const approvalBuilder = new Builder(idxUrl, {
@@ -409,9 +502,8 @@ export async function completeRecovery(builder, phrase, prefix = 'tessera') {
   const sdk = await builder.register(phrase)
   const appKeyHex = toHex(sdk.appKey().export())
   const { appId } = getSaved(prefix)
-  // Same latch bug + fix as beginRecovery's direct-success branch and
-  // completeRegistration -- this is the post-approval completion path,
-  // hit whenever recovery needed a new-device approval first.
+  // Same latch bug + fix as completeRegistration/recoverWithConnectKey --
+  // this is the post-approval completion path (desktop).
   clearCredentials(prefix)
   persist({ appId, appKey: appKeyHex }, prefix)
   registerSdk(sdk)
