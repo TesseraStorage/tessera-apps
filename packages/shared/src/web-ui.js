@@ -151,46 +151,70 @@ function cacheRefs() {
   for (const id of ids) r[id] = $(id)
 }
 
+// ── Tessera mark (Packet 3) ───────────────────────────────
+// Same geometry as Tessera-FE's TesseraMark.vue, so the app and the site
+// show the identical logo. Never redrawn or altered — copied verbatim.
+const MARK_SVG = /*html*/`<svg viewBox="0 0 32 32" fill="none" aria-hidden="true">
+      <rect x="1" y="1" width="30" height="30" rx="7.5" stroke="currentColor" stroke-opacity="0.22" />
+      <rect x="7" y="7" width="5" height="5" rx="1.2" fill="#58a6ff" />
+      <rect x="13.5" y="7" width="5" height="5" rx="1.2" fill="#58a6ff" fill-opacity="0.75" />
+      <rect x="20" y="7" width="5" height="5" rx="1.2" fill="#58a6ff" fill-opacity="0.4" />
+      <rect x="7" y="13.5" width="5" height="5" rx="1.2" fill="#58a6ff" fill-opacity="0.75" />
+      <rect x="13.5" y="13.5" width="5" height="5" rx="1.2" fill="#58a6ff" />
+      <rect x="20.5" y="14" width="4" height="4" rx="1" stroke="#58a6ff" stroke-opacity="0.45" />
+      <rect x="7" y="20" width="5" height="5" rx="1.2" fill="#58a6ff" fill-opacity="0.4" />
+      <rect x="13.5" y="20" width="5" height="5" rx="1.2" fill="#58a6ff" fill-opacity="0.75" />
+      <rect x="20" y="20" width="5" height="5" rx="1.2" fill="#58a6ff" />
+    </svg>`
+
 // ── HTML skeleton (exact copy from the packet) ────────────
 
 const SKELETON = /*html*/`
 <div id="tessera-web-app">
 
   <header id="header" class="app-header hidden">
-    <span class="logo">Tessera</span>
-    <span id="readyDot" class="dot off" title="Account status"></span>
-    <span id="storageSummary" class="storage-summary"></span>
-    <!-- SYNCED FOLDERS (2026-09-29): desktop-only entry point for the
-         tessera-cli-backed folder sync/watcher feature -- shown only when
-         isDesktop() (see wireEvents() below), never in the browser build,
-         since there is no local filesystem or bundled CLI to drive there. -->
-    <button id="btnSyncFolders" class="btn btn-ghost hidden">Synced Folders</button>
-    <!-- BILLING (P6 Task 3, Decision 3): account dashboard entry point.
-         Web-only data comes from same-origin /api/v1 with the moneyd
-         session cookie; desktop answers through the CLI bridge and never
-         fetches /api/v1. Hidden in the stock door (no billing session). -->
-    <button id="btnBilling" class="btn btn-ghost btn-logout hidden">Account</button>
-    <button id="btnLock" class="btn btn-ghost btn-logout">Lock</button>
-    <!-- FORGET THIS DEVICE (2026-09-29): re-exposes onRemoveBrowser(),
-         which was already correct and kept in code on purpose after its
-         UI entry point was removed 2026-09-16 for space. Small/ghost by
-         design to respect that original space concern -- user explicitly
-         asked "how do I factory reset the app" after a stale-vault bug
-         left no way back in short of manually deleting app data. -->
-    <button id="btnForgetDevice" class="btn btn-ghost btn-logout" title="Remove Tessera from this device -- you will need your 12 words to come back">Forget this device</button>
+    <!-- THEME (Packet 3): the shell brand is the Tessera mark + wordmark
+         (same as Tessera-FE's header), not the uppercase cyan text. -->
+    <div class="header-brand">
+      <span class="logo-mark" aria-hidden="true">${MARK_SVG}</span>
+      <span class="logo">Tessera</span>
+      <span id="readyDot" class="dot off" title="Account status"></span>
+    </div>
+    <div class="header-actions">
+      <span id="storageSummary" class="storage-summary"></span>
+      <!-- SYNCED FOLDERS (2026-09-29): desktop-only entry point for the
+           tessera-cli-backed folder sync/watcher feature -- shown only when
+           isDesktop() (see wireEvents() below), never in the browser build,
+           since there is no local filesystem or bundled CLI to drive there. -->
+      <button id="btnSyncFolders" class="btn btn-ghost hidden">Synced Folders</button>
+      <!-- BILLING (P6 Task 3, Decision 3): account dashboard entry point.
+           Web-only data comes from same-origin /api/v1 with the moneyd
+           session cookie; desktop answers through the CLI bridge and never
+           fetches /api/v1. Hidden in the stock door (no billing session). -->
+      <button id="btnBilling" class="btn btn-ghost btn-logout hidden">Account</button>
+      <button id="btnLock" class="btn btn-ghost btn-logout">Lock</button>
+      <!-- FORGET THIS DEVICE (2026-09-29): re-exposes onRemoveBrowser(),
+           which was already correct and kept in code on purpose after its
+           UI entry point was removed 2026-09-16 for space. Small/ghost by
+           design to respect that original space concern -- user explicitly
+           asked "how do I factory reset the app" after a stale-vault bug
+           left no way back in short of manually deleting app data. -->
+      <button id="btnForgetDevice" class="btn btn-ghost btn-logout" title="Remove Tessera from this device -- you will need your 12 words to come back">Forget this device</button>
+    </div>
   </header>
 
   <!-- WELCOME -->
   <section id="welcomeScreen" class="panel welcome-panel">
-    <span class="welcome-brand">Tessera</span>
-    <div class="welcome-center">
-      <p>Your files. This browser.</p>
-      <p style="margin-top:14px">
-        <button id="btnCreate" class="btn btn-outline btn-lg">I&rsquo;m new</button>
-      </p>
-      <p style="margin-top:8px">
+    <!-- THEME (Packet 3): FE-style hero -- the mark above the wordmark, a
+         quiet tagline, then the two actions. No absolute 1/3-down layout. -->
+    <div class="welcome-inner">
+      <span class="welcome-mark" aria-hidden="true">${MARK_SVG}</span>
+      <h1 class="welcome-title">Tessera</h1>
+      <p class="welcome-tagline">Your files. This browser.</p>
+      <div class="welcome-actions">
+        <button id="btnCreate" class="btn btn-primary btn-lg">I&rsquo;m new</button>
         <button id="btnHaveWords" class="btn btn-outline btn-lg">I already have an account</button>
-      </p>
+      </div>
     </div>
   </section>
 
@@ -259,14 +283,14 @@ const SKELETON = /*html*/`
 
   <!-- READY WAIT -->
   <section id="readyWaitScreen" class="panel column-screen hidden">
-    <h2>Tessera</h2>
+    <h2>Getting ready</h2>
     <p>Setting up this browser&hellip;</p>
     <p id="readyWaitStatus" class="status-text"></p>
   </section>
 
   <!-- I HAVE MY WORDS -->
   <section id="recoverScreen" class="panel column-screen hidden">
-    <h2>Tessera</h2>
+    <h2>Recover your account</h2>
     <div id="recoverPhraseStep">
       <p>Type your 12 words.</p>
       <textarea id="recoverPhraseInput" class="recover-input"
@@ -327,7 +351,6 @@ const SKELETON = /*html*/`
   <!-- FILES + MAP -->
   <div id="filesLayout" class="files-layout">
     <section id="filesScreen" class="panel column-screen hidden">
-      <h2>Tessera</h2>
       <!-- SHOW MAP (2026-09-14, "tessera-web-map-tune"): "Link top-right
            of the files/drop pane, above and to the right of the Tessera
            logo." Moved here (was previously a full-width button below
@@ -360,7 +383,7 @@ const SKELETON = /*html*/`
       <div id="breadcrumb" class="breadcrumb"></div>
       <div class="files-toolbar">
         <div id="dropzone" class="dropzone">
-          <div class="dz-icon">\u{1F4C1}</div>
+          <div class="dz-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" width="22" height="22"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" stroke-linecap="round"/></svg></div>
           <div class="dz-text">Add a file</div>
           <div class="dz-hint">or click to browse, or drop a folder</div>
         </div>
@@ -582,7 +605,7 @@ export async function mountApp(container) {
   if (IS_STOCK) {
     // Visible door label: "Stock" here vs "Tessera" on /web/.
     document.title = 'Stock'
-    root.querySelectorAll('.logo, .welcome-brand').forEach(el => { el.textContent = 'Stock' })
+    root.querySelectorAll('.logo, .welcome-title').forEach(el => { el.textContent = 'Stock' })
   }
 
   // BILLING (P6 Decision 3): one client for this page life. The web app
@@ -1074,11 +1097,13 @@ function renderNeedTicket() {
   root.classList.remove('boot-spinner')
   document.title = 'Stock'
   root.innerHTML = '<section class="panel welcome-panel">' +
-    '<span class="welcome-brand">Stock</span>' +
-    '<div class="welcome-center">' +
-    '<p>This browser is not set up yet.</p>' +
-    '<p style="margin-top:14px">Get your ticket on the Tessera page first, then come back here.</p>' +
-    '<p style="margin-top:14px"><a class="btn btn-outline btn-lg" href="/v2/tessera/web/">Go to Tessera</a></p>' +
+    '<div class="welcome-inner">' +
+    '<span class="welcome-mark" aria-hidden="true">' + MARK_SVG + '</span>' +
+    '<h1 class="welcome-title">Stock</h1>' +
+    '<p class="welcome-tagline">This browser is not set up yet. Get your ticket on the Tessera page first, then come back here.</p>' +
+    '<div class="welcome-actions">' +
+    '<a class="btn btn-primary btn-lg" href="/v2/tessera/web/">Go to Tessera</a>' +
+    '</div>' +
     '</div></section>'
 }
 
