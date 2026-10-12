@@ -22,6 +22,7 @@ import {
   connectWithInvite, completeRegistration,
   tryReconnect, reconnectWithAppKey, clearCredentials, getSaved,
   beginRecovery, completeRecovery, setUnlockPassword, adoptSharedIdentity,
+  fetchRecoveryCredential, recoverWithConnectKey,
 } from './auth.js'
 import {
   listFiles, computeTotals, uploadFile, downloadToDisk,
@@ -45,7 +46,7 @@ import {
   getState, patchState, subscribe, selectedFile,
   showToast, setBusy, setScreen,
 } from './store.js'
-import { formatBytes, esc, fmtDateTime, $ } from './utils.js'
+import { formatBytes, esc, fmtDateTime, randomAppId, $ } from './utils.js'
 import { hasWrappedVault, unwrapAppKey } from './vault.js'
 import { IS_STOCK } from './door.js'
 // HANDOFF (P6 Task 2, Decision 2): fragment consumption + resume marker +
@@ -1544,6 +1545,23 @@ function onShowRecover() {
   goto('recover')
 }
 
+// SEED-PHRASE RECOVERY (2026-10-12, "seed-phrase recovery").
+//
+// Web: the app key cannot be re-derived from the phrase alone -- it is
+// derived from (phrase, app_id, shared secret), where app_id used to be a
+// random per-browser value lost with browser data and the shared secret only
+// exists after a connect-key approval. The old flow landed every seed-only
+// user on indexd's approval page, which asks for an "App password" (the app
+// connect key) that web users never received.
+//
+// The fix: the browser is signed in to moneyd (same origin as /account), so
+// it asks moneyd for this account's recovery material (fetchRecoveryCredential),
+// then re-runs the headless approval/register flow with the ORIGINAL app_id
+// and the user's phrase (recoverWithConnectKey) -- no second tab, no app
+// password, same account.
+//
+// Desktop: has no moneyd session (file://), so it keeps the approval-link
+// flow for now; its own session-backed check is a separate packet.
 async function onRecoverContinue() {
   const phrase = r.recoverPhraseInput.value.trim()
   if (!phrase) { r.recoverStatus.textContent = 'Please enter your 12 words.'; return }
@@ -1552,6 +1570,49 @@ async function onRecoverContinue() {
   r.btnRecoverContinue.disabled = true
   r.recoverStatus.textContent = ''
 
+  try {
+    if (isDesktop()) {
+      await onRecoverContinueDesktop(phrase)
+      return
+    }
+
+    r.recoverStatus.textContent = 'Checking this account\u2026'
+    const cred = await fetchRecoveryCredential()
+    if (cred.status === 401) {
+      r.recoverStatus.textContent =
+        'Sign in to your Tessera account first (open tessera.storage/account and use the sign-in link), then come back and enter your words.'
+      r.btnRecoverContinue.disabled = false
+      return
+    }
+    if (cred.status === 404) {
+      r.recoverStatus.textContent =
+        'No storage account is set up for this sign-in yet. Use "I\u2019m new" to connect this device instead.'
+      r.btnRecoverContinue.disabled = false
+      return
+    }
+    if (cred.status !== 200) {
+      throw new Error(cred.error || ('recovery lookup failed (HTTP ' + cred.status + ')'))
+    }
+
+    r.recoverStatus.textContent = 'Recovering your account\u2026'
+    // Unlinked identity: no original app_id exists yet, so this registers a
+    // fresh one, exactly like the normal connect flow.
+    const appId = cred.appId || randomAppId()
+    const sdk = await recoverWithConnectKey(
+      appId, cred.connectKey, phrase, PREFIX, FETCH_MODE(),
+      { expectedPublicKey: cred.publicKey || undefined },
+    )
+    patchState({ sdk, builder: null, phrase: '' })
+    goToSetPassword('recoverRegister')
+  } catch (e) {
+    r.recoverStatus.textContent = 'Could not continue: ' + (e.message || 'Unknown error')
+    r.btnRecoverContinue.disabled = false
+    console.error(e)
+  }
+}
+
+// Desktop-only approval-link flow (unchanged; see the comment above).
+async function onRecoverContinueDesktop(phrase) {
   try {
     const result = await beginRecovery(phrase, msg => { r.recoverStatus.textContent = msg }, PREFIX, FETCH_MODE())
 
@@ -1562,14 +1623,10 @@ async function onRecoverContinue() {
       return
     }
 
-    // RECOVER APPROVAL (2026-09-29): fills the gap the earlier hard
-    // error left. This mirrors what ui.js (Drop's predecessor screen,
-    // never ported here) already did correctly, and what the CLI's own
-    // 'tessera login <phrase>' does: show the approval link, wait for
+    // RECOVER APPROVAL (2026-09-29): show the approval link, wait for
     // approval, then complete registration with the SAME phrase via
     // completeRecovery() -- not a new tab of our own; the link opens in
-    // the system browser (desktop: setWindowOpenHandler in main.js) or
-    // a normal new browser tab (web: standard <a target="_blank">),
+    // the system browser (desktop: setWindowOpenHandler in main.js),
     // same as any other outbound link, and the user comes back here.
     r.recoverApprovalLink.href = result.approvalUrl
     r.recoverApprovalUrl.value = result.approvalUrl
