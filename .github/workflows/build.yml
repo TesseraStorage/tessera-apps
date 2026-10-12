@@ -6,6 +6,11 @@ on:
     tags: ['v*']
   pull_request:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to stamp (non-release proof only; empty = derive from the ref/tag)"
+        required: false
 
 jobs:
   # ── Web app (WASM-based, no native deps) ─────────────────
@@ -109,9 +114,13 @@ jobs:
 
       - name: Package Electron app (${{ matrix.target }} ${{ matrix.electron-arch }})
         shell: bash
+        env:
+          # Empty on normal runs: the wrapper derives the version from the git
+          # tag (v* -> X.Y.Z), else a 0.0.0-0.<sha> dev version.
+          TESSERA_VERSION: ${{ inputs.version }}
         run: |
           cd apps/desktop
-          npx electron-builder --${{ matrix.target }} ${{ matrix.electron-arch }}
+          node scripts/package.mjs --${{ matrix.target }} ${{ matrix.electron-arch }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
