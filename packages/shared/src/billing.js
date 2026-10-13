@@ -29,9 +29,17 @@ export const BILLING_SIGN_IN_URL = 'https://tessera.storage/account'
 export const BILLING_SIGNED_OUT_MESSAGE =
   'Sign in at tessera.storage/account to see your balance and usage.'
 
-/** Decision 6: desktop with no stored billing credential. */
+/** Decision 6: desktop with no stored billing credential (CLI-oriented). */
 export const BILLING_DESKTOP_MESSAGE =
   'No billing credential on this machine. Run `tessera login` and try again.'
+
+/**
+ * Bug 7 (2026-10-13): the desktop APP is not a machine with the CLI on
+ * `PATH`, so telling its user to "run `tessera login`" is useless. This is
+ * the in-app wording: point at the Welcome screen's sign-in instead.
+ */
+export const BILLING_DESKTOP_APP_MESSAGE =
+  'You are not signed in. Sign in from the Welcome screen to see your balance and usage.'
 
 export const TOPUP_MIN_USD = 5
 export const TOPUP_MAX_USD = 10000
@@ -139,6 +147,20 @@ export function accountKindLabel(kind) {
   if (kind === 'human') return 'Human'
   if (kind === 'agent') return 'Agent'
   return kind
+}
+
+/**
+ * Whether one top-up rail is open (item 3, 2026-10-13).
+ *
+ * moneyd can open a single rail (``TESSERA_TOPUP_OPEN_RAILS``) while the
+ * master switch is off, so the UI must gate each rail on its own flag and
+ * never on ``topup_open`` alone. Falls back to the master switch against an
+ * older API with no ``topup_rails`` field.
+ */
+export function topupRailOpen(account, rail) {
+  const rails = account && account.topup_rails
+  if (rails && typeof rails[rail] === 'boolean') return rails[rail]
+  return !!(account && account.topup_open === true)
 }
 
 /**
@@ -441,7 +463,8 @@ export function createBillingView(opts = {}) {
     throw new Error('createBillingView needs a document')
   }
   const client = opts.client || null
-  const canTopup = opts.canTopup !== false && !(opts.desktop === true)
+  const isDesktopApp = opts.desktop === true
+  const canTopup = opts.canTopup !== false && !isDesktopApp
   const signInUrl = opts.signInUrl || BILLING_SIGN_IN_URL
   const root = h(doc, 'div', 'billing')
 
@@ -467,7 +490,9 @@ export function createBillingView(opts = {}) {
   function showAccount(account) {
     clear()
     const data = account || {}
-    const topupOpen = data.topup_open === true
+    // Per-rail (item 3): the browser form uses the NOWPayments rail, so its
+    // visibility follows that rail's own flag, not the master switch.
+    const topupOpen = topupRailOpen(data, 'nowpayments')
 
     const notice = accountStatusNotice(data.status, topupOpen)
     if (notice) {
@@ -745,7 +770,7 @@ export function createBillingView(opts = {}) {
     clear()
     root.appendChild(callout(
       doc, 'warn', 'Billing unavailable',
-      message || BILLING_DESKTOP_MESSAGE,
+      message || (isDesktopApp ? BILLING_DESKTOP_APP_MESSAGE : BILLING_DESKTOP_MESSAGE),
     ))
   }
 

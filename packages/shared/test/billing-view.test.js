@@ -262,6 +262,14 @@ test('desktop "no credential" state and retryable load error render distinctly',
   assert.equal(retries, 1)
 })
 
+test('Bug 7: desktop APP wording never tells the user to run a CLI command', () => {
+  const doc = createDocument()
+  const view = createBillingView({ doc, desktop: true })
+  view.showDesktopUnavailable()
+  assert.match(view.el.textContent, /Sign in from the Welcome screen/)
+  assert.ok(!/tessera login/.test(view.el.textContent), 'desktop app copy must not reference the CLI')
+})
+
 test('showLoading then showAccount replaces the content', () => {
   const doc = createDocument()
   const view = createBillingView({ doc })
@@ -295,6 +303,7 @@ test('billing screen is wired to the shared client and view, desktop hook includ
   assert.ok(WEB_UI.includes('billingClient = createBillingClient({})'))
   assert.ok(WEB_UI.includes('billingView = createBillingView({'))
   assert.ok(WEB_UI.includes('canTopup: !isDesktop()'))
+  assert.ok(WEB_UI.includes('desktop: isDesktop()'))
   assert.ok(WEB_UI.includes('billingView.showSignedOut()'))
   assert.ok(WEB_UI.includes('billingView.showDesktopUnavailable()'))
   assert.ok(WEB_UI.includes("if (screen === 'billing') loadBilling()"))

@@ -21,7 +21,7 @@ import { initSia, registerSdk } from './sdk.js'
 import {
   connectWithInvite, completeRegistration,
   tryReconnect, reconnectWithAppKey, clearCredentials, getSaved,
-  beginRecovery, completeRecovery, setUnlockPassword, adoptSharedIdentity,
+  setUnlockPassword, adoptSharedIdentity,
   fetchRecoveryCredential, recoverWithConnectKey,
 } from './auth.js'
 import {
@@ -60,7 +60,7 @@ import {
 // signed-out state, desktop bridge hook. billing.js owns the /api/v1 client
 // and the rendering; this file only wires the screen and the header button.
 import {
-  BillingApiError, createBillingClient, createBillingView,
+  BillingApiError, createBillingClient, createBillingView, BILLING_SIGN_IN_URL,
 } from './billing.js'
 
 const PREFIX = 'tesseraweb'
@@ -151,17 +151,19 @@ const r = {}
 function cacheRefs() {
   const ids = [
     'header', 'readyDot', 'storageSummary', 'btnBilling', 'btnLock', 'btnForgetDevice',
-    'welcomeScreen', 'btnCreate', 'btnHaveWords',
+    'welcomeScreen', 'btnLogIn', 'btnHaveInvite', 'btnHaveWords',
     'handoffScreen', 'handoffTitle', 'handoffBody', 'btnHandoffPrimary', 'btnHandoffCancel', 'handoffStatus',
     'billingScreen', 'billingBody', 'btnBillingBack',
     'inviteScreen', 'inviteInput', 'btnInviteContinue', 'inviteRequestLink', 'inviteStatus',
     'requestStubScreen', 'btnRequestBack',
     'wordsScreen', 'wordsText', 'btnWordsSaved', 'wordsStatus',
-    'setPasswordScreen', 'newPassword', 'newPasswordConfirm',
+    'setPasswordScreen', 'setPasswordLead', 'newPassword', 'newPasswordConfirm',
     'btnSetPassword', 'setPasswordStatus',
     'readyWaitScreen', 'readyWaitStatus',
-    'recoverScreen', 'recoverPhraseInput', 'btnRecoverContinue', 'recoverStatus',
-    'recoverPhraseStep', 'recoverApprovalStep', 'recoverApprovalLink', 'recoverApprovalUrl', 'recoverApprovalStatus',
+    'recoverScreen', 'recoverPhraseInput', 'btnRecoverContinue', 'recoverStatus', 'recoverPhraseStep',
+    'desktopLoginScreen', 'desktopLoginLead', 'desktopLoginEmailStep', 'desktopLoginEmail',
+    'btnDesktopSendLink', 'desktopLoginTokenStep', 'desktopLoginToken', 'desktopLoginPhrase',
+    'btnDesktopVerify', 'desktopLoginStatus',
     'unlockScreen', 'unlockPassword', 'btnUnlock', 'unlockStatus', 'btnForgotPassword',
     'filesScreen', 'dropzone', 'fileInput', 'fileList', 'fileActions',
     'btnDownload', 'btnShare', 'btnDelete',
@@ -247,7 +249,13 @@ const SKELETON = /*html*/`
       <h1 class="welcome-title">Tessera</h1>
       <p class="welcome-tagline">Your files. This browser.</p>
       <div class="welcome-actions">
-        <button id="btnCreate" class="btn btn-primary btn-lg">I&rsquo;m new</button>
+        <!-- LOG IN (Bug 2, 2026-10-13): the primary, default path for a
+             normal user. On the web it sends them to tessera.storage/account
+             to sign in (magic link); that session-backed flow then connects
+             the device -- no invite code, no key, no prompt. The invite path
+             below is for invited demo accounts only. -->
+        <button id="btnLogIn" class="btn btn-primary btn-lg">Log in</button>
+        <button id="btnHaveInvite" class="btn btn-outline btn-lg">I have an invite code</button>
         <button id="btnHaveWords" class="btn btn-outline btn-lg">I already have an account</button>
       </div>
     </div>
@@ -269,23 +277,24 @@ const SKELETON = /*html*/`
     <p id="handoffStatus" class="status-text"></p>
   </section>
 
-  <!-- CREATE: INVITE -->
+  <!-- CREATE: INVITE CODE (demo/invited accounts only; Bug 2) -->
   <section id="inviteScreen" class="panel column-screen hidden">
-    <h2>Invite</h2>
-    <input type="text" id="inviteInput" placeholder="Invite" autocomplete="off" style="margin-top:14px">
+    <h2>I have an invite code</h2>
+    <p class="hint">Invites are for demo accounts. If you did not receive a code, use Log in instead.</p>
+    <input type="text" id="inviteInput" placeholder="Invite code" autocomplete="off" style="margin-top:14px">
     <p style="margin-top:14px">
       <button id="btnInviteContinue" class="btn btn-primary btn-lg">Continue</button>
     </p>
     <p class="hint" style="margin-top:10px">
-      Don&rsquo;t have an invite yet? <a href="#" id="inviteRequestLink">Request one here.</a>
+      No invite code? <a href="#" id="inviteRequestLink">Request one here.</a>
     </p>
     <p id="inviteStatus" class="status-text"></p>
   </section>
 
   <!-- CREATE: REQUEST STUB (named, not designed) -->
   <section id="requestStubScreen" class="panel column-screen hidden">
-    <h2>Need an invite?</h2>
-    <p>Ask the person who sent you here.</p>
+    <h2>Request an invite</h2>
+    <p>Invites are for demo accounts. Ask the person who sent you here.</p>
     <p style="margin-top:14px">
       <button id="btnRequestBack" class="btn btn-outline btn-lg">Back</button>
     </p>
@@ -305,7 +314,9 @@ const SKELETON = /*html*/`
   <!-- CREATE: PASSWORD (also used by I-have-my-words -> Set a password) -->
   <section id="setPasswordScreen" class="panel column-screen hidden">
     <h2>Set a password</h2>
-    <p>Password for this browser. Never stored.</p>
+    <!-- Bug 6: platform-aware at mount() -- "this device" on desktop, "this
+         browser" on web. -->
+    <p id="setPasswordLead">Password for this browser. Never stored.</p>
     <div style="display:flex;flex-direction:column;gap:8px;margin:14px 0">
       <input type="password" id="newPassword" placeholder="Password" autocomplete="new-password">
       <input type="password" id="newPasswordConfirm" placeholder="Confirm password" autocomplete="new-password">
@@ -323,7 +334,9 @@ const SKELETON = /*html*/`
     <p id="readyWaitStatus" class="status-text"></p>
   </section>
 
-  <!-- I HAVE MY WORDS -->
+  <!-- I HAVE MY WORDS (web: session-backed recovery, needs a signed-in
+       moneyd session). Desktop is routed to #desktopLoginScreen instead
+       (Bug 3); the old approval-link step is gone for good. -->
   <section id="recoverScreen" class="panel column-screen hidden">
     <h2>Recover your account</h2>
     <div id="recoverPhraseStep">
@@ -336,25 +349,35 @@ const SKELETON = /*html*/`
       </p>
       <p id="recoverStatus" class="status-text"></p>
     </div>
-    <!-- RECOVER APPROVAL (2026-09-29): fills the gap the "This account
-         needs to be re-approved" hard error used to leave -- a genuine
-         new-device recovery needs the SAME one-time approval any new
-         app_id needs (exactly what 'tessera login <phrase>' does on the
-         CLI: open a link, approve, done). This is not the invite flow's
-         in-page secret-POST trick (there is no secret to submit here,
-         just the account owner's own click) and it is not a programmatic
-         second tab -- it's a normal link the user opens and comes back
-         from, same as the CLI's own browser step. -->
-    <div id="recoverApprovalStep" class="hidden">
-      <p>This device needs a one-time approval to reconnect this account.</p>
-      <p>Open this link, approve, then come back here:</p>
-      <p><a id="recoverApprovalLink" href="#" target="_blank" rel="noopener" class="btn btn-primary btn-lg">Open approval link</a></p>
-      <p style="margin-top:8px">
-        <input id="recoverApprovalUrl" type="text" readonly
-               style="width:100%" onclick="this.select()" />
+  </section>
+
+  <!-- DESKTOP SIGN-IN (Bug 3, 2026-10-13): the desktop app has no browser
+       session cookie, so it cannot call moneyd's session-only recovery
+       endpoint directly. Instead it drives the bundled tessera-cli's own
+       magic-link sign-in (tessera login --email … --token … "<words>"),
+       which performs the SAME session-backed recovery and writes the shared
+       ~/.tessera config; doBoot() then adopts it. End state: sign in (magic
+       link) + 12 words, no connect key, no indexd approval page. -->
+  <section id="desktopLoginScreen" class="panel column-screen hidden">
+    <h2>Sign in</h2>
+    <p id="desktopLoginLead">Sign in with your email, then enter the 12 words you saved.</p>
+    <div id="desktopLoginEmailStep">
+      <input type="email" id="desktopLoginEmail" placeholder="Email" autocomplete="email" style="margin-top:14px">
+      <p style="margin-top:14px">
+        <button id="btnDesktopSendLink" class="btn btn-primary btn-lg">Email me a sign-in link</button>
       </p>
-      <p id="recoverApprovalStatus" class="status-text">Waiting for approval\u2026</p>
     </div>
+    <div id="desktopLoginTokenStep" class="hidden">
+      <p class="hint">Open the sign-in link we emailed you and copy its token, then paste it here with your 12 words.</p>
+      <input type="text" id="desktopLoginToken" placeholder="Token from the sign-in link" autocomplete="off" style="margin-top:10px">
+      <textarea id="desktopLoginPhrase" class="recover-input"
+                placeholder="Your 12 words\u2026"
+                rows="3" autocomplete="off" spellcheck="false" style="margin-top:10px"></textarea>
+      <p style="margin-top:14px">
+        <button id="btnDesktopVerify" class="btn btn-primary btn-lg">Sign in</button>
+      </p>
+    </div>
+    <p id="desktopLoginStatus" class="status-text"></p>
   </section>
 
   <!-- UNLOCK -->
@@ -643,6 +666,13 @@ export async function mountApp(container) {
     root.querySelectorAll('.logo, .welcome-title').forEach(el => { el.textContent = 'Stock' })
   }
 
+  // PLATFORM-AWARE COPY (Bug 6, 2026-10-13): "this browser" only makes sense
+  // on the web; the desktop app is not a browser.
+  if (isDesktop()) {
+    r.setPasswordLead.textContent = 'Password for this device. Never stored.'
+    r.unlockPassword.placeholder = 'Password for this device.'
+  }
+
   // BILLING (P6 Decision 3): one client for this page life. The web app
   // talks to same-origin /api/v1 with the moneyd session cookie; desktop
   // resolves window.tesseraDesktop.billingAccount (Task 6's CLI bridge) and
@@ -654,8 +684,13 @@ export async function mountApp(container) {
   if (!IS_STOCK) checkDesktopUpdate()
 
   // wire events
-  r.btnCreate.addEventListener('click', onShowInvite)
+  // LOG IN (Bug 2): primary/default; invite is the demo-only option.
+  r.btnLogIn.addEventListener('click', onShowLogin)
+  r.btnHaveInvite.addEventListener('click', onShowInvite)
   r.btnHaveWords.addEventListener('click', onShowRecover)
+  // DESKTOP SIGN-IN (Bug 3).
+  r.btnDesktopSendLink.addEventListener('click', onDesktopSendLink)
+  r.btnDesktopVerify.addEventListener('click', onDesktopVerify)
   r.btnHandoffPrimary.addEventListener('click', onHandoffPrimary)
   r.btnHandoffCancel.addEventListener('click', onHandoffCancel)
   // BILLING (P6 Decision 3): header entry point + Back, web and desktop.
@@ -1069,11 +1104,18 @@ function renderScreen(s) {
   r.wordsScreen.classList.toggle('hidden', s !== 'words')
   r.setPasswordScreen.classList.toggle('hidden', s !== 'setPassword')
   r.readyWaitScreen.classList.toggle('hidden', s !== 'readyWait')
-  r.recoverScreen.classList.toggle('hidden', s !== 'recover' && s !== 'recoverApproval')
+  r.recoverScreen.classList.toggle('hidden', s !== 'recover')
+  r.desktopLoginScreen.classList.toggle('hidden', s !== 'desktopLogin')
   r.unlockScreen.classList.toggle('hidden', s !== 'unlock')
   r.filesScreen.classList.toggle('hidden', s !== 'files')
   r.filesLayout.classList.toggle('hidden', s !== 'files')
-  r.header.classList.toggle('hidden', s === 'loading' || s === 'welcome' || s === 'handoff')
+  // AUTHENTICATED-ONLY CHROME (Bug 5): the header carries Synced Folders,
+  // Account, Lock and Forget this device -- all meaningless before a real
+  // identity exists. It is shown ONLY on the screens you can reach once
+  // signed in (Files, and Account which is opened from Files). Every
+  // pre-login screen (welcome/invite/recover/desktopLogin/unlock/setPassword/
+  // words/readyWait/handoff/loading) hides it.
+  r.header.classList.toggle('hidden', !(s === 'files' || s === 'billing'))
   // VIEWPORT-CLAMPED PANEL (2026-09-16, "tessera-web-handoff
   // adjustments" bug report): re-measure every time Files becomes the
   // visible screen -- the panel was display:none an instant ago, so
@@ -1218,7 +1260,6 @@ function renderHandoffState(state, detail = {}) {
       // (replace, not push: Back must not return to the stale linking screen).
       r.recoverStatus.textContent = 'This account is already set up on another device. Enter your 12 words to bring it to this browser.'
       r.recoverPhraseStep.classList.remove('hidden')
-      r.recoverApprovalStep.classList.add('hidden')
       replaceScreen('recover')
       break
     case HANDOFF_STATES.ALREADY_LINKED:
@@ -1345,6 +1386,7 @@ async function loadBilling() {
     billingView = createBillingView({
       client: billingClient,
       canTopup: !isDesktop(),
+      desktop: isDesktop(),
       onRetry: () => loadBilling(),
     })
     r.billingBody.textContent = ''
@@ -1442,7 +1484,25 @@ async function doBoot() {
   }
 }
 
-// ── create: invite ────────────────────────────────────────
+// ── log in (Bug 1/Bug 2, 2026-10-13) ─────────────────────
+//
+// The normal user's default path. On the web it goes to
+// tessera.storage/account to sign in with a magic link; that session then
+// connects the device via the session-backed handoff (never an invite code,
+// connect key, or the indexd approval page). The desktop app has no place to
+// sign in via the browser it can read a cookie from, so it uses the in-app
+// magic-link sign-in instead.
+function onShowLogin() {
+  if (IS_STOCK) { renderNeedTicket(); return }
+  if (isDesktop()) { onShowDesktopLogin(); return }
+  // Bug 1: leave a same-origin intent flag so the account page, once the user
+  // finishes the magic-link sign-in, connects this device automatically via
+  // the one-time handoff -- never a raw connect key or the approval page.
+  try { localStorage.setItem('tessera.connectOnLogin', '1') } catch (_) {}
+  window.location.assign(BILLING_SIGN_IN_URL)
+}
+
+// ── create: invite (demo accounts only) ───────────────────
 
 function onShowInvite() {
   if (IS_STOCK) { renderNeedTicket(); return }
@@ -1603,6 +1663,11 @@ async function completeCreateAfterWords() {
 
 function onShowRecover() {
   if (IS_STOCK) { renderNeedTicket(); return }
+  // Desktop has no moneyd session cookie (file://), so it cannot call the
+  // session-only recovery endpoint directly. Route it to the in-app
+  // magic-link sign-in (Bug 3), which drives the bundled CLI's own
+  // session-backed recovery -- never the indexd approval page.
+  if (isDesktop()) { onShowDesktopLogin(); return }
   r.recoverPhraseInput.value = ''
   r.recoverStatus.textContent = ''
   goto('recover')
@@ -1634,11 +1699,6 @@ async function onRecoverContinue() {
   r.recoverStatus.textContent = ''
 
   try {
-    if (isDesktop()) {
-      await onRecoverContinueDesktop(phrase)
-      return
-    }
-
     r.recoverStatus.textContent = 'Checking this account\u2026'
     const cred = await fetchRecoveryCredential()
     if (cred.status === 401) {
@@ -1649,7 +1709,7 @@ async function onRecoverContinue() {
     }
     if (cred.status === 404) {
       r.recoverStatus.textContent =
-        'No storage account is set up for this sign-in yet. Use "I\u2019m new" to connect this device instead.'
+        'No storage account is set up for this sign-in yet. Use "Log in" to connect this device instead.'
       r.btnRecoverContinue.disabled = false
       return
     }
@@ -1674,46 +1734,75 @@ async function onRecoverContinue() {
   }
 }
 
-// Desktop-only approval-link flow (unchanged; see the comment above).
-async function onRecoverContinueDesktop(phrase) {
+// ── desktop sign-in (Bug 3, 2026-10-13) ──────────────────
+//
+// Desktop has no browser session cookie, so it cannot call moneyd's
+// session-only recovery endpoint itself. It drives the bundled tessera-cli's
+// magic-link sign-in, which runs the SAME session-backed recovery
+// (POST /api/v1/credentials/recovery with a magic-link session) and writes
+// the shared ~/.tessera config; doBoot() then adopts that exact identity.
+// No connect key, no indexd approval page, ever.
+function onShowDesktopLogin() {
+  if (IS_STOCK) { renderNeedTicket(); return }
+  r.desktopLoginEmail.value = ''
+  r.desktopLoginToken.value = ''
+  r.desktopLoginPhrase.value = ''
+  r.desktopLoginStatus.textContent = ''
+  r.desktopLoginEmailStep.classList.remove('hidden')
+  r.desktopLoginTokenStep.classList.add('hidden')
+  goto('desktopLogin')
+}
+
+async function onDesktopSendLink() {
+  const email = r.desktopLoginEmail.value.trim()
+  if (!email || email.indexOf('@') < 1) {
+    r.desktopLoginStatus.textContent = 'Please enter your email.'
+    return
+  }
+  if (!window.tesseraDesktop || typeof window.tesseraDesktop.loginStart !== 'function') {
+    r.desktopLoginStatus.textContent = 'Sign-in is unavailable in this build.'
+    return
+  }
+  r.btnDesktopSendLink.disabled = true
+  r.desktopLoginStatus.textContent = 'Sending a sign-in link\u2026'
   try {
-    const result = await beginRecovery(phrase, msg => { r.recoverStatus.textContent = msg }, PREFIX, FETCH_MODE())
-
-    if (!result.needsApproval) {
-      patchState({ sdk: result.sdk, builder: null, phrase: '' })
-      registerSdk(result.sdk)
-      goToSetPassword('recoverRegister')
-      return
-    }
-
-    // RECOVER APPROVAL (2026-09-29): show the approval link, wait for
-    // approval, then complete registration with the SAME phrase via
-    // completeRecovery() -- not a new tab of our own; the link opens in
-    // the system browser (desktop: setWindowOpenHandler in main.js),
-    // same as any other outbound link, and the user comes back here.
-    r.recoverApprovalLink.href = result.approvalUrl
-    r.recoverApprovalUrl.value = result.approvalUrl
-    r.recoverApprovalStatus.textContent = 'Waiting for approval\u2026'
-    r.recoverPhraseStep.classList.add('hidden')
-    r.recoverApprovalStep.classList.remove('hidden')
-    goto('recoverApproval')
-
-    await result.builder.waitForApproval()
-    r.recoverApprovalStatus.textContent = 'Approved! Completing recovery\u2026'
-
-    const sdk = await completeRecovery(result.builder, result.phrase, PREFIX)
-    patchState({ sdk, builder: null, phrase: '' })
-    registerSdk(sdk)
-    r.recoverPhraseStep.classList.remove('hidden')
-    r.recoverApprovalStep.classList.add('hidden')
-    goToSetPassword('recoverRegister')
+    const res = await window.tesseraDesktop.loginStart(email)
+    if (!res || !res.ok) throw new Error((res && res.error) || 'could not send the sign-in link')
+    r.desktopLoginTokenStep.classList.remove('hidden')
+    r.desktopLoginStatus.textContent =
+      'Sign-in link sent. Open it and copy its token, then enter your 12 words.'
   } catch (e) {
-    r.recoverApprovalStatus.textContent = ''
-    r.recoverPhraseStep.classList.remove('hidden')
-    r.recoverApprovalStep.classList.add('hidden')
-    r.recoverStatus.textContent = 'Could not continue: ' + (e.message || 'Unknown error')
-    r.btnRecoverContinue.disabled = false
-    console.error(e)
+    r.desktopLoginStatus.textContent = 'Could not send the link: ' + (e.message || 'unknown error')
+  } finally {
+    r.btnDesktopSendLink.disabled = false
+  }
+}
+
+async function onDesktopVerify() {
+  const email = r.desktopLoginEmail.value.trim()
+  const token = r.desktopLoginToken.value.trim()
+  const phrase = r.desktopLoginPhrase.value.trim()
+  if (!token) { r.desktopLoginStatus.textContent = 'Please paste the token from the sign-in link.'; return }
+  if (phrase.split(/\s+/).length < 12) { r.desktopLoginStatus.textContent = 'Please enter all 12 words.'; return }
+  if (!window.tesseraDesktop || typeof window.tesseraDesktop.loginVerify !== 'function') {
+    r.desktopLoginStatus.textContent = 'Sign-in is unavailable in this build.'
+    return
+  }
+  r.btnDesktopVerify.disabled = true
+  r.desktopLoginStatus.textContent = 'Signing in and recovering your account\u2026'
+  try {
+    const res = await window.tesseraDesktop.loginVerify(email, token, phrase)
+    if (!res || !res.ok) throw new Error((res && res.error) || 'sign-in failed')
+    // Clear the sensitive fields before the boot/adopt transition.
+    r.desktopLoginToken.value = ''
+    r.desktopLoginPhrase.value = ''
+    r.desktopLoginStatus.textContent = ''
+    // The CLI wrote the shared ~/.tessera config; re-run boot to adopt it.
+    await doBoot()
+  } catch (e) {
+    r.desktopLoginStatus.textContent = 'Could not sign in: ' + (e.message || 'unknown error')
+  } finally {
+    r.btnDesktopVerify.disabled = false
   }
 }
 
@@ -4113,19 +4202,31 @@ function onLock() {
   doBoot()
 }
 
-function onRemoveBrowser() {
+async function onRemoveBrowser() {
   // RE-EXPOSED 2026-09-29 as "Forget this device" (btnForgetDevice, see
-  // the header skeleton above) -- the "UNUSED as of 2026-09-16" state
-  // this comment used to describe no longer applies; this IS live and
-  // reachable. clearCredentials(PREFIX) below deletes tesseraweb.aid/
-  // akey/vault AND (as of "tessera-web-stale-map-cross-account") the
-  // account-scoped mapshards/folders/mapshown cache.
-  if (!confirm('Remove Tessera from this browser? You will need your 12 words to come back.')) return
+  // the header skeleton above). clearCredentials(PREFIX) below deletes
+  // tesseraweb.aid/akey/vault AND (as of "tessera-web-stale-map-cross-account")
+  // the account-scoped mapshards/folders/mapshown cache.
+  //
+  // BUGFIX (Bug 6, 2026-10-13): on desktop this used to "forget" only the
+  // renderer's localStorage, while doBoot()'s shared-identity path re-adopted
+  // the identical account straight from the bundled CLI's ~/.tessera/config.json
+  // -- so the user was bounced to Set-password and then Files with NO
+  // re-authentication. Forgetting the device must therefore also clear that
+  // shared config (bridge forget()), or the next boot just re-links it.
+  const where = isDesktop() ? 'this device' : 'this browser'
+  if (!confirm('Remove Tessera from ' + where + '? You will need your 12 words to come back.')) return
   // DESKTOP PARITY: same as onLock() -- disconnect the native bridge too,
   // otherwise the main process keeps an authenticated native SDK instance
-  // alive after this device has supposedly forgotten the account.
+  // alive after this device has supposedly forgotten the account. Then clear
+  // the shared CLI config that doBoot() would otherwise re-adopt.
   if (isDesktop()) {
     window.tesseraDesktop.siaDisconnect().catch(() => {})
+    try {
+      if (typeof window.tesseraDesktop.forget === 'function') await window.tesseraDesktop.forget()
+    } catch (e) {
+      console.warn('Could not clear the shared device config:', e && e.message)
+    }
   }
   clearCredentials(PREFIX)
   // THOROUGH WIPE (2026-10-03, "tessera-web-stale-map-cross-account",

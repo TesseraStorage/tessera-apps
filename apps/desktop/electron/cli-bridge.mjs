@@ -140,6 +140,55 @@ export function readConfig() {
   return { appId: cfg.app_id, appKey: seedHex, indexerUrl: cfg.indexer_url || INDEXER_URL }
 }
 
+// ── Sign-in + session-backed recovery (Bug 3, 2026-10-13) ─
+//
+// The desktop app has no browser session cookie, so it cannot call moneyd's
+// session-only recovery endpoint itself. Instead it drives the bundled CLI's
+// magic-link sign-in, which runs exactly the same session-backed recovery
+// (POST /api/v1/credentials/recovery with the magic-link session) and writes
+// the shared ~/.tessera config; readConfig()/doBoot() then adopt that exact
+// identity. No connect key, no indexd approval page, ever.
+//
+// The recovery phrase travels only in the child process environment
+// (TESSERA_PHRASE), never argv, and is never echoed back to the renderer.
+
+/** Request a magic-link sign-in email. Returns {ok} or {ok:false, error}. */
+export function loginStart(email) {
+  return run(['login', '--email', email]).then((r) =>
+    r.ok ? { ok: true } : { ok: false, error: describeLoginCli(r) })
+}
+
+/** Exchange the emailed token for a session and recover/register headlessly. */
+export function loginVerify(email, token, phrase) {
+  const childEnv = { ...process.env, TESSERA_PHRASE: phrase }
+  return run(['login', '--email', email, '--token', token], { env: childEnv }).then((r) =>
+    r.ok ? { ok: true } : { ok: false, error: describeLoginCli(r) })
+}
+
+// Map the CLI's own failures to safe, actionable copy. Deliberately does NOT
+// echo raw CLI output: it can contain the email/account id and must never
+// carry a phrase/token back into the renderer.
+function describeLoginCli(r) {
+  const text = `${r.stderr || ''}\n${r.stdout || ''}`
+  if (/phrase does not match/i.test(text)) return 'That recovery phrase does not match this account.'
+  if (/recovery phrase/i.test(text) && /provide|required/i.test(text)) return 'Enter your 12-word recovery phrase.'
+  if (/invalid|expired|already used/i.test(text)) return 'That sign-in link is invalid or has expired. Request a new one and try again.'
+  if (/no billing credentials|authentication failed/i.test(text)) return 'Sign-in failed — request a fresh sign-in link and try again.'
+  return 'Could not sign in. Check your connection and try again.'
+}
+
+/**
+ * Forget this device (Bug 6): remove the shared ~/.tessera config that
+ * doBoot() would otherwise re-adopt on the next boot. Only the identity is
+ * removed (matching the CLI's own `logout`); synced-folder and trash state
+ * are left alone.
+ */
+export function forget() {
+  try { fs.rmSync(path.join(cliHome(), 'config.json'), { force: true }) } catch (_) {}
+  try { fs.rmdirSync(cliHome()) } catch (_) {}  // only removes if empty
+  return { ok: true }
+}
+
 // ── Billing account (P6 Decision 6) ──────────────────────
 //
 // The desktop balance panel is fed by the bundled CLI's `tessera account
@@ -184,14 +233,14 @@ function env() {
   return { ...process.env }
 }
 
-function run(args, { input } = {}) {
+function run(args, { input, env: envOverride } = {}) {
   return new Promise((resolve) => {
     const bin = cliPath()
     if (!fs.existsSync(bin)) {
       resolve({ ok: false, error: 'tessera-cli binary not bundled at ' + bin })
       return
     }
-    const child = spawn(bin, args, { env: env(), stdio: 'pipe' })
+    const child = spawn(bin, args, { env: envOverride || env(), stdio: 'pipe' })
     let stdout = ''
     let stderr = ''
     child.stdout.on('data', (d) => { stdout += d.toString() })

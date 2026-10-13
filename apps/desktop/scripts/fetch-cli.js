@@ -13,7 +13,10 @@ import https from 'https'
 import { fileURLToPath } from 'url'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const TESSERA_CLI_VERSION = process.env.TESSERA_CLI_VERSION || 'v1.6.1'
+// v1.7.0 (2026-10-13): first release containing the session-backed
+// seed-phrase recovery (moneyd POST /api/v1/credentials/recovery), which the
+// desktop sign-in (Bug 3) invokes via `tessera login --email --token "<words>"`.
+const TESSERA_CLI_VERSION = process.env.TESSERA_CLI_VERSION || 'v1.7.0'
 
 // Build-time-only override (Decision 6 / Task 6): when set, bundle the named
 // local tessera-cli binary instead of downloading a pinned release. It exists

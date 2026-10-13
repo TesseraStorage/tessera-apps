@@ -36,7 +36,12 @@ test('every handoff DOM id is declared in the skeleton and cached in cacheRefs',
 
 test('handoffScreen is toggled with the other screens and header-hidden', () => {
   assert.ok(WEB_UI.includes("r.handoffScreen.classList.toggle('hidden', s !== 'handoff')"))
-  assert.ok(WEB_UI.includes("s === 'loading' || s === 'welcome' || s === 'handoff'"))
+  // Bug 5: the header is authenticated-only chrome -- visible solely on Files
+  // and Account, hidden on every pre-login screen (handoff included).
+  assert.ok(
+    WEB_UI.includes("r.header.classList.toggle('hidden', !(s === 'files' || s === 'billing'))"),
+    'the header must be gated to authenticated screens (Bug 5)',
+  )
 })
 
 test('handoff buttons are wired to the machine and states drive the screen', () => {
