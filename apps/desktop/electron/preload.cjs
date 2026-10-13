@@ -52,6 +52,11 @@ contextBridge.exposeInMainWorld('tesseraDesktop', {
   versionsList: (relPath) => ipcRenderer.invoke('tessera-versions-list', relPath),
   versionsRestore: (relPath, n) => ipcRenderer.invoke('tessera-versions-restore', relPath, n),
 
+  // ── Update check (Packet 4) ───────────────────────────
+  // Reports whether a newer tessera-apps release exists; never installs.
+  checkUpdate: () => ipcRenderer.invoke('tessera-update-check'),
+  openExternal: (url) => ipcRenderer.invoke('tessera-open-external', url),
+
   // Progress events from main process
   onUploadProgress: (callback) => {
     const handler = (_event, progress) => callback(progress)

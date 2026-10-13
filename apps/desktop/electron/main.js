@@ -3,7 +3,7 @@
 // Starts the CORS proxy and exposes Sia operations via IPC using the
 // native @siafoundation/sia-storage SDK (NAPI addon with raw TCP access).
 
-import { app, BrowserWindow, ipcMain, dialog, safeStorage, shell } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, net, safeStorage, shell } from 'electron'
 import path from 'path'
 import fs from 'fs'
 import http from 'http'
@@ -103,6 +103,53 @@ function createWindow() {
 }
 
 // ---- IPC: file dialogs --------------------------------------
+
+// ── Update check (Packet 4) ──────────────────────────────
+// Compares this build's version (from the git tag, Packet 2) to the latest
+// tessera-apps release. It only reports; it never downloads or installs.
+const UPDATE_REPO = 'TesseraStorage/tessera-apps'
+
+function parseVersion(v) {
+  return String(v || '')
+    .replace(/^v/, '')
+    .split(/[-+]/)[0]
+    .split('.')
+    .map((n) => parseInt(n, 10) || 0)
+}
+
+function isNewerVersion(latest, current) {
+  const a = parseVersion(latest)
+  const b = parseVersion(current)
+  for (let i = 0; i < 3; i++) {
+    if ((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) > (b[i] || 0)
+  }
+  return false
+}
+
+ipcMain.handle('tessera-update-check', async () => {
+  const current = app.getVersion()
+  const fallback = { current, latest: '', url: '', available: false }
+  try {
+    const res = await net.fetch(`https://api.github.com/repos/${UPDATE_REPO}/releases/latest`, {
+      headers: { Accept: 'application/vnd.github+json', 'User-Agent': `tessera-desktop/${current}` },
+    })
+    if (!res.ok) return fallback
+    const data = await res.json()
+    const latest = data.tag_name || ''
+    return {
+      current,
+      latest,
+      url: data.html_url || 'https://tessera.storage/downloads',
+      available: !!latest && isNewerVersion(latest, current),
+    }
+  } catch {
+    return fallback
+  }
+})
+
+ipcMain.handle('tessera-open-external', async (_e, url) => {
+  if (typeof url === 'string' && /^https:\/\//.test(url)) await shell.openExternal(url)
+})
 
 ipcMain.handle('open-file-dialog', async () => {
   const r = await dialog.showOpenDialog(mainWindow, {

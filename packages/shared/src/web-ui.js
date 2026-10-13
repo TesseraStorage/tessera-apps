@@ -86,6 +86,41 @@ function isDesktop() {
   return !!(window.tesseraDesktop && window.tesseraDesktop.isDesktop)
 }
 
+// ── update banner (Packet 4) ──────────────────────────────
+// Desktop only. Compares this build's version to the latest tessera-apps
+// release (via the Electron main process) and offers to open the download
+// page. It NEVER installs anything; the user clicks. Opt out with the
+// "Don't check again" button (persisted per browser/app profile).
+async function checkDesktopUpdate() {
+  if (!isDesktop() || !window.tesseraDesktop.checkUpdate) return
+  try { if (localStorage.getItem('tesseraweb.updateCheck') === 'off') return } catch (_) {}
+  let info
+  try { info = await window.tesseraDesktop.checkUpdate() } catch (_) { return }
+  if (!info || !info.available) return
+  showUpdateBanner(info)
+}
+
+function showUpdateBanner(info) {
+  if (document.getElementById('updateBanner')) return
+  const el = document.createElement('div')
+  el.id = 'updateBanner'
+  el.className = 'update-banner'
+  el.innerHTML =
+    '<span class="update-banner-text">Tessera <b>' + esc(info.latest) + '</b> is available (you have ' + esc(info.current) + ').</span>' +
+    '<span class="update-banner-actions">' +
+    '<button id="updateOpen" class="btn btn-primary">Update</button>' +
+    '<button id="updateNever" class="btn btn-ghost">Don\u2019t check again</button>' +
+    '<button id="updateDismiss" class="btn btn-ghost">Dismiss</button>' +
+    '</span>'
+  document.body.appendChild(el)
+  const open = document.getElementById('updateOpen')
+  if (open) open.onclick = () => { try { window.tesseraDesktop.openExternal(info.url) } catch (_) {} }
+  const never = document.getElementById('updateNever')
+  if (never) never.onclick = () => { try { localStorage.setItem('tesseraweb.updateCheck', 'off') } catch (_) {} ; el.remove() }
+  const dismiss = document.getElementById('updateDismiss')
+  if (dismiss) dismiss.onclick = () => el.remove()
+}
+
 /**
  * In the Electron desktop app, also connect the native NAPI SDK in the
  * main process so upload/download work via raw TCP (same mechanism as
@@ -614,6 +649,9 @@ export async function mountApp(container) {
   // never fetches /api/v1. The stock door has no billing session.
   billingClient = createBillingClient({})
   if (!IS_STOCK) r.btnBilling.classList.remove('hidden')
+
+  // Packet 4: on the desktop, offer to update when a newer release exists.
+  if (!IS_STOCK) checkDesktopUpdate()
 
   // wire events
   r.btnCreate.addEventListener('click', onShowInvite)

@@ -1387,6 +1387,32 @@ a:hover { color: var(--brand-400); }
   .welcome-title { font-size: 1.5rem; }
 }
 
+/* Packet 4: desktop update banner (bottom bar; never auto-installs). */
+.update-banner {
+  position: fixed;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: min(92vw, 44rem);
+  padding: 10px 14px;
+  border: 1px solid var(--ink-500);
+  border-radius: var(--radius);
+  background: var(--ink-800);
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+  color: var(--slate-text);
+  font-size: 0.875rem;
+}
+.update-banner b { color: var(--slate-bright); }
+.update-banner-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; }
+@media (max-width: 640px) {
+  .update-banner { flex-direction: column; align-items: flex-start; gap: 8px; }
+  .update-banner-actions { margin-left: 0; }
+}
+
 /* Final overrides — keep these last so they win over the .panel/.column-screen
    rules above (same specificity, later wins). */
 .welcome-panel { background: transparent; border: none; border-radius: 0; }
