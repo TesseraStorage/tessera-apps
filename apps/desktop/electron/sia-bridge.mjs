@@ -190,7 +190,13 @@ export async function listFiles() {
         if (metaBytes && metaBytes.length) {
           try {
             const m = JSON.parse(new TextDecoder().decode(metaBytes))
-            if (m.name) name = m.name
+            // PATH (2026-10-13, "files-view-nested-paths"): identical fix to
+            // the web reader in packages/shared/src/files.js -- the sync
+            // engine pins {name:<basename>, tessera:{path:<full path>}}; use
+            // the descriptor's path so Files nests folders rather than
+            // flattening every synced file onto its base name.
+            if (m.tessera && typeof m.tessera.path === 'string' && m.tessera.path) name = m.tessera.path
+            else if (m.name) name = m.name
           } catch (_) {}
         }
       }

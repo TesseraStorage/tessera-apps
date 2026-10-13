@@ -882,16 +882,17 @@ export function createUploadMap(canvas, captionEl, onLanded) {
   // or an attempt this map instance never saw) -- same fail-quiet
   // contract as the rest of this module.
   function closeAttempt(hostKey) {
-    if (!hostKey) return
+    if (!hostKey) return false
     const now = Date.now()
     for (let i = 0; i < trips.length; i++) {
       const t = trips[i]
       if (t.dir === 'upload' && t.hostKey === hostKey && t.open) {
         t.open = false
         t.visibleUntil = Math.max(now, t.startedAt + LINE_FLOOR_MS)
-        return
+        return true
       }
     }
+    return false
   }
 
   // closeAllOpenAttempts: the Add-settle sweep -- "this Add settles
@@ -982,15 +983,23 @@ export function createUploadMap(canvas, captionEl, onLanded) {
       // (possibly much-later-than-the-floor) end time instead of
       // fading it out on a fixed clock the attempt may have long
       // outlived.
-      closeAttempt(hostKey)
-      // STOCK DOOR (2026-10-01, "tessera-web-stock-arcs"): Foundation's stock SDK has no
-      // onWriteAttemptStart, so attemptStart() above never fires and nothing else pushes an upload
-      // trip. On stock the gold arc is drawn HERE, at LAND (onShardUploaded) -- honest: stock cannot
-      // see dial start. Same trip shape and same LINE_FLOOR_MS (4 s) floor the shared path already
-      // uses; not open (nothing to hold), so tripFade() fades it on the existing SHARD_FADE_MS law.
-      // One arc per landed shard, only for a host with geo (skipped above otherwise). T-SDK bundle
-      // folds this branch away.
-      if (IS_STOCK) trips.push({ lat: geo.lat, lon: geo.lon, hostKey, dir: 'upload', startedAt: now, open: false, visibleUntil: now + LINE_FLOOR_MS, fadeAt: now })
+      const hadAttempt = closeAttempt(hostKey)
+      // LAND-TIME ARC (2026-10-13, "map-missing-connection-lines"): when no
+      // attempt trip was open for this host, draw the gold arc HERE at land.
+      // Arc means "data is moving between client and host"; the ONLY other
+      // producer is attemptStart() above, fed by the T-SDK's
+      // onWriteAttemptStart. That seam is absent everywhere else -- the
+      // desktop app's native NAPI SDK (@siafoundation/sia-storage) exposes
+      // no onWriteAttemptStart, and neither does the stock door -- so on
+      // desktop (t-sdk bundle + native bridge) pins landed but trips never
+      // did, and the connecting lines vanished while the dots stayed. This
+      // used to be gated behind IS_STOCK, which is exactly why desktop was
+      // missed. Drawn here for ANY producer that had no attempt hold; the
+      // web T-SDK path still reports hadAttempt===true and skips this, so a
+      // shard is never drawn twice. Same trip shape and LINE_FLOOR_MS (4 s)
+      // floor as the shared path; not open (nothing to hold), so tripFade()
+      // fades it on the existing SHARD_FADE_MS law.
+      if (!hadAttempt) trips.push({ lat: geo.lat, lon: geo.lon, hostKey, dir: 'upload', startedAt: now, open: false, visibleUntil: now + LINE_FLOOR_MS, fadeAt: now })
     }
 
     // STATIONARY PIN: upload only (see the function-level comment above
