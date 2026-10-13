@@ -17,7 +17,7 @@
 // before preload resolves, enterFiles() below just awaits initSia()
 // again, which is a no-op once _ready is true (see sdk.js).
 
-import { initSia, registerSdk } from './sdk.js'
+import { initSia, registerSdk, generateRecoveryPhrase } from './sdk.js'
 import {
   connectWithInvite, completeRegistration,
   tryReconnect, reconnectWithAppKey, clearCredentials, getSaved,
@@ -54,7 +54,7 @@ import { IS_STOCK } from './door.js'
 import {
   HANDOFF_STATES, HANDOFF_PENDING_MESSAGE,
   extractHandoffCode, mapLegacyHandoffToFragment, scrubHandoffFragment,
-  readHandoffMarker, createHandoffMachine,
+  readHandoffMarker, createHandoffMachine, activateCredential,
 } from './handoff.js'
 // BILLING (P6 Task 3, Decision 3): account dashboard fields, closed top-up,
 // signed-out state, desktop bridge hook. billing.js owns the /api/v1 client
@@ -84,6 +84,17 @@ function FETCH_MODE() {
 
 function isDesktop() {
   return !!(window.tesseraDesktop && window.tesseraDesktop.isDesktop)
+}
+
+// A registration that tries to create a SECOND identity under a spent
+// single-use connect key answers "key has no remaining uses". Surface the
+// actionable cause instead of the raw indexd error.
+function explainRegisterError(msg) {
+  const s = String(msg || '')
+  if (/no remaining uses|key has no remaining|key.?exhausted/i.test(s)) {
+    return 'this account already has a storage identity, so a new one can\u2019t be created here. Sign in at tessera.storage/account and use your 12-word recovery phrase, or email info@tessera.storage.'
+  }
+  return s
 }
 
 // ── update banner (Packet 4) ──────────────────────────────
@@ -162,8 +173,9 @@ function cacheRefs() {
     'readyWaitScreen', 'readyWaitStatus',
     'recoverScreen', 'recoverPhraseInput', 'btnRecoverContinue', 'recoverStatus', 'recoverPhraseStep',
     'desktopLoginScreen', 'desktopLoginLead', 'desktopLoginEmailStep', 'desktopLoginEmail',
-    'btnDesktopSendLink', 'desktopLoginTokenStep', 'desktopLoginToken', 'desktopLoginPhrase',
-    'btnDesktopVerify', 'desktopLoginStatus',
+    'btnDesktopSendLink', 'desktopLoginTokenStep', 'desktopLoginToken',
+    'desktopLoginPhraseStep', 'desktopLoginPhrase', 'desktopCreateNote',
+    'btnDesktopVerify', 'btnDesktopCreate', 'desktopLoginStatus',
     'unlockScreen', 'unlockPassword', 'btnUnlock', 'unlockStatus', 'btnForgotPassword',
     'filesScreen', 'dropzone', 'fileInput', 'fileList', 'fileActions',
     'btnDownload', 'btnShare', 'btnDelete',
@@ -280,7 +292,7 @@ const SKELETON = /*html*/`
   <!-- CREATE: INVITE CODE (demo/invited accounts only; Bug 2) -->
   <section id="inviteScreen" class="panel column-screen hidden">
     <h2>I have an invite code</h2>
-    <p class="hint">Invites are for demo accounts. If you did not receive a code, use Log in instead.</p>
+    <p class="hint">Invite codes are for invited demo accounts. If you were not sent one, email info@tessera.storage for a time-boxed demo account.</p>
     <input type="text" id="inviteInput" placeholder="Invite code" autocomplete="off" style="margin-top:14px">
     <p style="margin-top:14px">
       <button id="btnInviteContinue" class="btn btn-primary btn-lg">Continue</button>
@@ -294,7 +306,7 @@ const SKELETON = /*html*/`
   <!-- CREATE: REQUEST STUB (named, not designed) -->
   <section id="requestStubScreen" class="panel column-screen hidden">
     <h2>Request an invite</h2>
-    <p>Invites are for demo accounts. Ask the person who sent you here.</p>
+    <p>Email info@tessera.storage for a time-boxed demo account.</p>
     <p style="margin-top:14px">
       <button id="btnRequestBack" class="btn btn-outline btn-lg">Back</button>
     </p>
@@ -368,13 +380,20 @@ const SKELETON = /*html*/`
       </p>
     </div>
     <div id="desktopLoginTokenStep" class="hidden">
-      <p class="hint">Open the sign-in link we emailed you and copy its token, then paste it here with your 12 words.</p>
-      <input type="text" id="desktopLoginToken" placeholder="Token from the sign-in link" autocomplete="off" style="margin-top:10px">
-      <textarea id="desktopLoginPhrase" class="recover-input"
-                placeholder="Your 12 words\u2026"
-                rows="3" autocomplete="off" spellcheck="false" style="margin-top:10px"></textarea>
+      <p class="hint">Open the sign-in link we emailed you, then <b>paste the whole link</b> here (or just its token).</p>
+      <input type="text" id="desktopLoginToken" placeholder="Paste the sign-in link" autocomplete="off" style="margin-top:10px">
+      <div id="desktopLoginPhraseStep" style="margin-top:10px">
+        <p class="hint">Already have an account? Enter the 12 words you saved.</p>
+        <textarea id="desktopLoginPhrase" class="recover-input"
+                  placeholder="Your 12 words\u2026"
+                  rows="3" autocomplete="off" spellcheck="false" style="margin-top:6px"></textarea>
+      </div>
+      <p id="desktopCreateNote" class="hint" style="margin-top:8px"></p>
       <p style="margin-top:14px">
         <button id="btnDesktopVerify" class="btn btn-primary btn-lg">Sign in</button>
+      </p>
+      <p style="margin-top:10px">
+        <button id="btnDesktopCreate" class="btn btn-outline btn-lg">I&rsquo;m new &mdash; create an account</button>
       </p>
     </div>
     <p id="desktopLoginStatus" class="status-text"></p>
@@ -691,6 +710,7 @@ export async function mountApp(container) {
   // DESKTOP SIGN-IN (Bug 3).
   r.btnDesktopSendLink.addEventListener('click', onDesktopSendLink)
   r.btnDesktopVerify.addEventListener('click', onDesktopVerify)
+  r.btnDesktopCreate.addEventListener('click', onDesktopCreate)
   r.btnHandoffPrimary.addEventListener('click', onHandoffPrimary)
   r.btnHandoffCancel.addEventListener('click', onHandoffCancel)
   // BILLING (P6 Decision 3): header entry point + Back, web and desktop.
@@ -1535,7 +1555,7 @@ async function onInviteContinue() {
     r.inviteStatus.textContent = ''
     goToSetPassword('inviteRegister')
   } catch (e) {
-    r.inviteStatus.textContent = 'Could not use that invite: ' + (e.message || 'Unknown error')
+    r.inviteStatus.textContent = 'Could not use that invite: ' + explainRegisterError(e.message || 'Unknown error')
     r.btnInviteContinue.disabled = false
     console.error(e)
     return
@@ -1603,6 +1623,10 @@ async function onSetPassword() {
       // already-linked no-op). No-op outside the handoff flow. Never
       // awaited: activation must not delay the words screen.
       if (handoffMachine) handoffMachine.noteRegistrationComplete().catch(() => {})
+      // Link immediately so this brand-new identity is visible to the session
+      // right away (item 3) -- otherwise a quick follow-up connect could mint
+      // a second handoff before the scheduler tick.
+      activateCredential().catch(() => {})
       _pendingPassword = pw  // wrap happens after words are confirmed, once the key exists
       r.wordsText.textContent = phrase
       goto('words')
@@ -1630,7 +1654,7 @@ async function onSetPassword() {
       throw new Error('Unknown password flow.')
     }
   } catch (e) {
-    r.setPasswordStatus.textContent = 'Could not set password: ' + (e.message || 'error')
+    r.setPasswordStatus.textContent = 'Could not set password: ' + explainRegisterError(e.message || 'error')
     r.btnSetPassword.disabled = false
     console.error(e)
     return
@@ -1726,9 +1750,13 @@ async function onRecoverContinue() {
       { expectedPublicKey: cred.publicKey || undefined },
     )
     patchState({ sdk, builder: null, phrase: '' })
+    // LINK IMMEDIATELY (item 3): without this, the fresh identity stays
+    // unlinked until the scheduler tick, and a follow-up "Connect this device"
+    // can mint a SECOND handoff and burn the single-use key. Best-effort.
+    activateCredential().catch(() => {})
     goToSetPassword('recoverRegister')
   } catch (e) {
-    r.recoverStatus.textContent = 'Could not continue: ' + (e.message || 'Unknown error')
+    r.recoverStatus.textContent = 'Could not continue: ' + explainRegisterError(e.message || 'Unknown error')
     r.btnRecoverContinue.disabled = false
     console.error(e)
   }
@@ -1742,14 +1770,27 @@ async function onRecoverContinue() {
 // (POST /api/v1/credentials/recovery with a magic-link session) and writes
 // the shared ~/.tessera config; doBoot() then adopts that exact identity.
 // No connect key, no indexd approval page, ever.
-function onShowDesktopLogin() {
-  if (IS_STOCK) { renderNeedTicket(); return }
+// `true` while the screen is in "brand-new user" mode (phrase generated here,
+// not typed by the user).
+let _desktopNewAccount = false
+
+function resetDesktopLogin() {
+  _desktopNewAccount = false
   r.desktopLoginEmail.value = ''
   r.desktopLoginToken.value = ''
   r.desktopLoginPhrase.value = ''
+  r.desktopLoginPhrase.readOnly = false
+  r.desktopLoginPhraseStep.classList.remove('hidden')
+  r.desktopCreateNote.textContent = ''
   r.desktopLoginStatus.textContent = ''
   r.desktopLoginEmailStep.classList.remove('hidden')
   r.desktopLoginTokenStep.classList.add('hidden')
+  r.btnDesktopVerify.textContent = 'Sign in'
+}
+
+function onShowDesktopLogin() {
+  if (IS_STOCK) { renderNeedTicket(); return }
+  resetDesktopLogin()
   goto('desktopLogin')
 }
 
@@ -1770,7 +1811,7 @@ async function onDesktopSendLink() {
     if (!res || !res.ok) throw new Error((res && res.error) || 'could not send the sign-in link')
     r.desktopLoginTokenStep.classList.remove('hidden')
     r.desktopLoginStatus.textContent =
-      'Sign-in link sent. Open it and copy its token, then enter your 12 words.'
+      'Sign-in link sent. Open it, then paste the whole link below (or just its token).'
   } catch (e) {
     r.desktopLoginStatus.textContent = 'Could not send the link: ' + (e.message || 'unknown error')
   } finally {
@@ -1778,18 +1819,49 @@ async function onDesktopSendLink() {
   }
 }
 
+// Brand-new user path (item 2): a first-time user has no seed phrase, so we
+// generate a fresh one here and have them save it BEFORE registering -- rather
+// than dead-ending them into a "paste your 12 words" prompt they cannot fill.
+function onDesktopCreate() {
+  if (!window.tesseraDesktop || typeof window.tesseraDesktop.loginVerify !== 'function') {
+    r.desktopLoginStatus.textContent = 'Sign-in is unavailable in this build.'
+    return
+  }
+  const phrase = generateRecoveryPhrase()
+  _desktopNewAccount = true
+  r.desktopLoginPhrase.value = phrase
+  r.desktopLoginPhrase.readOnly = true
+  r.desktopLoginPhraseStep.classList.remove('hidden')
+  r.desktopCreateNote.textContent =
+    'Write these 12 words down and keep them safe \u2014 they are the only way back into your account. Then click the button below.'
+  r.btnDesktopVerify.textContent = 'I saved them \u2014 create my account'
+  r.desktopLoginStatus.textContent =
+    'Save the 12 words above first; the button below creates your account from them.'
+}
+
 async function onDesktopVerify() {
   const email = r.desktopLoginEmail.value.trim()
   const token = r.desktopLoginToken.value.trim()
   const phrase = r.desktopLoginPhrase.value.trim()
-  if (!token) { r.desktopLoginStatus.textContent = 'Please paste the token from the sign-in link.'; return }
-  if (phrase.split(/\s+/).length < 12) { r.desktopLoginStatus.textContent = 'Please enter all 12 words.'; return }
+  if (!email) { r.desktopLoginStatus.textContent = 'Enter your email first.'; return }
+  if (!token) {
+    r.desktopLoginStatus.textContent = 'Paste the sign-in link (or its token) from the email.'
+    return
+  }
+  if (phrase.split(/\s+/).filter(Boolean).length < 12) {
+    r.desktopLoginStatus.textContent = _desktopNewAccount
+      ? 'Save the 12 words shown above, then continue.'
+      : 'Enter the 12 words you saved, or click "I\u2019m new" to create an account.'
+    return
+  }
   if (!window.tesseraDesktop || typeof window.tesseraDesktop.loginVerify !== 'function') {
     r.desktopLoginStatus.textContent = 'Sign-in is unavailable in this build.'
     return
   }
   r.btnDesktopVerify.disabled = true
-  r.desktopLoginStatus.textContent = 'Signing in and recovering your account\u2026'
+  r.desktopLoginStatus.textContent = _desktopNewAccount
+    ? 'Creating your account\u2026'
+    : 'Signing in and recovering your account\u2026'
   try {
     const res = await window.tesseraDesktop.loginVerify(email, token, phrase)
     if (!res || !res.ok) throw new Error((res && res.error) || 'sign-in failed')

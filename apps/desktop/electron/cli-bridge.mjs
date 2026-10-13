@@ -158,10 +158,29 @@ export function loginStart(email) {
     r.ok ? { ok: true } : { ok: false, error: describeLoginCli(r) })
 }
 
-/** Exchange the emailed token for a session and recover/register headlessly. */
+// Accept either the bare token or the WHOLE emailed sign-in link (or a query
+// string): the desktop UI asks the user to paste the link, and we pull the
+// `token` out of it so no one has to hand-copy a token.
+export function extractSignInToken(value) {
+  const raw = String(value || '').trim()
+  if (!raw) return ''
+  // Full URL (?token=), a bare query string (token=...), or just the token.
+  const m = raw.match(/(?:^|[?&])token=([^&\s#]+)/)
+  if (m) {
+    try {
+      return decodeURIComponent(m[1])
+    } catch (_) {
+      return m[1]
+    }
+  }
+  return raw
+}
+
+/** Exchange the emailed link/token for a session and recover/register headlessly. */
 export function loginVerify(email, token, phrase) {
+  const tokenValue = extractSignInToken(token)
   const childEnv = { ...process.env, TESSERA_PHRASE: phrase }
-  return run(['login', '--email', email, '--token', token], { env: childEnv }).then((r) =>
+  return run(['login', '--email', email, '--token', tokenValue], { env: childEnv }).then((r) =>
     r.ok ? { ok: true } : { ok: false, error: describeLoginCli(r) })
 }
 

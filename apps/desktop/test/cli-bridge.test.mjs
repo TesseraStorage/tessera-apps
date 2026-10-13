@@ -301,6 +301,17 @@ test('loginVerify maps an invalid link to safe copy with no secret echo', { skip
 
 // ── Bug 6: forget clears the shared device config ─────────
 
+test('extractSignInToken accepts a full link, a query string, or a bare token', () => {
+  assert.equal(
+    cli.extractSignInToken('https://tessera.storage/auth/verify?token=abc123&x=1'),
+    'abc123',
+  )
+  assert.equal(cli.extractSignInToken('token=abc%2B123'), 'abc+123')
+  assert.equal(cli.extractSignInToken('  bareTokenValue  '), 'bareTokenValue')
+  assert.equal(cli.extractSignInToken(''), '')
+  assert.equal(cli.extractSignInToken(null), '')
+})
+
 test('forget removes the shared ~/.tessera config (Bug 6)', async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'tessera-forget-'))
   const saved = process.env.TESSERA_HOME
