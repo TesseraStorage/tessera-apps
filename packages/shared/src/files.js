@@ -803,7 +803,17 @@ export async function listFiles(sdk) {
         if (meta && meta.length) {
           try {
             const m = JSON.parse(new TextDecoder().decode(meta))
-            if (m.name) name = m.name
+            // PATH (2026-10-13, "files-view-nested-paths"): use the FULL
+            // logical path so the Files view nests folders instead of
+            // flattening on the base name. The CLI/sync engine pins
+            // {name:<basename>, tessera:{path:<full path>}} -- `name` alone
+            // made every synced file (e.g. tessera/tessera/x.heic) appear at
+            // the root as its bare basename, scattered flat next to
+            // drag-and-dropped files. Prefer the descriptor's path; fall back
+            // to `name` (Web's own uploads store the full path there, and
+            // older objects predate the tessera descriptor).
+            if (m.tessera && typeof m.tessera.path === 'string' && m.tessera.path) name = m.tessera.path
+            else if (m.name) name = m.name
             // FOLDERS (2026-09-15, "tessera-web-folders-v1"): mime is
             // read through untouched here -- computeFolderView()/
             // isNonEmptyFolder() need it to recognize a folder marker

@@ -39,6 +39,7 @@ contextBridge.exposeInMainWorld('tesseraDesktop', {
   openPath: (p) => ipcRenderer.invoke('tessera-open-path', p),
   syncAdd: (localPath, remotePrefix) => ipcRenderer.invoke('tessera-sync-add', localPath, remotePrefix),
   syncList: () => ipcRenderer.invoke('tessera-sync-list'),
+  syncStatus: () => ipcRenderer.invoke('tessera-sync-status'),
   syncRun: (rootId) => ipcRenderer.invoke('tessera-sync-run', rootId),
   syncRemove: (rootId) => ipcRenderer.invoke('tessera-sync-remove', rootId),
   syncConflicts: () => ipcRenderer.invoke('tessera-sync-conflicts'),

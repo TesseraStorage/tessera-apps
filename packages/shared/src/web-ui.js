@@ -793,7 +793,10 @@ export async function mountApp(container) {
     r.btnSyncFolders.classList.remove('hidden')
     r.btnSyncFolders.addEventListener('click', onOpenSyncFolders)
     r.btnAddSyncFolder.addEventListener('click', onAddSyncFolder)
-    r.btnCloseSyncFolders.addEventListener('click', () => r.syncFoldersModal.classList.add('hidden'))
+    r.btnCloseSyncFolders.addEventListener('click', () => {
+      r.syncFoldersModal.classList.add('hidden')
+      if (_syncModalPoll) { clearInterval(_syncModalPoll); _syncModalPoll = null }
+    })
   }
   r.fileInput.addEventListener('change', onFilePicked)
   r.btnDownload.addEventListener('click', onDownload)
@@ -1981,6 +1984,10 @@ async function enterFiles(appKeyHex) {
   // packet calls out. Clear it immediately; run the real account-ready
   // check and file list load in the background instead of gating on it.
   patchState({ status: '' })
+  // SYNC AUTO-REFRESH (2026-10-13, "desktop-sync-progress"): on desktop, watch
+  // the synced roots' last_sync and re-fetch the list when the background
+  // watcher finishes a pass, so newly uploaded files appear without a reload.
+  startSyncFilePoll()
   refreshFiles().catch(e => {
     console.warn('[tessera-web] initial file list load failed:', e.message)
     // DEBUG DIARY (2026-09-26, "tessera-web-debug-dl"): "list-fail --
@@ -4158,6 +4165,101 @@ async function onDebugCopy() {
 // IPC (see cli-bridge.mjs) instead of re-implementing its tested
 // three-way sync/reconcile/tombstone engine here in JS.
 
+// LIVE PROGRESS (2026-10-13, "desktop-sync-progress"): the modal used to show
+// a folder's last_sync straight from `sync list` and never re-read it, so a
+// folder actively uploading for the first time read "never" the entire time,
+// showed no progress at all, and the Files view never updated after a sync
+// finished. `sync status` (ahead/behind counts + last-sync age, no transfer) is
+// the live source: the modal re-reads it on a timer while open, and a
+// background poll compares each root's last_sync between passes and refreshes
+// the Files list the moment a sync (UI-driven or watcher) completes.
+const _syncingRoots = new Set()
+const _syncLastSeen = new Map()   // root id -> last_sync string already reflected
+let _syncModalPoll = null
+let _syncFilePoll = null
+
+// syncPendingLine: the per-root live status word -- "Syncing…" while this UI's
+// own first sync is in flight, otherwise the real ahead/behind counts, or
+// "Up to date" when the plan is empty.
+function syncPendingLine(live, syncing) {
+  if (syncing) return 'Syncing\u2026'
+  if (!live) return ''
+  if (live.error) return 'Error: ' + live.error
+  const pending = (live.to_upload || 0) + (live.to_download || 0) + (live.to_delete || 0)
+  if (pending > 0) {
+    const bits = []
+    if (live.to_upload) bits.push(live.to_upload + ' to upload')
+    if (live.to_download) bits.push(live.to_download + ' to fetch')
+    if (live.to_delete) bits.push(live.to_delete + ' to delete')
+    if (live.conflicts) bits.push(live.conflicts + ' conflict' + (live.conflicts === 1 ? '' : 's'))
+    return bits.join(' \u00b7 ')
+  }
+  return 'Up to date'
+}
+
+// syncResultSummary: one line from `sync --json`'s per-root Result array.
+function syncResultSummary(results) {
+  if (!Array.isArray(results) || !results.length) return ''
+  let up = 0, down = 0, del = 0, bytes = 0
+  for (const x of results) {
+    up += x.uploaded || 0; down += x.downloaded || 0; del += x.deleted || 0
+    bytes += (x.bytes_uploaded || 0) + (x.bytes_downloaded || 0)
+  }
+  if (!up && !down && !del) return 'Already up to date'
+  let s = up + ' uploaded, ' + down + ' downloaded'
+  if (del) s += ', ' + del + ' deleted'
+  if (bytes) s += ' (' + formatBytes(bytes) + ')'
+  return s
+}
+
+async function readSyncStatus() {
+  const byId = new Map()
+  try {
+    const st = await window.tesseraDesktop.syncStatus()
+    if (st && st.ok && Array.isArray(st.data)) for (const s of st.data) byId.set(s.root_id, s)
+  } catch (_) {}
+  return byId
+}
+
+// runSyncWithProgress: drive one reconcile pass, polling the live plan every
+// 2.5s so the row shows "N to upload / M to fetch" shrinking while it runs.
+async function runSyncWithProgress(rootId) {
+  if (rootId) _syncingRoots.add(rootId)
+  await renderSyncFolders().catch(() => {})
+  const poll = setInterval(() => { renderSyncFolders().catch(() => {}) }, 2500)
+  let run
+  try {
+    run = await window.tesseraDesktop.syncRun(rootId)
+  } finally {
+    clearInterval(poll)
+    if (rootId) _syncingRoots.delete(rootId)
+  }
+  return run
+}
+
+// startSyncFilePoll: watcher-driven refresh of the Files view. The CLI watcher
+// (not this UI) does ongoing syncs, so the only signal is a root's last_sync
+// advancing between two `sync list` reads -- cheap, local, no network.
+function startSyncFilePoll() {
+  if (!isDesktop() || _syncFilePoll) return
+  window.tesseraDesktop.syncList().then((res) => {
+    if (res && res.ok) for (const root of res.data || []) _syncLastSeen.set(root.id, root.last_sync)
+  }).catch(() => {})
+  _syncFilePoll = setInterval(async () => {
+    try {
+      const res = await window.tesseraDesktop.syncList()
+      if (!res || !res.ok) return
+      let changed = false
+      for (const root of res.data || []) {
+        const prev = _syncLastSeen.get(root.id)
+        if (prev !== undefined && prev !== root.last_sync) changed = true
+        _syncLastSeen.set(root.id, root.last_sync)
+      }
+      if (changed) await refreshFiles()
+    } catch (_) {}
+  }, 10000)
+}
+
 function defaultSyncPrefix(localPath) {
   const base = (localPath.split('/').pop() || localPath.split('\\').pop() || 'folder')
     .toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '') || 'folder'
@@ -4168,9 +4270,10 @@ async function renderSyncFolders() {
   r.syncFolderList.innerHTML = '<p class="status-text">Loading&hellip;</p>'
   r.syncFoldersError.textContent = ''
 
-  const [listRes, statusRes] = await Promise.all([
+  const [listRes, statusRes, liveById] = await Promise.all([
     window.tesseraDesktop.syncList(),
     window.tesseraDesktop.serviceStatus(),
+    readSyncStatus(),
   ])
 
   if (statusRes && statusRes.ok) {
@@ -4195,14 +4298,23 @@ async function renderSyncFolders() {
 
   r.syncFolderList.innerHTML = ''
   for (const root of roots) {
+    const live = liveById.get(root.id) || null
+    const syncing = _syncingRoots.has(root.id)
+    // Last-sync age prefers the live `sync status` string ("3m ago") -- during
+    // an active first sync `sync list` still reports the never/zero value, so
+    // reading it alone is exactly the stale "never synced before" bug.
+    const age = (live && live.last_sync && live.last_sync !== 'never')
+      ? live.last_sync
+      : (root.last_sync && !String(root.last_sync).startsWith('0001') ? fmtDateTime(root.last_sync) : 'never')
+    const pending = syncPendingLine(live, syncing)
     const row = document.createElement('div')
     row.className = 'file-row sync-folder-row'
     row.innerHTML =
       '<div class="file-icon">\u{1F4C1}</div>' +
       '<div class="file-info">' +
         '<span class="file-name">' + esc(root.local_path) + '</span>' +
-        '<span class="file-meta">' + esc(root.remote_prefix) + '/ &middot; last sync: ' +
-          esc(root.last_sync && !root.last_sync.startsWith('0001') ? fmtDateTime(root.last_sync) : 'never') +
+        '<span class="file-meta">' + esc(root.remote_prefix) + '/ &middot; last sync: ' + esc(age) +
+          (pending ? ' &middot; ' + esc(pending) : '') +
         '</span>' +
       '</div>'
     const openBtn = document.createElement('button')
@@ -4222,6 +4334,15 @@ async function renderSyncFolders() {
 async function onOpenSyncFolders() {
   r.syncFoldersModal.classList.remove('hidden')
   await renderSyncFolders()
+  // While the modal is open, keep the rows live: the watcher may be mid-sync,
+  // so re-read `sync status` every 3s until the modal is closed.
+  if (_syncModalPoll) clearInterval(_syncModalPoll)
+  _syncModalPoll = setInterval(() => {
+    if (r.syncFoldersModal.classList.contains('hidden')) {
+      clearInterval(_syncModalPoll); _syncModalPoll = null; return
+    }
+    renderSyncFolders().catch(() => {})
+  }, 3000)
 }
 
 async function onAddSyncFolder() {
@@ -4237,7 +4358,21 @@ async function onAddSyncFolder() {
       r.syncFoldersError.textContent = 'Could not add that folder: ' + (res.error || res.stderr || 'unknown error')
       return
     }
-    showToast('Folder synced: ' + localPath)
+    const rootId = res.data && res.data.id
+    showToast('Syncing ' + localPath + '\u2026')
+    // FIRST SYNC, VISIBLE: add only registers the folder; without this the
+    // watcher's first pass was invisible (no progress, status stuck on
+    // "never"). Run it here and show the live plan, the result, and the new
+    // files -- no hard refresh needed.
+    const run = await runSyncWithProgress(rootId)
+    if (!run || !run.ok) {
+      r.syncFoldersError.textContent = 'That folder was added, but the first sync failed: ' +
+        ((run && (run.error || run.stderr)) || 'unknown error')
+    } else {
+      const summary = syncResultSummary(run.data)
+      if (summary) showToast('Synced ' + localPath + ': ' + summary)
+    }
+    await refreshFiles()
   } finally {
     r.btnAddSyncFolder.disabled = false
     await renderSyncFolders()

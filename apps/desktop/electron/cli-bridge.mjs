@@ -296,6 +296,16 @@ export function syncList() {
   return runJSON(['sync', 'list', '--json'])
 }
 
+// syncStatus: one reconcile PLAN per root (ahead/behind counts + last-sync
+// age), touching nothing on the network but a Remote refresh. This is the
+// desktop UI's live-progress source: while a folder is syncing (the UI-driven
+// first sync, or the background watcher), the pending counts shrink as files
+// move, so the modal shows real "N to upload / M to fetch" instead of a stale
+// "never synced".
+export function syncStatus() {
+  return runJSON(['sync', 'status', '--json'])
+}
+
 export function syncRun(rootId) {
   const args = rootId ? ['sync', '--root', rootId, '--json'] : ['sync', '--json']
   return runJSON(args)
