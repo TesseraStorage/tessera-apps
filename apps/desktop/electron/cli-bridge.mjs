@@ -164,7 +164,8 @@ export function loginStart(email) {
 export function extractSignInToken(value) {
   const raw = String(value || '').trim()
   if (!raw) return ''
-  const m = raw.match(/[?&]token=([^&\s#]+)/)
+  // Full URL (?token=), a bare query string (token=...), or just the token.
+  const m = raw.match(/(?:^|[?&])token=([^&\s#]+)/)
   if (m) {
     try {
       return decodeURIComponent(m[1])
