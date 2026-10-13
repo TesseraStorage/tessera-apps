@@ -272,7 +272,9 @@ body {
 /* ── inputs ───────────────────────────────────────────── */
 input[type="text"],
 input[type="password"],
-input[type="search"] {
+input[type="search"],
+input[type="number"],
+input[type="email"] {
   font-family: var(--font);
   font-size: 14px;
   background: var(--bg);
@@ -1132,7 +1134,23 @@ input:focus { border-color: var(--cyan); }
 .billing-warning-when { color: var(--ink3); font-size: 11px; }
 
 .billing-form { margin-top: 12px; display: flex; flex-direction: column; gap: 10px; }
-.billing-form input { width: 100%; }
+/* The amount field is type="number"; the generic input rule above only
+   matched text/password/search, so this rendered as a default white box on
+   the dark theme (Bug: white top-up input, web + desktop). Style it here so
+   it is dark regardless of input type. */
+.billing-form input {
+  width: 100%;
+  font-family: var(--font);
+  font-size: 14px;
+  background: var(--bg);
+  color: var(--ink);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 9px 12px;
+  outline: none;
+  transition: border-color .15s;
+}
+.billing-form input:focus { border-color: var(--cyan); }
 .billing-error { color: var(--red); font-size: 13px; }
 .billing-error:empty { display: none; }
 
