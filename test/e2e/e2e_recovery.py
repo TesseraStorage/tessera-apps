@@ -928,6 +928,23 @@ def main() -> int:
                 h.secrets_scan.append(cookie)
             result = h.run_browser(cookie, phrase, "proof.txt")
             h.check(
+                bool(result.get("hasLoginButton")),
+                "web welcome offers Log in as the primary option (Bug 2)",
+            )
+            h.check(
+                bool(result.get("inviteIsSecondary")),
+                "the invite path is labelled as a demo invite code (Bug 2)",
+            )
+            h.check(
+                bool(result.get("headerHiddenOnWelcome")) and bool(result.get("headerHiddenPreLogin")),
+                "pre-login screens hide the authenticated-only header (Bug 5)"
+                + ("" if result.get("headerHiddenOnWelcome") and result.get("headerHiddenPreLogin") else f" -- {result}"),
+            )
+            h.check(
+                bool(result.get("headerVisibleOnFiles")),
+                "the authenticated header appears once signed in (Bug 5)",
+            )
+            h.check(
                 not result.get("sawApprovalStep"),
                 "browser recovery never showed the indexd approval step"
                 + (

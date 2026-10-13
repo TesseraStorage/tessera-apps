@@ -47,7 +47,22 @@ const STUB_SKIP = WINDOWS
 // Behaviour keys off STUB_ACCOUNT_MODE, forwarded through process.env.
 const STUB = `#!/usr/bin/env node
 'use strict'
+const fs = require('fs')
 const mode = process.env.STUB_ACCOUNT_MODE || 'ok'
+if (mode === 'login_ok') {
+  if (process.env.STUB_LOGIN_FILE) {
+    fs.writeFileSync(process.env.STUB_LOGIN_FILE, JSON.stringify({
+      argv: process.argv.slice(2),
+      hasPhrase: !!process.env.TESSERA_PHRASE,
+    }))
+  }
+  process.stdout.write('Magic link requested.\\n')
+  process.exit(0)
+}
+if (mode === 'login_invalid') {
+  process.stderr.write('ERROR: the sign-in link is invalid, expired or already used — request a new one with tessera login --email\\n')
+  process.exit(1)
+}
 if (mode === 'no_creds') {
   process.stderr.write("ERROR: no billing credentials — run 'tessera signup' or 'tessera login'\\n")
   process.exit(1)
@@ -236,3 +251,68 @@ test(
     }
   },
 )
+
+// ── Bug 3: in-app magic-link sign-in / recovery ───────────
+
+test('loginStart runs the CLI magic-link request for the email', { skip: STUB_SKIP }, async () => {
+  const file = path.join(os.tmpdir(), 'tessera-login-start-' + process.pid + '.json')
+  process.env.STUB_LOGIN_FILE = file
+  try {
+    await withStub('login_ok', async () => {
+      const r = await cli.loginStart('user@example.test')
+      assert.equal(r.ok, true)
+      const seen = JSON.parse(fs.readFileSync(file, 'utf8'))
+      assert.deepEqual(seen.argv, ['login', '--email', 'user@example.test'])
+      assert.equal(seen.hasPhrase, false)
+    })
+  } finally {
+    delete process.env.STUB_LOGIN_FILE
+    fs.rmSync(file, { force: true })
+  }
+})
+
+test('loginVerify passes the phrase only via the environment, never argv', { skip: STUB_SKIP }, async () => {
+  const file = path.join(os.tmpdir(), 'tessera-login-verify-' + process.pid + '.json')
+  process.env.STUB_LOGIN_FILE = file
+  const phrase = 'alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima'
+  try {
+    await withStub('login_ok', async () => {
+      const r = await cli.loginVerify('user@example.test', 'tok-123', phrase)
+      assert.equal(r.ok, true)
+      const seen = JSON.parse(fs.readFileSync(file, 'utf8'))
+      assert.deepEqual(seen.argv, ['login', '--email', 'user@example.test', '--token', 'tok-123'])
+      assert.ok(!seen.argv.includes(phrase), 'phrase must never be in argv')
+      assert.equal(seen.hasPhrase, true, 'phrase must reach the CLI via TESSERA_PHRASE')
+    })
+  } finally {
+    delete process.env.STUB_LOGIN_FILE
+    fs.rmSync(file, { force: true })
+  }
+})
+
+test('loginVerify maps an invalid link to safe copy with no secret echo', { skip: STUB_SKIP }, async () => {
+  await withStub('login_invalid', async () => {
+    const r = await cli.loginVerify('user@example.test', 'tok-secret-value', 'alpha bravo charlie')
+    assert.equal(r.ok, false)
+    assert.match(r.error, /invalid or has expired/i)
+    assert.ok(!r.error.includes('tok-secret-value'), 'the token must never be echoed back')
+  })
+})
+
+// ── Bug 6: forget clears the shared device config ─────────
+
+test('forget removes the shared ~/.tessera config (Bug 6)', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'tessera-forget-'))
+  const saved = process.env.TESSERA_HOME
+  process.env.TESSERA_HOME = home
+  try {
+    fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ app_id: 'a', app_key: 'b' }))
+    const r = cli.forget()
+    assert.equal(r.ok, true)
+    assert.equal(fs.existsSync(path.join(home, 'config.json')), false)
+  } finally {
+    if (saved === undefined) delete process.env.TESSERA_HOME
+    else process.env.TESSERA_HOME = saved
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})

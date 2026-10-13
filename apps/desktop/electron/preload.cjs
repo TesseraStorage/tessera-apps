@@ -44,6 +44,11 @@ contextBridge.exposeInMainWorld('tesseraDesktop', {
   syncConflicts: () => ipcRenderer.invoke('tessera-sync-conflicts'),
   serviceStatus: () => ipcRenderer.invoke('tessera-service-status'),
   getCliConfig: () => ipcRenderer.invoke('tessera-cli-config'),
+  // Bug 3: in-app magic-link sign-in + session-backed recovery.
+  loginStart: (email) => ipcRenderer.invoke('tessera-login-start', email),
+  loginVerify: (email, token, phrase) => ipcRenderer.invoke('tessera-login-verify', email, token, phrase),
+  // Bug 6: clear the shared device config so "Forget this device" sticks.
+  forget: () => ipcRenderer.invoke('tessera-forget'),
   billingAccount: () => ipcRenderer.invoke('tessera-billing-account'),
   serviceInstall: () => ipcRenderer.invoke('tessera-service-install'),
   serviceUninstall: () => ipcRenderer.invoke('tessera-service-uninstall'),

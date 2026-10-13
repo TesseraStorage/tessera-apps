@@ -29,9 +29,17 @@ export const BILLING_SIGN_IN_URL = 'https://tessera.storage/account'
 export const BILLING_SIGNED_OUT_MESSAGE =
   'Sign in at tessera.storage/account to see your balance and usage.'
 
-/** Decision 6: desktop with no stored billing credential. */
+/** Decision 6: desktop with no stored billing credential (CLI-oriented). */
 export const BILLING_DESKTOP_MESSAGE =
   'No billing credential on this machine. Run `tessera login` and try again.'
+
+/**
+ * Bug 7 (2026-10-13): the desktop APP is not a machine with the CLI on
+ * `PATH`, so telling its user to "run `tessera login`" is useless. This is
+ * the in-app wording: point at the Welcome screen's sign-in instead.
+ */
+export const BILLING_DESKTOP_APP_MESSAGE =
+  'You are not signed in. Sign in from the Welcome screen to see your balance and usage.'
 
 export const TOPUP_MIN_USD = 5
 export const TOPUP_MAX_USD = 10000
@@ -441,7 +449,8 @@ export function createBillingView(opts = {}) {
     throw new Error('createBillingView needs a document')
   }
   const client = opts.client || null
-  const canTopup = opts.canTopup !== false && !(opts.desktop === true)
+  const isDesktopApp = opts.desktop === true
+  const canTopup = opts.canTopup !== false && !isDesktopApp
   const signInUrl = opts.signInUrl || BILLING_SIGN_IN_URL
   const root = h(doc, 'div', 'billing')
 
@@ -745,7 +754,7 @@ export function createBillingView(opts = {}) {
     clear()
     root.appendChild(callout(
       doc, 'warn', 'Billing unavailable',
-      message || BILLING_DESKTOP_MESSAGE,
+      message || (isDesktopApp ? BILLING_DESKTOP_APP_MESSAGE : BILLING_DESKTOP_MESSAGE),
     ))
   }
 

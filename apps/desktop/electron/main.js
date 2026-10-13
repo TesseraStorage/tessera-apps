@@ -318,6 +318,11 @@ ipcMain.handle('tessera-sync-remove', async (_e, rootId) => cliBridge.syncRemove
 ipcMain.handle('tessera-sync-conflicts', async () => cliBridge.syncConflicts())
 ipcMain.handle('tessera-service-status', async () => cliBridge.serviceStatus())
 ipcMain.handle('tessera-cli-config', async () => cliBridge.readConfig())
+// Bug 3: session-backed sign-in + recovery inside the app (no connect key,
+// no approval page). Bug 6: really forget the shared device config.
+ipcMain.handle('tessera-login-start', async (_e, email) => cliBridge.loginStart(email))
+ipcMain.handle('tessera-login-verify', async (_e, email, token, phrase) => cliBridge.loginVerify(email, token, phrase))
+ipcMain.handle('tessera-forget', async () => cliBridge.forget())
 ipcMain.handle('tessera-service-install', async () => cliBridge.serviceInstall())
 ipcMain.handle('tessera-service-uninstall', async () => cliBridge.serviceUninstall())
 ipcMain.handle('tessera-trash-list', async () => cliBridge.trashList())

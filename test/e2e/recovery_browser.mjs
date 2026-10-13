@@ -1,10 +1,12 @@
-// Browser half of the Packet 1 recovery E2E (e2e_recovery.py).
+// Browser half of the recovery E2E (e2e_recovery.py).
 //
 // Drives the REAL built Tessera Web app in a real Chromium: a fresh profile
 // (a "cleared browser" on a second machine) with only the moneyd session
 // cookie, then "I already have an account" -> enter the seed phrase ->
-// recovery -> files. It asserts the account's own file is listed and that
-// the recovery approval step (indexd's "App password" page) never appears.
+// recovery -> files. It asserts the account's own file is listed, that the
+// indexd "App password" approval step never appears (Packet 1), and the
+// Bug 2 / Bug 5 UI corrections: "Log in" is the primary option and the
+// authenticated-only header is hidden until a real session exists.
 //
 // Secrets (the phrase, the session cookie) are read from files/env and are
 // never written to stdout, the capture log, or the result file.
@@ -22,7 +24,17 @@ const phrase = readFileSync(process.env.PHRASE_FILE, 'utf8').trim()
 const expectFile = process.env.EXPECT_FILE
 const outFile = process.env.OUT_FILE
 
-const result = { ok: false, sawApprovalStep: false, filesText: '', error: '' }
+const result = {
+  ok: false,
+  sawApprovalStep: false,
+  hasLoginButton: false,
+  inviteIsSecondary: false,
+  headerHiddenOnWelcome: false,
+  headerHiddenPreLogin: false,
+  headerVisibleOnFiles: false,
+  filesText: '',
+  error: '',
+}
 const log = (line) => process.stderr.write('[browser] ' + line + '\n')
 
 const browser = await chromium.launch({
@@ -64,36 +76,34 @@ try {
 
   await page.goto(frontUrl + '/web/', { waitUntil: 'domcontentloaded' })
 
-  // Welcome -> "I already have an account".
+  // Welcome -> Bug 2: "Log in" primary, invite secondary, header hidden.
   await page.waitForSelector('#welcomeScreen:not(.hidden)', { timeout: 30000 })
   await page.waitForTimeout(300)
+  result.hasLoginButton = !!(await page.$('#btnLogIn'))
+  result.inviteIsSecondary = (await page.$eval('#btnHaveInvite', (el) => el.textContent).catch(() => '')).toLowerCase().includes('invite')
+  result.headerHiddenOnWelcome = await page.$eval('#header', (el) => el.classList.contains('hidden')).catch(() => false)
+  // The indexd approval step must not exist in the DOM at all (Bug 1/3).
+  result.sawApprovalStep = !!(await page.$('#recoverApprovalStep'))
   await shot('welcome')
   await page.click('#btnHaveWords')
   await page.waitForSelector('#recoverScreen:not(.hidden)', { timeout: 30000 })
+  // Bug 5: still no authenticated-only header on a pre-login screen.
+  result.headerHiddenPreLogin = await page.$eval('#header', (el) => el.classList.contains('hidden')).catch(() => false)
   await page.waitForTimeout(300)
   await shot('recover')
 
   await page.fill('#recoverPhraseInput', phrase)
   await page.click('#btnRecoverContinue')
 
-  // Wait for the outcome: success (set a password) or the approval step.
-  const outcome = await Promise.race([
-    page
-      .waitForSelector('#setPasswordScreen:not(.hidden)', { timeout: 90000 })
-      .then(() => 'password'),
-    page
-      .waitForSelector('#recoverApprovalStep:not(.hidden)', { timeout: 90000 })
-      .then(() => 'approval'),
-  ])
-  result.sawApprovalStep = outcome === 'approval' || (await page
-    .locator('#recoverApprovalStep')
-    .evaluate((el) => !el.classList.contains('hidden'))
-    .catch(() => false))
-
-  if (outcome === 'approval') {
-    result.error = 'recovery fell back to the indexd approval page (App password)'
-    throw new Error(result.error)
+  // Success is "Set a password". The approval step no longer exists; a
+  // failure shows inline in #recoverStatus.
+  try {
+    await page.waitForSelector('#setPasswordScreen:not(.hidden)', { timeout: 90000 })
+  } catch (e) {
+    const status = await page.textContent('#recoverStatus').catch(() => '')
+    throw new Error('recovery did not reach Set a password: ' + status)
   }
+  result.sawApprovalStep = !!(await page.$('#recoverApprovalStep'))
 
   // Set a browser password, then land on files.
   await page.waitForTimeout(300)
@@ -103,6 +113,8 @@ try {
   await page.click('#btnSetPassword')
 
   await page.waitForSelector('#filesScreen:not(.hidden)', { timeout: 60000 })
+  // Bug 5: the authenticated-only header appears once signed in.
+  result.headerVisibleOnFiles = await page.$eval('#header', (el) => !el.classList.contains('hidden')).catch(() => false)
   await page.waitForFunction(
     (name) => {
       const el = document.querySelector('#fileList')
@@ -132,8 +144,7 @@ try {
         .map((el) => el.id),
       recoverStatus: (document.getElementById('recoverStatus') || {}).textContent || '',
       recoverPhraseStep: (document.getElementById('recoverPhraseStep') || {}).className || '',
-      approvalStepClass: (document.getElementById('recoverApprovalStep') || {}).className || '',
-      approvalUrl: (document.getElementById('recoverApprovalUrl') || {}).value || '',
+      approvalStepPresent: !!document.getElementById('recoverApprovalStep'),
       interceptorInstalled: !!window.___tfi___,
     }))
   } catch (_) {}
