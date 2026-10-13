@@ -49,6 +49,28 @@ const STUB = `#!/usr/bin/env node
 'use strict'
 const fs = require('fs')
 const mode = process.env.STUB_ACCOUNT_MODE || 'ok'
+// Sync commands (item 2): answer the shapes the desktop Synced-Folders panel
+// reads, and record argv when asked so the test can prove the exact invocation.
+const argv = process.argv.slice(2)
+if (argv[0] === 'sync') {
+  if (process.env.STUB_LOGIN_FILE) fs.writeFileSync(process.env.STUB_LOGIN_FILE, JSON.stringify({ argv }))
+  if (argv[1] === 'list') {
+    process.stdout.write(JSON.stringify([{ id: 'root-1', local_path: '/tmp/Docs', remote_prefix: 'tessera/docs', last_sync: '2026-10-13T16:00:00Z' }]))
+    process.exit(0)
+  }
+  if (argv[1] === 'status') {
+    process.stdout.write(JSON.stringify([{ root_id: 'root-1', local_path: '/tmp/Docs', remote_prefix: 'tessera/docs', to_upload: 3, to_download: 1, to_delete: 0, conflicts: 0, last_sync: 'never' }]))
+    process.exit(0)
+  }
+  if (argv[1] === 'add') {
+    process.stdout.write(JSON.stringify({ id: 'root-2', local_path: argv[2], remote_prefix: argv[argv.indexOf('--as') + 1] }))
+    process.exit(0)
+  }
+  if (argv.includes('--json')) {
+    process.stdout.write(JSON.stringify([{ root_id: 'root-1', uploaded: 5, downloaded: 1, deleted: 0, bytes_uploaded: 1024, bytes_downloaded: 512 }]))
+    process.exit(0)
+  }
+}
 if (mode === 'login_ok') {
   if (process.env.STUB_LOGIN_FILE) {
     fs.writeFileSync(process.env.STUB_LOGIN_FILE, JSON.stringify({
@@ -310,6 +332,59 @@ test('extractSignInToken accepts a full link, a query string, or a bare token', 
   assert.equal(cli.extractSignInToken('  bareTokenValue  '), 'bareTokenValue')
   assert.equal(cli.extractSignInToken(''), '')
   assert.equal(cli.extractSignInToken(null), '')
+})
+
+// ── Item 2: Synced Folders live status / first-sync plumbing ──
+
+test('syncList runs `sync list --json` and returns the roots', { skip: STUB_SKIP }, async () => {
+  await withStub('ok', async () => {
+    const r = await cli.syncList()
+    assert.equal(r.ok, true)
+    assert.equal(r.data[0].id, 'root-1')
+    assert.equal(r.data[0].local_path, '/tmp/Docs')
+  })
+})
+
+test('syncStatus runs `sync status --json` and returns the per-root plan', { skip: STUB_SKIP }, async () => {
+  await withStub('ok', async () => {
+    const r = await cli.syncStatus()
+    assert.equal(r.ok, true)
+    assert.equal(r.data[0].root_id, 'root-1')
+    assert.equal(r.data[0].to_upload, 3)
+    assert.equal(r.data[0].to_download, 1)
+  })
+})
+
+test('syncRun invokes the CLI with `sync --root <id> --json`', { skip: STUB_SKIP }, async () => {
+  const file = path.join(os.tmpdir(), 'tessera-sync-run-' + process.pid + '.json')
+  process.env.STUB_LOGIN_FILE = file
+  try {
+    await withStub('ok', async () => {
+      const r = await cli.syncRun('root-1')
+      assert.equal(r.ok, true)
+      assert.equal(r.data[0].uploaded, 5)
+      assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).argv, ['sync', '--root', 'root-1', '--json'])
+    })
+  } finally {
+    delete process.env.STUB_LOGIN_FILE
+    fs.rmSync(file, { force: true })
+  }
+})
+
+test('syncAdd invokes the CLI with `sync add <path> --as <prefix> --json`', { skip: STUB_SKIP }, async () => {
+  const file = path.join(os.tmpdir(), 'tessera-sync-add-' + process.pid + '.json')
+  process.env.STUB_LOGIN_FILE = file
+  try {
+    await withStub('ok', async () => {
+      const r = await cli.syncAdd('/tmp/Docs', 'tessera/docs')
+      assert.equal(r.ok, true)
+      assert.equal(r.data.id, 'root-2')
+      assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).argv, ['sync', 'add', '/tmp/Docs', '--as', 'tessera/docs', '--json'])
+    })
+  } finally {
+    delete process.env.STUB_LOGIN_FILE
+    fs.rmSync(file, { force: true })
+  }
 })
 
 test('forget removes the shared ~/.tessera config (Bug 6)', async () => {
