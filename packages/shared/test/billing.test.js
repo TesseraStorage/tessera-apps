@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url'
 import {
   BILLING_SIGN_IN_URL, BILLING_SIGNED_OUT_MESSAGE, BILLING_DESKTOP_MESSAGE,
   BILLING_DESKTOP_APP_MESSAGE,
+  topupRailOpen,
   TOPUP_MIN_USD, TOPUP_MAX_USD,
   toNumber, formatUsd, formatBytes, formatDateTime, formatDaysLeft,
   formatPlan, warningLabel, usedPercent, accountStatusLabel, accountKindLabel,
@@ -121,6 +122,17 @@ test('Decision 3 copy constants carry the load-bearing phrases', () => {
   assert.ok(!/tessera login/.test(BILLING_DESKTOP_APP_MESSAGE))
   assert.equal(TOPUP_MIN_USD, 5)
   assert.equal(TOPUP_MAX_USD, 10000)
+})
+
+test('topupRailOpen follows the rail flag, not the master switch (item 3)', () => {
+  const perRail = { topup_open: false, topup_rails: { nowpayments: true, x402: false } }
+  assert.equal(topupRailOpen(perRail, 'nowpayments'), true)
+  assert.equal(topupRailOpen(perRail, 'x402'), false)
+  // Older API with no topup_rails falls back to the master switch.
+  assert.equal(topupRailOpen({ topup_open: true }, 'x402'), true)
+  assert.equal(topupRailOpen({ topup_open: false }, 'nowpayments'), false)
+  assert.equal(topupRailOpen(null, 'nowpayments'), false)
+  assert.equal(topupRailOpen({}, 'nowpayments'), false)
 })
 
 // ── error shape ──────────────────────────────────────────

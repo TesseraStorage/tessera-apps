@@ -150,6 +150,20 @@ export function accountKindLabel(kind) {
 }
 
 /**
+ * Whether one top-up rail is open (item 3, 2026-10-13).
+ *
+ * moneyd can open a single rail (``TESSERA_TOPUP_OPEN_RAILS``) while the
+ * master switch is off, so the UI must gate each rail on its own flag and
+ * never on ``topup_open`` alone. Falls back to the master switch against an
+ * older API with no ``topup_rails`` field.
+ */
+export function topupRailOpen(account, rail) {
+  const rails = account && account.topup_rails
+  if (rails && typeof rails[rail] === 'boolean') return rails[rail]
+  return !!(account && account.topup_open === true)
+}
+
+/**
  * account.vue's statusNotice: the banner shown above the dashboard. Copy is
  * ported verbatim; the FE interpolates its contact email, so that one spot
  * takes `supportEmail` (default info@tessera.storage).
@@ -476,7 +490,9 @@ export function createBillingView(opts = {}) {
   function showAccount(account) {
     clear()
     const data = account || {}
-    const topupOpen = data.topup_open === true
+    // Per-rail (item 3): the browser form uses the NOWPayments rail, so its
+    // visibility follows that rail's own flag, not the master switch.
+    const topupOpen = topupRailOpen(data, 'nowpayments')
 
     const notice = accountStatusNotice(data.status, topupOpen)
     if (notice) {
