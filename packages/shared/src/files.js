@@ -1800,6 +1800,244 @@ export async function uploadFile(sdk, file, onProgress, metaName) {
 }
 
 
+// ── packed upload (Task 0.2) ─────────────────────────────
+//
+// When the file picker or drop handler receives more than one file in a
+// single user action, upload them through ONE PackedUpload session so small
+// files share slabs instead of each paying a full slab of padding. This is
+// the web half of the plan's Task 0.2 -- the CLI (Task 0.1) and the desktop
+// native path (Task 0.3) have their own separate fixes.
+//
+// Contract:
+//   sdk        -- the connected Sia SDK (WASM in the browser, NAPI in Node).
+//   files      -- array of File/Blob-like objects with .stream(), .name,
+//                 .size and .type. Zero-byte entries are reported per-file
+//                 and never enter the packed session: the WASM SDK's own
+//                 erasure-coding step rejects empty objects (the exact
+//                 "EmptyShard"/"data shards cannot be zero" failure already
+//                 documented above FOLDER_MARKER_MIME).
+//   onProgress -- same callback shape uploadFile uses: receives
+//                 { stage, percent, elapsed, hostKey?, transferMs? }.
+//   metaNames  -- optional array of full logical paths (parallel to files),
+//                 matching uploadFile's metaName argument.
+//
+// Returns an array parallel to `files`: { ok: true, id, size } on success or
+// { ok: false, error } on failure. A per-file failure does NOT abort the
+// batch: the SDK's own contract says a failed Add registers no object and
+// Add remains usable, so the rest of the batch still packs and pins.
+//
+// Desktop delegates to the existing per-file IPC path for now (Task 0.3 adds
+// the batch IPC); a single file delegates to uploadFile so the single-file
+// contract (including its stall watchdogs) is unchanged.
+export async function uploadFilesPacked(sdk, files, onProgress, metaNames) {
+  const list = Array.from(files || [])
+  if (list.length === 0) return []
+  const results = new Array(list.length)
+
+  // Desktop batch path (Task 0.3): one IPC call, one PackedUpload session in
+  // the Electron main process. Only for multi-file actions -- a single-file
+  // desktop drop keeps the existing uploadFile path exactly as-is.
+  if (isDesktop() && list.length > 1 && window.tesseraDesktop?.siaUploadPacked) {
+    const start = Date.now()
+    const tick = (stage, percent, extra) => {
+      if (onProgress) onProgress({ stage, percent, elapsed: Date.now() - start, ...(extra || {}) })
+    }
+    const unsubscribe = window.tesseraDesktop.onUploadProgress((progress) => {
+      tick(progress.stage, progress.percent, { hostKey: progress.hostKey, transferMs: progress.transferMs })
+    })
+    try {
+      // Read every file up front. The main process cannot reach the renderer's
+      // File objects, and a packed session must add all of them before it can
+      // finalize -- so the buffers cross the IPC boundary in one payload.
+      const payload = []
+      for (let i = 0; i < list.length; i++) {
+        const f = list[i]
+        let buffer = f && f.__desktopBuffer
+        if (!buffer && f && typeof f.arrayBuffer === 'function') {
+          buffer = Buffer.from(await f.arrayBuffer())
+        }
+        if (!buffer && f && f.buffer) buffer = f.buffer
+        const name = (metaNames && metaNames[i]) || (f && f.name) || 'upload'
+        const mime = (f && f.type) || 'application/octet-stream'
+        const size = buffer ? buffer.byteLength : Number(f && f.size) || 0
+        payload.push({ name, mime, size, buffer })
+      }
+      const res = await window.tesseraDesktop.siaUploadPacked(payload)
+      if (!res || !res.ok) throw new Error((res && res.error) || 'packed upload failed')
+      for (let i = 0; i < results.length; i++) {
+        const r = res.results && res.results[i]
+        if (r && r.ok) results[i] = { ok: true, id: r.id, size: r.size }
+        else results[i] = { ok: false, error: (r && r.error) || 'Upload failed' }
+      }
+      tick('done', 100)
+      return results
+    } catch (e) {
+      for (let i = 0; i < results.length; i++) results[i] = { ok: false, error: (e && e.message) || String(e) }
+      return results
+    } finally {
+      unsubscribe()
+    }
+  }
+
+  // Single file or desktop fallback: keep the existing per-file path exactly as-is.
+  // Desktop's batch IPC is used only when more than one file is dropped; a
+  // single desktop file still goes through siaUpload so the single-file
+  // contract (stall watchdogs, tunnel preflight) stays byte-identical.
+  if (list.length === 1 || isDesktop()) {
+    for (let i = 0; i < list.length; i++) {
+      try {
+        const r = await uploadFile(sdk, list[i], onProgress, metaNames ? metaNames[i] : undefined)
+        results[i] = { ok: true, id: r.id, size: r.size }
+      } catch (e) {
+        results[i] = { ok: false, error: (e && e.message) || String(e) }
+      }
+    }
+    return results
+  }
+
+  const start = Date.now()
+  const tick = (s, p, hostKey, transferMs) => {
+    if (onProgress) onProgress({ stage: s, percent: p, elapsed: Date.now() - start, hostKey, transferMs })
+  }
+
+  const dataShards = 10
+  const parityShards = 20
+
+  // Partition: zero-byte files never join a PackedUpload (see contract above).
+  const zeroIdxs = []
+  const packIdxs = []
+  let totalBytes = 0
+  for (let i = 0; i < list.length; i++) {
+    const size = Number(list[i].size || 0)
+    if (size <= 0) zeroIdxs.push(i)
+    else { packIdxs.push(i); totalBytes += size }
+  }
+
+  for (const i of zeroIdxs) {
+    results[i] = { ok: false, error: 'Empty files cannot be uploaded.' }
+  }
+  if (packIdxs.length === 0) return results
+
+  // Metadata is independent of the packed byte stream -- encode it up front,
+  // exactly like uploadFile does for the single-file path. Applied AFTER
+  // finalize(), matching the CLI's proven order: object IDs hash the slab
+  // layout only, so the per-file descriptor can be attached safely once the
+  // packed session has produced the objects.
+  const metas = packIdxs.map((i) => {
+    const f = list[i]
+    return new TextEncoder().encode(JSON.stringify({
+      name: (metaNames && metaNames[i]) || (f && f.name) || 'upload',
+      mime: (f && f.type) || 'application/octet-stream',
+    }))
+  })
+
+  // Progress denominator: estimate from the total real bytes. Packed uploads
+  // share slabs across objects, so this is an estimate -- same formula the
+  // single-file path uses, applied to the batch total. Only drives the bar;
+  // never a correctness signal. null means hide N/M, same as uploadFile.
+  const expectedShards = computeExpectedShards(totalBytes, dataShards, parityShards)
+  let shardsLanded = 0
+
+  await _realUploadLock.catch(() => {})
+  let releaseLock
+  _realUploadLock = new Promise(res => { releaseLock = res })
+  _realUploadInFlight = true
+
+  const chain = (async () => {
+    tick('encoding\u2026', 0)
+    let packed = null
+    try {
+      // await works for both runtimes: WASM's uploadPacked returns a Promise,
+      // NAPI's returns the handle synchronously.
+      packed = await sdk.uploadPacked({
+        dataShards,
+        parityShards,
+        onShardUploaded: (ev) => {
+          shardsLanded += 1
+          const denom = expectedShards || (dataShards + parityShards)
+          const percent = 5 + Math.min(85, Math.round((shardsLanded / denom) * 85))
+          tick('uploading', percent, ev && ev.hostKey, ev && ev.elapsedMs)
+        },
+        onWriteAttemptStart: (attempt) => {
+          const hostKey = attempt && attempt.hostKey
+          if (hostKey) tick('attempt', 0, hostKey)
+        },
+      })
+    } catch (e) {
+      for (const i of packIdxs) results[i] = { ok: false, error: 'Could not start packed upload: ' + ((e && e.message) || e) }
+      return results
+    }
+
+    const addedIdxs = []
+    for (const i of packIdxs) {
+      const f = list[i]
+      try {
+        const stream = f && typeof f.stream === 'function' ? f.stream() : null
+        if (!stream) throw new Error('file has no readable stream')
+        await packed.add(stream)
+        addedIdxs.push(i)
+      } catch (e) {
+        // Per-file failure: the SDK documents that a failed Add registers no
+        // object and the session stays usable, so keep packing the rest.
+        results[i] = { ok: false, error: 'Upload failed: ' + ((e && e.message) || e) }
+      }
+    }
+
+    if (addedIdxs.length === 0) {
+      try { packed.cancel() } catch (_) {}
+      return results
+    }
+
+    let objects
+    try {
+      objects = await packed.finalize()
+    } catch (e) {
+      for (const i of addedIdxs) results[i] = { ok: false, error: 'Finalize failed: ' + ((e && e.message) || e) }
+      return results
+    }
+
+    if (!Array.isArray(objects) || objects.length !== addedIdxs.length) {
+      const got = Array.isArray(objects) ? objects.length : 'none'
+      for (const i of addedIdxs) {
+        results[i] = { ok: false, error: 'Packed upload returned ' + got + ' objects for ' + addedIdxs.length + ' files' }
+      }
+      return results
+    }
+
+    tick('pinning', 90)
+    for (let k = 0; k < objects.length; k++) {
+      const i = addedIdxs[k]
+      const obj = objects[k]
+      try {
+        // finalize() returns objects in add order (the CLI's own packed
+        // integration tests prove this ordering end-to-end, including that
+        // each file's descriptor survives onto the right object).
+        const metaBytes = (typeof Buffer !== 'undefined') ? Buffer.from(metas[k]) : metas[k]
+        obj.updateMetadata(metaBytes)
+        await sdk.pinObject(obj)
+        results[i] = { ok: true, id: obj.id(), size: Number(obj.size()) }
+      } catch (e) {
+        results[i] = { ok: false, error: 'Pin failed: ' + ((e && e.message) || e) }
+      }
+    }
+    return results
+  })()
+
+  // Lock release mirrors uploadFile's "wait on the REAL chain" semantics:
+  // releases only once the packed session (finalize + every pin) has actually
+  // settled, resolve or reject. The release handler swallows its own result;
+  // the caller's own await below still surfaces a genuine rejection.
+  chain.then(
+    () => { releaseLock(); _realUploadInFlight = false },
+    () => { releaseLock(); _realUploadInFlight = false },
+  )
+
+  const out = await chain
+  tick('done', 100)
+  return out
+}
+
+
 // ── folders ─────────────────────────────────────────────
 //
 // createFolderMarker() REMOVED (2026-09-15,

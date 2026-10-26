@@ -25,7 +25,7 @@ import {
   fetchRecoveryCredential, recoverWithConnectKey,
 } from './auth.js'
 import {
-  listFiles, computeTotals, uploadFile, downloadToDisk,
+  listFiles, computeTotals, uploadFile, uploadFilesPacked, downloadToDisk,
   deleteFile, createShareURL, getAccount, waitForReady, initRelay,
   setCredsPrefix,
   isTailZone,
@@ -495,7 +495,7 @@ const SKELETON = /*html*/`
         <button id="btnNewFolderConfirm" class="btn btn-primary">Create</button>
         <button id="btnNewFolderCancel" class="btn btn-ghost">Cancel</button>
       </div>
-      <input type="file" id="fileInput" hidden>
+      <input type="file" id="fileInput" hidden multiple>
 
       <div id="progressWrap" class="progress-wrap hidden">
         <div class="progress-track"><div id="progressFill" class="progress-fill"></div></div>
@@ -892,7 +892,10 @@ export async function mountApp(container) {
     // path below) when nothing in the drop was a directory -- "Dropping
     // loose files onto Add stays as today."
     if (e.dataTransfer.items && e.dataTransfer.items.length && enqueueOsEntries(e.dataTransfer.items, getState().currentPath)) return
-    const f = e.dataTransfer.files; if (f && f.length) enqueueUpload(f[0])
+    // MULTI-FILE DROP (Task 0.2): a loose multi-file drop goes through
+    // one packed session when more than one file lands at once. A single
+    // file keeps the existing one-file path (enqueueUploadBatch delegates).
+    const f = e.dataTransfer.files; if (f && f.length) enqueueUploadBatch(f)
   })
 
   // OS FOLDER DROP ONTO THE LIST (Apple C, 2026-09-17): "Drop an OS
@@ -2291,13 +2294,10 @@ function renderFileList() {
       if (e.dataTransfer.items && e.dataTransfer.items.length && enqueueOsEntries(e.dataTransfer.items, folder.path)) return
       const osFiles = e.dataTransfer.files
       if (osFiles && osFiles.length) {
-        // Desktop File dropped on a folder row: Add into that folder --
-        // one occupy, same as Add, per law. enqueueUpload's own
-        // metaName resolution already reads getState().currentPath at
-        // upload time, so temporarily targeting this folder for the
-        // single queued upload reuses the exact same Add path (no
-        // second upload mechanism invented here).
-        enqueueUploadIntoFolder(osFiles[0], folder.path)
+        // Desktop File(s) dropped on a folder row: Add into that folder --
+        // one occupy, same as Add, per law. A single file keeps the exact
+        // existing path; two or more share one packed session.
+        enqueueUploadBatch(osFiles, folder.path)
         return
       }
       const draggedId = e.dataTransfer.getData('text/x-tessera-file-id')
@@ -2457,9 +2457,14 @@ function onNewFolderConfirm() {
 }
 
 function onFilePicked() {
-  const f = r.fileInput.files && r.fileInput.files[0]
+  // MULTI-FILE INTAKE (Task 0.2): the picker now has the `multiple`
+  // attribute, so a single user action can select more than one file.
+  // A one-file selection keeps the exact existing single-file path; two
+  // or more go through one packed session via enqueueUploadBatch() so
+  // small files share slabs instead of each opening its own upload.
+  const picked = r.fileInput.files
   r.fileInput.value = ''
-  if (f) enqueueUpload(f)
+  if (picked && picked.length) enqueueUploadBatch(picked)
 }
 
 // ── select many (Apple C, 2026-09-17) ────────────────────
@@ -2895,14 +2900,17 @@ async function walkAndQueueEntries(topEntries, baseDestPath) {
 
   // "Status: 'Adding K files...' then the normal per-file
   // encoding.../uploading (N/M) on the one that is shipping. Queue
-  // already serial." -- one status line announcing the whole batch,
-  // then every file queues through the EXACT same
-  // enqueueUploadIntoFolder()/processUploadQueue() path a single
-  // folder-row drop already uses (silent=true so 199 of them don't each
-  // fire their own "Queued: X" toast on top of this one announcement).
+  // already serial." -- one status line announcing the whole batch.
+  // A single file keeps the exact existing folder-drop path; two or
+  // more share ONE packed session via enqueueUploadBatch() so small
+  // files in the same drop share slabs instead of each opening its
+  // own upload. silent=true on the single-file path preserves the
+  // "one announcement, no Queued: X toast storm" behavior.
   showToast('\u23F3 Adding ' + collected.length + ' file' + (collected.length === 1 ? '' : 's') + '\u2026')
-  for (const { file, destPath } of collected) {
-    enqueueUploadIntoFolder(file, destPath, true)
+  if (collected.length === 1) {
+    enqueueUploadIntoFolder(collected[0].file, collected[0].destPath, true)
+  } else {
+    enqueueUploadBatch(collected)
   }
   renderFileList()
 }
@@ -3066,6 +3074,37 @@ function enqueueUpload(file) {
   processUploadQueue()
 }
 
+// BATCH INTAKE (Task 0.2, "uploadFilesPacked"): one user action that
+// yields more than one file (multi-select picker, a multi-file drop,
+// an OS folder drop) goes through ONE packed session instead of N
+// independent single-file uploads. A single file still takes the exact
+// existing path above -- no behavior change for the one-file case.
+// destPath may be a string (every file lands there) or an array of
+// per-file destination paths matching `collected` (OS folder drops).
+function enqueueUploadBatch(collected, destPath) {
+  const raw = Array.from(collected || [])
+  if (!raw.length) return
+  // Normalize to [{file, destPath}] so callers can pass either bare
+  // Files (picker / loose multi-drop) or {file, destPath} pairs (OS
+  // folder drop with per-file relative paths).
+  const list = raw.map((item, i) => {
+    const wrapped = item && typeof item === 'object' && item.file
+    return {
+      file: wrapped ? item.file : item,
+      destPath: wrapped ? item.destPath : (Array.isArray(destPath) ? destPath[i] : destPath),
+    }
+  })
+  if (list.length === 1) {
+    enqueueUploadIntoFolder(list[0].file, list[0].destPath)
+    return
+  }
+  _uploadQueue.push({ batch: list, destPath: undefined })
+  if (_uploadQueue.length > 1) {
+    showToast('\u23F3 Queued: ' + list.length + ' files (waiting for current upload)')
+  }
+  processUploadQueue()
+}
+
 async function processUploadQueue() {
   if (_uploadActive) return
   const item = _uploadQueue.shift()
@@ -3082,7 +3121,8 @@ async function processUploadQueue() {
     // the prior real chain has genuinely settled, so doUpload()'s own
     // guard below is expected to pass through cleanly.
     await waitForUploadSlot()
-    await doUpload(item.file, item.destPath)
+    if (item.batch) await doPackedUpload(item.batch, item.destPath)
+    else await doUpload(item.file, item.destPath)
   } finally {
     _uploadActive = false
     // Next queued file (if any) only starts now -- no parallel uploads,
@@ -3841,6 +3881,156 @@ async function doUpload(file, destPathOverride) {
     // keep their glow (per the "destination glow stays" rule, which
     // completeWrite() already respects unconditionally), while only
     // the arc LINES fade -- consistent with a successful completion.
+    if (mapController) mapController.completeWrite()
+  } finally { setBusy(false) }
+}
+
+// PACKED BATCH ADD (Task 0.2, "uploadFilesPacked"): one user action that
+// selected more than one file runs ONE packed session -- the files share
+// slabs instead of each opening its own upload. Mirrors doUpload's UI
+// treatment exactly (busy, map, progress bar, success/fail paint) while
+// swapping the single uploadFile() call for uploadFilesPacked().
+// `collected` may be:
+//   - File[] (picker / loose multi-drop), with destPathOverride a string
+//   - {file, destPath}[] (OS folder drop), with per-file destinations
+async function doPackedUpload(collected, destPathOverride) {
+  const sdk = getState().sdk; if (!sdk) return
+  if (isRealUploadInFlight()) {
+    patchState({ status: 'Already adding a file.' })
+    return
+  }
+  const addT0 = Date.now()
+  let addMarks = null
+  setBusy(true)
+  if (mapController) { mapController.reset(); mapController.seedPins(getMapShards()) }
+  if (getMapShownPref() === null) showMap()
+  stopEase()
+  stopEncodingAnim()
+  renderProgressBar(0)
+  r.progressWrap.classList.remove('hidden')
+  r.progressLabel.textContent = ''
+  patchState({ status: '' })
+  let sawRealShardProgress = false
+  try {
+    await waitForReady(sdk, 10000)
+    const { currentPath, files } = getState()
+
+    // Normalize the input to [{ file, destPath }] and resolve every
+    // destination name up front. Within-batch collisions matter too:
+    // two picked files named "a.txt" in the same folder must become
+    // "a.txt" and "a (1).txt" BEFORE the packed session starts, not
+    // overwrite each other.
+    const items = []
+    for (let i = 0; i < collected.length; i++) {
+      const raw = collected[i]
+      const isWrapped = raw && typeof raw === 'object' && raw.file
+      const f = isWrapped ? raw.file : raw
+      const dp = isWrapped ? raw.destPath
+        : (Array.isArray(destPathOverride) ? destPathOverride[i] : destPathOverride)
+      items.push({ file: f, destPath: dp })
+    }
+    const siblingCache = new Map()
+    const planned = []
+    for (const { file: f, destPath } of items) {
+      const dp = destPath !== undefined ? destPath : currentPath
+      let names = siblingCache.get(dp)
+      if (!names) { names = existingBasenamesInFolder(files, dp); siblingCache.set(dp, names) }
+      const finalBasename = resolveCollisionName(names, f.name)
+      names.add(finalBasename)
+      const metaName = dp ? buildPath(dp, finalBasename) : (finalBasename !== f.name ? finalBasename : undefined)
+      planned.push({ file: f, metaName })
+    }
+    const fileList = planned.map(p => p.file)
+    const metaNames = planned.map(p => p.metaName)
+
+    const results = await uploadFilesPacked(sdk, fileList, ({ stage, percent, elapsed, hostKey, transferMs, marks }) => {
+      if (marks) addMarks = marks
+      if (stage === 'attempt') {
+        stopEncodingAnim()
+        r.progressLabel.textContent = 'uploading\u2026'
+        if (mapController && hostKey) mapController.attemptStart(hostKey)
+        return
+      }
+      if (stage === 'encoding\u2026' || stage === 'encoding...') {
+        r.progressWrap.classList.remove('hidden')
+        startEncodingAnim()
+        return
+      }
+      stopEncodingAnim()
+      sawRealShardProgress = true
+      if (getState().status) patchState({ status: '' })
+      setProgressTarget(percent)
+      patchState({ progress: { stage, percent, elapsed, hostKey, transferMs } })
+    }, metaNames)
+
+    stopEase()
+    stopEncodingAnim()
+
+    const okCount = results.filter(r => r && r.ok).length
+    const failed = results.filter(r => r && !r.ok)
+    const failCount = failed.length
+    const okNames = planned.filter((_, i) => results[i] && results[i].ok).map(p => p.file.name)
+
+    if (failCount === 0) {
+      renderProgressBar(100)
+      r.progressLabel.textContent = '\u2705 Success!'
+      printAddTime(addT0, addMarks, 'yes', addMarks ? addMarks.expectedShards : null)
+      if (mapController) mapController.completeWrite()
+      showToast('\u2705 ' + okCount + ' file' + (okCount === 1 ? '' : 's') + ' added')
+    } else {
+      // Partial or total failure: keep the bar at the last real target,
+      // paint a summary sentence, and log the per-file errors quietly.
+      const firstErr = failed[0] && failed[0].error ? failed[0].error : 'unknown error'
+      r.progressLabel.textContent = okCount
+        ? '\u2705 ' + okCount + ' added \u00B7 \u26A0 ' + failCount + ' failed'
+        : '\u26A0 ' + failCount + ' file' + (failCount === 1 ? '' : 's') + ' failed \u2014 ' + firstErr
+      if (okCount) {
+        showToast('\u2705 ' + okCount + ' added \u00B7 \u26A0 ' + failCount + ' failed')
+      } else {
+        showToast('\u26A0\uFE0F ' + failCount + ' file' + (failCount === 1 ? '' : 's') + ' failed')
+      }
+      for (const r0 of failed) console.warn('[tessera-web] packed upload failed:', r0 && r0.error)
+      if (mapController) mapController.completeWrite()
+      printAddTime(addT0, addMarks, okCount ? 'partial' : 'T0', addMarks ? addMarks.expectedShards : null)
+      diaryPush('packed-add-end ok=' + okCount + ' fail=' + failCount + ' elapsed_ms=' + (Date.now() - addT0))
+    }
+    try {
+      await refreshFiles()
+    } catch (e) {
+      console.warn('[tessera-web] post-upload file list refresh failed:', e.message)
+      diaryPush('list-fail err=' + String(e.message || e).slice(0, 80))
+    }
+  } catch (e) {
+    stopEase()
+    stopEncodingAnim()
+    const shardsLandedAtFail = (addMarks && typeof addMarks.shardsLanded === 'number') ? addMarks.shardsLanded : 0
+    const expectedShardsAtFail = addMarks ? addMarks.expectedShards : null
+    const failCode = classifyAddFailure(e, sawRealShardProgress, shardsLandedAtFail, expectedShardsAtFail)
+    const tag = buildFailTag(failCode, shardsLandedAtFail, expectedShardsAtFail)
+    renderProgressBar(0)
+    r.progressLabel.textContent = FAIL_SENTENCE[failCode] + tag
+    printAddTime(addT0, addMarks, failCode, addMarks ? addMarks.expectedShards : null)
+    const lastTicks = (addMarks && Array.isArray(addMarks.lastTicks)) ? addMarks.lastTicks : []
+    const lastTick = lastTicks.length ? lastTicks[lastTicks.length - 1] : null
+    const quietMs = (addMarks && typeof addMarks.lastProgressAt === 'number') ? (Date.now() - addMarks.lastProgressAt) : '-'
+    const mStr = typeof expectedShardsAtFail === 'number' ? expectedShardsAtFail : '?'
+    console.error(
+      'tessera-packed-add-fail code=' + failCode + ' shards=' + shardsLandedAtFail + '/' + mStr + '\n' +
+      'quiet_ms=' + quietMs + ' last_i=' + (lastTick && lastTick.i != null ? lastTick.i : '-') +
+      ' last_host=' + (lastTick && lastTick.host ? lastTick.host : '-') + '\n' +
+      'raw=' + (e && e.message)
+    )
+    diaryPush(
+      'packed-add-end fail code=' + failCode + ' shards=' + shardsLandedAtFail + '/' + mStr +
+      ' elapsed_ms=' + (Date.now() - addT0) +
+      ' quiet_ms=' + quietMs +
+      ' last_i=' + (lastTick && lastTick.i != null ? lastTick.i : '-') +
+      ' last_host8=' + hex8(lastTick && lastTick.host) +
+      ' bag_n=' + ((addMarks && addMarks.bagHosts) ? addMarks.bagHosts.size : 0) +
+      ' bag=' + ((addMarks && addMarks.bagHosts && addMarks.bagHosts.size)
+        ? Array.from(addMarks.bagHosts).map(hex8).join(',')
+        : '-')
+    )
     if (mapController) mapController.completeWrite()
   } finally { setBusy(false) }
 }

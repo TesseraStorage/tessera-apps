@@ -246,6 +246,22 @@ ipcMain.handle('sia-upload', async (event, fileName, fileBuffer, mimeType) => {
   }
 })
 
+// Task 0.3: one IPC call for a multi-file user action. The renderer sends
+// an array of { name, mime, size, buffer } objects; the bridge opens a single
+// PackedUpload and returns one result per file in the same order.
+ipcMain.handle('sia-upload-packed', async (event, files) => {
+  try {
+    const bridge = await getBridge()
+    const results = await bridge.uploadPacked(files, (progress) => {
+      event.sender.send('sia-upload-progress', progress)
+    })
+    event.sender.send('sia-upload-progress', { stage: 'done', percent: 100 })
+    return { ok: true, results }
+  } catch (e) {
+    return { ok: false, error: e.message }
+  }
+})
+
 ipcMain.handle('sia-download', async (_e, objectId) => {
   try {
     const bridge = await getBridge()

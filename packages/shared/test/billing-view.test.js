@@ -107,6 +107,8 @@ const ACCOUNT = {
   plan: 'starter',
   period_end: '2026-11-01T00:00:00Z',
   included_storage_bytes: 5_000_000_000,
+  network_bytes: 6_000_000_000,
+  raw_bytes: 2_000_000_000,
   open_slabs: 3,
   allowance_egress_bytes: 10_000_000_000,
   egress_used_bytes: 1_000_000_000,
@@ -131,6 +133,10 @@ test('closed top-up renders every Decision 3 field and no form', () => {
   assert.match(text, /Active/)                        // status
   assert.match(text, /5 days/)                        // days left
   assert.match(text, /Nov 1, 2026|1 Nov 2026/)        // period end (locale-tolerant)
+  assert.match(text, /Your files/)                    // raw file weight row
+  assert.match(text, /2\.00 GB/)                      // raw_bytes
+  assert.match(text, /Network size/)                  // network total row
+  assert.match(text, /6\.00 GB/)                      // network_bytes
   assert.match(text, /5\.00 GB/)                      // included storage
   assert.match(text, /1\.00 GB of 10\.0 GB/)          // egress used/allowance
   assert.match(text, /7 days of balance remaining/)   // warning label
