@@ -28,6 +28,11 @@ contextBridge.exposeInMainWorld('tesseraDesktop', {
   siaDisconnect: () => ipcRenderer.invoke('sia-disconnect'),
   siaAccount: () => ipcRenderer.invoke('sia-account'),
   siaUpload: (fileName, fileBuffer, mimeType) => ipcRenderer.invoke('sia-upload', fileName, fileBuffer, mimeType),
+  // Task 0.3: batch packed upload. `files` is an array of
+  // { name, mime, size, buffer } objects read by the renderer. One IPC call
+  // drives one PackedUpload session in the main process, so a multi-file
+  // drop shares slabs instead of opening one upload per file.
+  siaUploadPacked: (files) => ipcRenderer.invoke('sia-upload-packed', files),
   siaDownload: (objectId) => ipcRenderer.invoke('sia-download', objectId),
   siaListFiles: () => ipcRenderer.invoke('sia-list-files'),
   siaDelete: (objectId) => ipcRenderer.invoke('sia-delete', objectId),

@@ -145,6 +145,132 @@ export async function uploadFile(fileName, fileBuffer, mimeType, onProgress) {
   return { id: obj.id(), size: Number(obj.size()) }
 }
 
+// ── Packed upload (Task 0.3) ─────────────────────────────
+// A single `sdk.uploadPacked()` session shared by every file in one user
+// action. This is the desktop counterpart of the web/WASM path in
+// packages/shared/src/files.js: same underlying Rust SDK, different build
+// target. Files are added in order; finalize() returns one object per added
+// file in that same order (the SDK's documented contract), so per-file
+// metadata can be attached afterwards without guessing which object is which.
+//
+// `files` is an array of { name, mime, buffer } where buffer is the file's
+// bytes (Buffer/Uint8Array/ArrayBuffer) already read by the renderer. Zero
+// byte files are partitioned out -- PackedUpload cannot encode an empty
+// object, and add() would fail the whole slab, not just that file.
+export async function uploadPacked(files, onProgress) {
+  if (!sdk) throw new Error('Not connected')
+
+  const list = Array.from(files || [])
+  const results = new Array(list.length)
+  if (list.length === 0) return results
+
+  const tick = (stage, percent, extra) => {
+    if (onProgress) onProgress({ stage, percent, ...(extra || {}) })
+  }
+
+  const dataShards = 10
+  const parityShards = 20
+
+  // Partition zero-byte files. They get a clean per-file error and never
+  // enter the packed session.
+  const zeroIdxs = []
+  const packIdxs = []
+  let totalBytes = 0
+  for (let i = 0; i < list.length; i++) {
+    const size = Number(list[i] && list[i].size != null ? list[i].size : (list[i].buffer ? list[i].buffer.byteLength : 0))
+    if (size <= 0) zeroIdxs.push(i)
+    else { packIdxs.push(i); totalBytes += size }
+  }
+  for (const i of zeroIdxs) results[i] = { ok: false, error: 'Empty files cannot be uploaded.' }
+  if (packIdxs.length === 0) return results
+
+  const expectedShards = Math.max(1, Math.ceil(totalBytes / (40 * 1024 * 1024))) * (dataShards + parityShards)
+  let shardsLanded = 0
+
+  tick('encoding\u2026', 0)
+
+  let packed = null
+  try {
+    packed = sdk.uploadPacked({
+      dataShards,
+      parityShards,
+      onShardUploaded: (ev) => {
+        shardsLanded += 1
+        const percent = 5 + Math.min(85, Math.round((shardsLanded / expectedShards) * 85))
+        tick('uploading', percent, {
+          hostKey: ev && ev.hostKey,
+          transferMs: ev && ev.elapsedMs,
+        })
+      },
+    })
+  } catch (e) {
+    for (const i of packIdxs) results[i] = { ok: false, error: 'Could not start packed upload: ' + ((e && e.message) || e) }
+    return results
+  }
+
+  const addedIdxs = []
+  for (const i of packIdxs) {
+    const f = list[i]
+    try {
+      const raw = f && f.buffer
+      const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw)
+      const source = new ReadableStream({
+        start(controller) {
+          controller.enqueue(bytes)
+          controller.close()
+        },
+      })
+      await packed.add(source)
+      addedIdxs.push(i)
+    } catch (e) {
+      // SDK contract: a failed add registers no object and leaves the session
+      // usable. Report just this file and keep packing the rest.
+      results[i] = { ok: false, error: 'Upload failed: ' + ((e && e.message) || e) }
+    }
+  }
+
+  if (addedIdxs.length === 0) {
+    try { packed.cancel() } catch (_) {}
+    return results
+  }
+
+  tick('pinning', 90)
+
+  let objects
+  try {
+    objects = await packed.finalize()
+  } catch (e) {
+    for (const i of addedIdxs) results[i] = { ok: false, error: 'Finalize failed: ' + ((e && e.message) || e) }
+    return results
+  }
+
+  if (!Array.isArray(objects) || objects.length !== addedIdxs.length) {
+    const got = Array.isArray(objects) ? objects.length : 'none'
+    for (const i of addedIdxs) results[i] = { ok: false, error: 'Packed upload returned ' + got + ' objects for ' + addedIdxs.length + ' files' }
+    return results
+  }
+
+  for (let k = 0; k < objects.length; k++) {
+    const i = addedIdxs[k]
+    const obj = objects[k]
+    const f = list[i]
+    try {
+      const meta = Buffer.from(JSON.stringify({
+        name: (f && f.name) || 'upload',
+        mime: (f && f.mime) || 'application/octet-stream',
+      }))
+      obj.updateMetadata(meta)
+      await sdk.pinObject(obj)
+      results[i] = { ok: true, id: obj.id(), size: Number(obj.size()) }
+    } catch (e) {
+      results[i] = { ok: false, error: 'Pin failed: ' + ((e && e.message) || e) }
+    }
+  }
+
+  tick('done', 100)
+  return results
+}
+
 // ── Download ─────────────────────────────────────────────
 
 export async function downloadFile(objectId) {
