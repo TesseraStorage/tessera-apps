@@ -552,6 +552,8 @@ export function createBillingView(opts = {}) {
     const section = h(doc, 'section', 'billing-section')
     section.appendChild(h(doc, 'h3', null, 'Usage'))
     const dl = h(doc, 'dl', 'billing-dl')
+    dl.appendChild(dlRow('Your files', formatBytes(toNumber(data.raw_bytes))))
+    dl.appendChild(dlRow('Network size', formatBytes(toNumber(data.network_bytes))))
     dl.appendChild(dlRow('Included storage', formatBytes(toNumber(data.included_storage_bytes))))
     dl.appendChild(dlRow('Open slabs', data.open_slabs == null ? '—' : String(data.open_slabs)))
     const allowance = toNumber(data.allowance_egress_bytes)
