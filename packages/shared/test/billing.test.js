@@ -229,7 +229,11 @@ test('createTopup POSTs the amount as a JSON body and returns the intent', async
   assert.equal(calls[0].url, '/api/v1/billing/topup')
   assert.equal(calls[0].init.method, 'POST')
   assert.equal(calls[0].init.headers['Content-Type'], 'application/json')
-  assert.deepEqual(JSON.parse(calls[0].init.body), { amount_usd: '5' })
+  // The web form asks for the hosted-invoice shape explicitly.
+  assert.deepEqual(JSON.parse(calls[0].init.body), {
+    amount_usd: '5',
+    mode: 'invoice',
+  })
   assert.equal(intent.payment_intent_id, 9)
 })
 

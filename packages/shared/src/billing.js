@@ -367,6 +367,11 @@ export function createBillingClient(opts = {}) {
      * `topup_url` instead), so reaching here is a programming error, not a
      * bridge outage — reject with an explicit unsupported code rather than
      * reusing `desktop_bridge_unavailable` (which means "no bridge").
+     *
+     * The request asks for the hosted-invoice shape (`mode: 'invoice'`) so
+     * the payer picks the coin on the hosted page, which is what this web
+     * form has always offered. Newer agent-facing flows default to a direct
+     * address, so being explicit here keeps the human checkout unchanged.
      */
     createTopup(amountUsd) {
       if (isDesktop()) {
@@ -376,7 +381,7 @@ export function createBillingClient(opts = {}) {
       }
       return request('/billing/topup', {
         method: 'POST',
-        body: { amount_usd: String(amountUsd) },
+        body: { amount_usd: String(amountUsd), mode: 'invoice' },
       })
     },
   }
