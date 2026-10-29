@@ -130,17 +130,23 @@ export async function downloadAndVerify(info, destDir, { fetchFn, onProgress } =
     if (!res.ok || !res.body) return { ok: false, error: `Download failed (HTTP ${res.status}).` }
     const total = Number(res.headers && res.headers.get ? res.headers.get('content-length') : 0) || info.asset.size || 0
     const out = fs.createWriteStream(part)
+    const closed = new Promise((resolve, reject) => { out.once('close', resolve); out.once('error', reject) })
+    // Hash while streaming: no second read, and no open read handle that
+    // would make the unlink below fail on Windows.
+    const hash = crypto.createHash('sha256')
     let received = 0
     const reader = res.body.getReader()
     for (;;) {
       const { done, value } = await reader.read()
       if (done) break
       received += value.length
+      hash.update(value)
       if (!out.write(Buffer.from(value))) await new Promise((r) => out.once('drain', r))
       if (onProgress) onProgress(received, total)
     }
-    await new Promise((resolve, reject) => out.end((e) => (e ? reject(e) : resolve())))
-    const got = await sha256File(part)
+    out.end()
+    await closed
+    const got = hash.digest('hex')
     if (got !== want) {
       try { fs.unlinkSync(part) } catch (_) {}
       return { ok: false, error: `Checksum mismatch for ${info.asset.name} — the download was discarded.` }
