@@ -262,7 +262,7 @@ map to `no_credentials` (the "run `tessera login`" empty state),
 
 **CLI dependency:** desktop account data requires a bundled `tessera-cli` that
 supports `account`. The pinned default (`TESSERA_CLI_VERSION`, currently
-`v1.11.0`, checked against the release's SHA256SUMS) includes it, so a release build feeds the balance panel from the
+`v1.11.1`, checked against the release's SHA256SUMS) includes it, so a release build feeds the balance panel from the
 bundled CLI; with no billing credential it shows the "run `tessera login`"
 empty state. For local
 development/testing you can bundle a locally built binary with the

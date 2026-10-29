@@ -22,7 +22,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 // v1.11.0 (2026-10-30): one-step signup, seed-phrase login (same account and
 // App ID), account delete, `tessera update`, progress bars, per-rail top-up
 // minimums. `login --email --token` (used by the desktop sign-in) unchanged.
-const TESSERA_CLI_VERSION = process.env.TESSERA_CLI_VERSION || 'v1.11.0'
+// v1.11.1: fixes "topup <usd> --asset <code>" parsing; funded Ready:false note.
+const TESSERA_CLI_VERSION = process.env.TESSERA_CLI_VERSION || 'v1.11.1'
 
 // Build-time-only override (Decision 6 / Task 6): when set, bundle the named
 // local tessera-cli binary instead of downloading a pinned release. It exists
