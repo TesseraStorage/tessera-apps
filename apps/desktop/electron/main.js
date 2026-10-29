@@ -3,13 +3,14 @@
 // Starts the CORS proxy and exposes Sia operations via IPC using the
 // native @siafoundation/sia-storage SDK (NAPI addon with raw TCP access).
 
-import { app, BrowserWindow, ipcMain, dialog, net, safeStorage, shell } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, net, safeStorage, shell, Notification } from 'electron'
 import path from 'path'
 import fs from 'fs'
 import http from 'http'
 import { fileURLToPath } from 'url'
 import { spawn } from 'child_process'
 import * as cliBridge from './cli-bridge.mjs'
+import * as updater from './updater.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const isDev = !app.isPackaged
@@ -104,47 +105,87 @@ function createWindow() {
 
 // ---- IPC: file dialogs --------------------------------------
 
-// ── Update check (Packet 4) ──────────────────────────────
-// Compares this build's version (from the git tag, Packet 2) to the latest
-// tessera-apps release. It only reports; it never downloads or installs.
-const UPDATE_REPO = 'TesseraStorage/tessera-apps'
+// ── Updater (v0.8.0) ─────────────────────────────────────
+// Checks the latest tessera-apps release at startup and once a day. A newer
+// version raises one native notification per version and an in-app banner.
+// "Download & install" downloads the matching installer, verifies it against
+// the release's SHA256SUMS, then: AppImage — replaces itself and relaunches;
+// dmg/exe/deb/rpm — opens the verified installer. Nothing is downloaded
+// until the user clicks. Opt out: TESSERA_NO_UPDATE_CHECK=1 or the banner's
+// "Don't check again".
+let lastUpdateInfo = null
 
-function parseVersion(v) {
-  return String(v || '')
-    .replace(/^v/, '')
-    .split(/[-+]/)[0]
-    .split('.')
-    .map((n) => parseInt(n, 10) || 0)
+function updateStateFile() {
+  return path.join(app.getPath('userData'), 'update-state.json')
 }
 
-function isNewerVersion(latest, current) {
-  const a = parseVersion(latest)
-  const b = parseVersion(current)
-  for (let i = 0; i < 3; i++) {
-    if ((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) > (b[i] || 0)
-  }
-  return false
+async function runUpdateCheck() {
+  const info = await updater.checkForUpdate({
+    fetchFn: (url, init) => net.fetch(url, init),
+    current: app.getVersion(),
+    platform: process.platform,
+    arch: process.arch,
+    format: process.platform === 'linux' ? updater.linuxFormat() : undefined,
+  })
+  lastUpdateInfo = info
+  return info
 }
 
-ipcMain.handle('tessera-update-check', async () => {
-  const current = app.getVersion()
-  const fallback = { current, latest: '', url: '', available: false }
-  try {
-    const res = await net.fetch(`https://api.github.com/repos/${UPDATE_REPO}/releases/latest`, {
-      headers: { Accept: 'application/vnd.github+json', 'User-Agent': `tessera-desktop/${current}` },
+async function backgroundUpdateCheck() {
+  if (process.env.TESSERA_NO_UPDATE_CHECK) return
+  const state = updater.readState(updateStateFile())
+  if (state.disabled) return
+  const info = await runUpdateCheck()
+  if (!info.available) return
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('tessera-update-available', info)
+  if (state.notified !== info.latest && Notification.isSupported()) {
+    const n = new Notification({
+      title: `Tessera ${info.latest} is available`,
+      body: `You have ${info.current}. Open Tessera and click Download & install.`,
     })
-    if (!res.ok) return fallback
-    const data = await res.json()
-    const latest = data.tag_name || ''
-    return {
-      current,
-      latest,
-      url: data.html_url || 'https://tessera.storage/downloads',
-      available: !!latest && isNewerVersion(latest, current),
-    }
-  } catch {
-    return fallback
+    n.on('click', () => { if (mainWindow) { mainWindow.show(); mainWindow.focus() } })
+    n.show()
+    updater.writeState(updateStateFile(), { ...state, notified: info.latest })
   }
+}
+
+function scheduleUpdateChecks() {
+  setTimeout(() => { backgroundUpdateCheck().catch(() => {}) }, 15_000)
+  setInterval(() => { backgroundUpdateCheck().catch(() => {}) }, updater.CHECK_INTERVAL_MS)
+}
+
+ipcMain.handle('tessera-update-check', async () => runUpdateCheck())
+
+ipcMain.handle('tessera-update-disable', async () => {
+  updater.writeState(updateStateFile(), { ...updater.readState(updateStateFile()), disabled: true })
+  return { ok: true }
+})
+
+ipcMain.handle('tessera-update-download', async (event) => {
+  const info = lastUpdateInfo && lastUpdateInfo.available ? lastUpdateInfo : await runUpdateCheck()
+  if (!info.available) return { ok: false, error: 'You already have the latest version.' }
+  const dest = path.join(app.getPath('userData'), 'updates')
+  const r = await updater.downloadAndVerify(info, dest, {
+    fetchFn: (url, init) => net.fetch(url, init),
+    onProgress: (received, total) => event.sender.send('tessera-update-progress', { received, total }),
+  })
+  if (!r.ok) return { ...r, url: info.url }
+  // AppImage: swap the running image in place (verified bytes), relaunch.
+  if (process.platform === 'linux' && process.env.APPIMAGE && r.file.endsWith('.AppImage')) {
+    try {
+      const target = process.env.APPIMAGE
+      fs.copyFileSync(r.file, target + '.new')
+      fs.chmodSync(target + '.new', 0o755)
+      fs.renameSync(target + '.new', target)
+      setTimeout(() => { app.relaunch({ execPath: target }); app.exit(0) }, 500)
+      return { ok: true, action: 'relaunch', version: info.latest, sha256: r.sha256 }
+    } catch (e) {
+      // fall through to opening the folder
+    }
+  }
+  const err = await shell.openPath(r.file)
+  if (err) shell.showItemInFolder(r.file)
+  return { ok: true, action: 'installer', file: r.file, version: info.latest, sha256: r.sha256 }
 })
 
 ipcMain.handle('tessera-open-external', async (_e, url) => {
@@ -352,6 +393,7 @@ ipcMain.handle('tessera-versions-restore', async (_e, relPath, n) => cliBridge.v
 app.whenReady().then(async () => {
   try { await startProxy() } catch (e) { console.error('proxy start failed:', e) }
   createWindow()
+  scheduleUpdateChecks()
 })
 
 app.on('window-all-closed', () => {

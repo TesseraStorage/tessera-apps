@@ -98,14 +98,19 @@ function explainRegisterError(msg) {
   return s
 }
 
-// ── update banner (Packet 4) ──────────────────────────────
-// Desktop only. Compares this build's version to the latest tessera-apps
-// release (via the Electron main process) and offers to open the download
-// page. It NEVER installs anything; the user clicks. Opt out with the
-// "Don't check again" button (persisted per browser/app profile).
+// ── update banner (Packet 4; v0.8.0 updater) ─────────────
+// Desktop only. The main process checks the latest tessera-apps release at
+// startup and daily, and raises a native notification once per version. The
+// banner offers "Download & install": the main process downloads the
+// matching installer, verifies it against the release's SHA256SUMS, then
+// relaunches (AppImage) or opens the verified installer. Nothing downloads
+// until the user clicks. "Don't check again" turns the check off.
 async function checkDesktopUpdate() {
   if (!isDesktop() || !window.tesseraDesktop.checkUpdate) return
   try { if (localStorage.getItem('tesseraweb.updateCheck') === 'off') return } catch (_) {}
+  if (window.tesseraDesktop.onUpdateAvailable) {
+    try { window.tesseraDesktop.onUpdateAvailable((info) => { if (info && info.available) showUpdateBanner(info) }) } catch (_) {}
+  }
   let info
   try { info = await window.tesseraDesktop.checkUpdate() } catch (_) { return }
   if (!info || !info.available) return
@@ -114,21 +119,53 @@ async function checkDesktopUpdate() {
 
 function showUpdateBanner(info) {
   if (document.getElementById('updateBanner')) return
+  const canInstall = !!(window.tesseraDesktop && window.tesseraDesktop.downloadUpdate)
   const el = document.createElement('div')
   el.id = 'updateBanner'
   el.className = 'update-banner'
   el.innerHTML =
-    '<span class="update-banner-text">Tessera <b>' + esc(info.latest) + '</b> is available (you have ' + esc(info.current) + ').</span>' +
+    '<span class="update-banner-text" id="updateText">Tessera <b>' + esc(info.latest) + '</b> is available (you have ' + esc(info.current) + ').</span>' +
     '<span class="update-banner-actions">' +
-    '<button id="updateOpen" class="btn btn-primary">Update</button>' +
+    '<button id="updateOpen" class="btn btn-primary">' + (canInstall ? 'Download &amp; install' : 'Update') + '</button>' +
     '<button id="updateNever" class="btn btn-ghost">Don\u2019t check again</button>' +
     '<button id="updateDismiss" class="btn btn-ghost">Dismiss</button>' +
     '</span>'
   document.body.appendChild(el)
+  const text = document.getElementById('updateText')
   const open = document.getElementById('updateOpen')
-  if (open) open.onclick = () => { try { window.tesseraDesktop.openExternal(info.url) } catch (_) {} }
+  if (open) open.onclick = async () => {
+    if (!canInstall) { try { window.tesseraDesktop.openExternal(info.url) } catch (_) {} ; return }
+    open.disabled = true
+    let off = null
+    try {
+      if (window.tesseraDesktop.onUpdateProgress) {
+        off = window.tesseraDesktop.onUpdateProgress((p) => {
+          if (!text) return
+          const pct = p && p.total ? Math.floor((p.received / p.total) * 100) + '%' : formatBytes(p && p.received || 0)
+          text.textContent = 'Downloading Tessera ' + info.latest + '\u2026 ' + pct
+        })
+      }
+      const r = await window.tesseraDesktop.downloadUpdate()
+      if (r && r.ok) {
+        text.textContent = r.action === 'relaunch'
+          ? 'Verified (SHA-256). Restarting into Tessera ' + info.latest + '\u2026'
+          : 'Verified (SHA-256). The installer for Tessera ' + info.latest + ' is open \u2014 quit Tessera and follow it to finish.'
+      } else {
+        text.textContent = (r && r.error) || 'The update could not be downloaded.'
+        open.textContent = 'Open download page'
+        open.disabled = false
+        open.onclick = () => { try { window.tesseraDesktop.openExternal((r && r.url) || info.url) } catch (_) {} }
+      }
+    } finally {
+      if (typeof off === 'function') off()
+    }
+  }
   const never = document.getElementById('updateNever')
-  if (never) never.onclick = () => { try { localStorage.setItem('tesseraweb.updateCheck', 'off') } catch (_) {} ; el.remove() }
+  if (never) never.onclick = () => {
+    try { localStorage.setItem('tesseraweb.updateCheck', 'off') } catch (_) {}
+    try { if (window.tesseraDesktop.disableUpdateCheck) window.tesseraDesktop.disableUpdateCheck() } catch (_) {}
+    el.remove()
+  }
   const dismiss = document.getElementById('updateDismiss')
   if (dismiss) dismiss.onclick = () => el.remove()
 }

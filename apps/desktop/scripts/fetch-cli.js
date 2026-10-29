@@ -10,6 +10,7 @@
 import fs from 'fs'
 import path from 'path'
 import https from 'https'
+import crypto from 'crypto'
 import { fileURLToPath } from 'url'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -18,7 +19,11 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 // desktop sign-in (Bug 3) invokes via `tessera login --email --token "<words>"`.
 // v1.10.0 (2026-10-29): sync transfers map host-shortage errors to a clear
 // cause (network, balance, not ready) instead of the raw SDK error.
-const TESSERA_CLI_VERSION = process.env.TESSERA_CLI_VERSION || 'v1.10.0'
+// v1.11.0 (2026-10-30): one-step signup, seed-phrase login (same account and
+// App ID), account delete, `tessera update`, progress bars, per-rail top-up
+// minimums. `login --email --token` (used by the desktop sign-in) unchanged.
+// v1.11.1: fixes "topup <usd> --asset <code>" parsing; funded Ready:false note.
+const TESSERA_CLI_VERSION = process.env.TESSERA_CLI_VERSION || 'v1.11.1'
 
 // Build-time-only override (Decision 6 / Task 6): when set, bundle the named
 // local tessera-cli binary instead of downloading a pinned release. It exists
@@ -95,6 +100,17 @@ async function main() {
   if (!isWin) fs.chmodSync(outFile, 0o755)
   const size = fs.statSync(outFile).size
   if (size < 1_000_000) throw new Error(`[fetch-cli] downloaded file suspiciously small (${size} bytes) — bad asset?`)
+  // Verify against the release's SHA256SUMS (published since v1.10.0).
+  const sumsFile = outFile + '.SHA256SUMS'
+  await download(`https://github.com/TesseraStorage/tessera-cli/releases/download/${TESSERA_CLI_VERSION}/SHA256SUMS`, sumsFile)
+  const sums = fs.readFileSync(sumsFile, 'utf8')
+  fs.unlinkSync(sumsFile)
+  const line = sums.split(/\r?\n/).find((l) => l.trim().endsWith(' ' + asset) || l.trim().endsWith('*' + asset))
+  if (!line) throw new Error(`[fetch-cli] SHA256SUMS has no entry for ${asset}`)
+  const want = line.trim().split(/\s+/)[0].toLowerCase()
+  const got = crypto.createHash('sha256').update(fs.readFileSync(outFile)).digest('hex')
+  if (got !== want) { fs.unlinkSync(outFile); throw new Error(`[fetch-cli] checksum mismatch for ${asset}`) }
+  console.log(`[fetch-cli] sha256 verified ${got}`)
   console.log(`[fetch-cli] ok, ${size} bytes`)
 }
 

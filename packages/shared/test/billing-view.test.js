@@ -206,7 +206,7 @@ test('topup_open true renders the form and submits through the client', async ()
   assert.match(view.el.textContent, /Start another top-up/)
 })
 
-test('top-up validation rejects below the $0.01 minimum before any call', async () => {
+test('top-up validation rejects below the $0.01 floor before any call', async () => {
   const calls = []
   const client = { createTopup: async (amount) => { calls.push(amount); return {} } }
   const doc = createDocument()
@@ -314,4 +314,85 @@ test('billing screen is wired to the shared client and view, desktop hook includ
   assert.ok(WEB_UI.includes('billingView.showDesktopUnavailable()'))
   assert.ok(WEB_UI.includes("if (screen === 'billing') loadBilling()"))
   assert.ok(WEB_UI.includes("from './billing.js'"))
+})
+
+// ── v0.8.0: $5 default, live minimum, readiness, plain asset names ──
+
+const MINIMUMS = {
+  floor_usd: '0.01',
+  default_usd: '5.00',
+  rails: {
+    nowpayments: { enabled: true, pay_currency: 'usdcbase', asset: 'USDC on Base', minimum_usd: '0.38' },
+    x402: { enabled: true, asset: 'USDC on Base', minimum_usd: '0.01' },
+  },
+}
+
+test('the top-up form defaults to $5 and says the invoice accepts many coins', () => {
+  const doc = createDocument()
+  const view = createBillingView({ doc, client: { createTopup: async () => ({}) } })
+  view.showAccount({ ...ACCOUNT, topup_open: true })
+  const input = byTag(view.el, 'input')[0]
+  assert.equal(input.value, '5.00')
+  assert.match(view.el.textContent, /USDC, USDT, BTC, ETH, XMR/)
+  assert.match(view.el.textContent, /x402/)
+})
+
+test('below the live minimum the form warns inline, disables the button and never calls', async () => {
+  const calls = []
+  const client = {
+    getTopupMinimums: async () => MINIMUMS,
+    createTopup: async (amount) => { calls.push(amount); return {} },
+  }
+  const doc = createDocument()
+  const view = createBillingView({ doc, client })
+  view.showAccount({ ...ACCOUNT, topup_open: true })
+  await tick(); await tick()
+  const input = byTag(view.el, 'input')[0]
+  const submit = byTag(view.el, 'button').find((b) => b.type === 'submit')
+  assert.equal(submit.disabled, false, '$5 is above the minimum')
+  input.value = '0.01'
+  input.fire('input')
+  assert.equal(submit.disabled, true)
+  assert.match(view.el.textContent, /minimum for a crypto invoice is \$0\.38/)
+  byTag(view.el, 'form')[0].fire('submit')
+  await tick()
+  assert.deepEqual(calls, [])
+  input.value = '1'
+  input.fire('input')
+  assert.equal(submit.disabled, false)
+})
+
+test('a flat 409 below_asset_minimum shows the minimum, the asset and the x402 way', async () => {
+  const client = {
+    createTopup: async () => {
+      throw new BillingApiError(409, { error: 'below_asset_minimum', minimum_usd: '0.38', asset: 'USDC on Base' })
+    },
+  }
+  const doc = createDocument()
+  const view = createBillingView({ doc, client })
+  view.showAccount({ ...ACCOUNT, topup_open: true })
+  byTag(view.el, 'form')[0].fire('submit')
+  await tick()
+  assert.match(view.el.textContent, /\$0\.38, paying in USDC on Base/)
+  assert.match(view.el.textContent, /tessera wallet init/)
+})
+
+test('the server readiness verdict is shown on the account view', () => {
+  const doc = createDocument()
+  const view = createBillingView({ doc })
+  view.showAccount({ ...ACCOUNT, readiness: { state: 'needs_topup', can_upload: false, message: 'Balance is $0. Top up to upload.' } })
+  assert.match(view.el.textContent, /Not ready to upload yet/)
+  assert.match(view.el.textContent, /Balance is \$0\. Top up to upload\./)
+})
+
+test('the invoice expiry is shown in local time with the zone named', async () => {
+  const client = {
+    createTopup: async () => ({ payment_intent_id: 1, invoice_url: 'https://pay.example/i/1', expires_at: '2026-10-31T01:00:00Z' }),
+  }
+  const doc = createDocument()
+  const view = createBillingView({ doc, client })
+  view.showAccount({ ...ACCOUNT, topup_open: true })
+  byTag(view.el, 'form')[0].fire('submit')
+  await tick()
+  assert.match(view.el.textContent, /Invoice open until .*(GMT|UTC|[A-Z]{2,5}).*\(your local time\)/)
 })

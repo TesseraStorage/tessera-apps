@@ -29,7 +29,7 @@ test('waits while funding lands, then succeeds', async () => {
 test('zero balance after the grace period is insufficient balance', async () => {
   const c = clock()
   await assert.rejects(withTransferReadiness(shortage, { ...c, getBalanceUSD: async () => 0 }),
-    e => e.readiness && e.code === 'insufficient_balance' && /minimum \$0\.01/.test(e.message))
+    e => e.readiness && e.code === 'insufficient_balance' && /from \$0\.01 with an x402 wallet/.test(e.message) && /crypto checkout/.test(e.message))
   assert.ok(c.now() >= 30000)
 })
 

@@ -1153,6 +1153,8 @@ input:focus { border-color: var(--cyan); }
 .billing-form input:focus { border-color: var(--cyan); }
 .billing-error { color: var(--red); font-size: 13px; }
 .billing-error:empty { display: none; }
+.billing-warn { color: var(--amber, #f59e0b); font-size: 13px; }
+.billing-warn:empty { display: none; }
 
 .billing-footer {
   display: flex;

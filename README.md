@@ -218,7 +218,8 @@ on a host-shortage error it shows "Waiting for your account to be ready…" and
 retries every 5 s for up to 120 s. The raw "no more hosts available" error is
 never shown; instead the user sees one of:
 
-- insufficient balance (balance still $0 after 30 s): top up, min $0.01;
+- insufficient balance (balance still $0 after 30 s): top up — from $0.01
+  with an x402 wallet, from about $0.38 by crypto checkout;
 - not enough storage hosts reachable from this network (balance is funded but
   the shortage persists): each upload needs 30 hosts reachable over TCP,
   each download 10;
@@ -237,7 +238,19 @@ end, days left, open slabs, egress usage/allowance, warnings, and
 the ambient `tessera_session` cookie; the top-up form renders only when the
 NOWPayments rail is open (`topup_rails.nowpayments`, falling back to
 `topup_open` on an older API). Top-ups are open on production via NOWPayments
-and x402; the minimum is $0.01. On desktop the
+and x402.
+
+**Top-up minimums (v0.8.0).** The form defaults to **$5.00**. The absolute
+floor is $0.01, but only the x402 rail (USDC on Base, paid from a wallet —
+`tessera wallet init` then `tessera topup <usd> --wallet`) goes that low.
+Crypto checkout (NOWPayments) accepts many coins — USDC on Base, LTC, TRX,
+SOL, ETH, BTC, XMR, USDT, … — each with its own live minimum (about $0.38
+for USDC on Base, ~$1.60 for BTC, ~$7 for XMR at the time of writing). The
+web form loads the live per-coin minimums from `GET /billing/topup/minimums`;
+below the cheapest coin's minimum it shows an inline warning with the real
+minimum and the x402 alternative, and disables the button. The server
+enforces the same rule (`409 below_asset_minimum`). Invoice and address
+expiry times are shown in your local time zone. On desktop the
 module never calls `fetch`: it reads account data through
 `window.tesseraDesktop.billingAccount()`, implemented in
 `apps/desktop/electron/` by `cli-bridge.mjs` (IPC `tessera-billing-account`,
@@ -249,7 +262,7 @@ map to `no_credentials` (the "run `tessera login`" empty state),
 
 **CLI dependency:** desktop account data requires a bundled `tessera-cli` that
 supports `account`. The pinned default (`TESSERA_CLI_VERSION`, currently
-`v1.10.0`) includes it, so a release build feeds the balance panel from the
+`v1.11.1`, checked against the release's SHA256SUMS) includes it, so a release build feeds the balance panel from the
 bundled CLI; with no billing credential it shows the "run `tessera login`"
 empty state. For local
 development/testing you can bundle a locally built binary with the
@@ -397,3 +410,28 @@ git push origin v0.0.x
 Tessera connects to the indexer at `https://index.tessera.storage`. The SDK derives an
 `AppKey` from your recovery phrase and uses it to authenticate with the indexer and the
 Sia hosts.
+
+
+## Desktop updates (v0.8.0)
+
+The desktop app checks the latest
+[tessera-apps release](https://github.com/TesseraStorage/tessera-apps/releases/latest)
+about 15 s after launch and then every 24 h. When a newer version exists it
+shows a native notification (once per version) and a banner with
+**Download & install**. The app downloads the installer for your platform
+(`.dmg`, `.exe`, `.AppImage`, `.deb` or `.rpm`), verifies it against the
+release's `SHA256SUMS`, and then either replaces itself and restarts
+(AppImage) or opens the verified installer. A checksum mismatch discards the
+download and offers the release page instead. Nothing is downloaded until you
+click. **Don't check again** in the banner, or `TESSERA_NO_UPDATE_CHECK=1`,
+turns the check off. Logic: `apps/desktop/electron/updater.mjs`
+(tests: `apps/desktop/test/updater.test.mjs`).
+
+## Account recovery and deletion
+
+Your recovery phrase is the account: `tessera login "<phrase>"` (CLI v1.11.0+)
+restores the same account ID and App ID with no browser. Keep the phrase and
+the API key the CLI prints at signup somewhere safe. To delete your account
+use the website's **Account → Delete account** or `tessera account delete`.
+Deletion revokes your keys, deletes your stored files, stops billing and is
+permanent. Any remaining balance is forfeited — there are no refunds.

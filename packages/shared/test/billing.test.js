@@ -394,3 +394,25 @@ test('toNumber coerces API shapes', () => {
   assert.equal(toNumber(Infinity), null)
   assert.equal(toNumber(null), null)
 })
+
+test('assetLabel and invoiceMinimumUsd (v0.8.0)', async () => {
+  const { assetLabel, invoiceMinimumUsd } = await import('../src/billing.js')
+  assert.equal(assetLabel('usdcbase'), 'USDC on Base')
+  assert.equal(assetLabel('XMR'), 'Monero (XMR)')
+  assert.equal(assetLabel('doge'), 'DOGE')
+  assert.equal(invoiceMinimumUsd(null), null)
+  assert.equal(invoiceMinimumUsd({ floor_usd: '0.01', rails: { nowpayments: { minimum_usd: '0.38' } } }), 0.38)
+  assert.equal(invoiceMinimumUsd({ floor_usd: '0.50', rails: { nowpayments: { minimum_usd: '0.38' } } }), 0.5)
+})
+
+test('getTopupMinimums GETs the public endpoint on web and is null on desktop', async () => {
+  const { createBillingClient } = await import('../src/billing.js')
+  const urls = []
+  const fetchFn = async (url) => { urls.push(url); return { ok: true, status: 200, text: async () => '{"floor_usd":"0.01"}' } }
+  const web = createBillingClient({ fetchFn, isDesktop: false })
+  assert.deepEqual(await web.getTopupMinimums(), { floor_usd: '0.01' })
+  assert.deepEqual(urls, ['/api/v1/billing/topup/minimums'])
+  const desk = createBillingClient({ fetchFn, isDesktop: true, bridge: null })
+  assert.equal(await desk.getTopupMinimums(), null)
+  assert.equal(urls.length, 1)
+})

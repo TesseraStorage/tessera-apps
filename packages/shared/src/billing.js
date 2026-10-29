@@ -42,6 +42,38 @@ export const BILLING_DESKTOP_APP_MESSAGE =
   'You are not signed in. Sign in from the Welcome screen to see your balance and usage.'
 
 export const TOPUP_MIN_USD = 0.01
+// Form default (v0.8.0): $5, comfortably above every common coin's
+// processor minimum, and the amount the first-top-up bonus starts at.
+export const TOPUP_DEFAULT_USD = '5.00'
+
+// Plain names for the processor's coin codes (v0.8.0). Unknown codes fall
+// back to the upper-cased code.
+const ASSET_LABELS = {
+  usdcbase: 'USDC on Base', usdc: 'USDC on Ethereum', usdcsol: 'USDC on Solana',
+  usdcmatic: 'USDC on Polygon', usdcbsc: 'USDC on BNB Chain', usdcarb: 'USDC on Arbitrum',
+  usdterc20: 'USDT on Ethereum', usdttrc20: 'USDT on Tron', usdtbsc: 'USDT on BNB Chain',
+  usdtsol: 'USDT on Solana', usdtmatic: 'USDT on Polygon', usdtton: 'USDT on TON',
+  usdtarb: 'USDT on Arbitrum', btc: 'Bitcoin (BTC)', eth: 'Ether (ETH)', xmr: 'Monero (XMR)',
+  sol: 'Solana (SOL)', ltc: 'Litecoin (LTC)', trx: 'TRON (TRX)',
+}
+
+export function assetLabel(code) {
+  if (!code) return ''
+  const c = String(code).toLowerCase()
+  return ASSET_LABELS[c] || c.toUpperCase()
+}
+
+// Invoice minimum from GET /billing/topup/minimums: the NOWPayments rail's
+// minimum for its default coin (the cheapest way to pay an invoice), never
+// below Tessera's own floor. Null when unknown.
+export function invoiceMinimumUsd(minimums) {
+  if (!isRecord(minimums)) return null
+  const floor = toNumber(minimums.floor_usd) ?? TOPUP_MIN_USD
+  const rail = isRecord(minimums.rails) ? minimums.rails.nowpayments : null
+  const m = rail ? toNumber(rail.minimum_usd) : null
+  if (m === null) return null
+  return Math.max(m, floor)
+}
 export const TOPUP_MAX_USD = 10000
 
 const USD = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' })
@@ -87,6 +119,17 @@ export function formatDateTime(value) {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return '—'
   return date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+}
+
+/** Local date/time with the time zone named, e.g. "Oct 31, 2026, 2:13 AM GMT+7". */
+export function formatDateTimeZone(value) {
+  if (!value) return '—'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return '—'
+  return date.toLocaleString(undefined, {
+    year: 'numeric', month: 'short', day: 'numeric',
+    hour: 'numeric', minute: '2-digit', timeZoneName: 'short',
+  })
 }
 
 export function formatDaysLeft(value) {
@@ -218,11 +261,16 @@ export class BillingApiError extends Error {
     this.payload = payload
   }
 
-  /** The nested `detail` object when the error shape carries one. */
+  /**
+   * The nested `detail` object when the error shape carries one; a flat
+   * error body (`{"error":"below_asset_minimum","minimum_usd":…}`) is its
+   * own detail.
+   */
   get detail() {
-    return isRecord(this.payload) && isRecord(this.payload.detail)
-      ? this.payload.detail
-      : null
+    if (!isRecord(this.payload)) return null
+    if (isRecord(this.payload.detail)) return this.payload.detail
+    if (typeof this.payload.error === 'string') return this.payload
+    return null
   }
 }
 
@@ -373,6 +421,12 @@ export function createBillingClient(opts = {}) {
      * form has always offered. Newer agent-facing flows default to a direct
      * address, so being explicit here keeps the human checkout unchanged.
      */
+    /** Public per-rail minimums (GET /billing/topup/minimums); web only. */
+    getTopupMinimums() {
+      if (isDesktop()) return Promise.resolve(null)
+      return request('/billing/topup/minimums')
+    },
+
     createTopup(amountUsd) {
       if (isDesktop()) {
         return Promise.reject(
@@ -425,9 +479,10 @@ function describeTopupError(err) {
   switch (err.code) {
     case 'below_asset_minimum': {
       const minimum = err.detail && err.detail.minimum_usd
-      return `That amount is below the minimum for the selected asset${
-        minimum ? ` ($${minimum})` : ''
-      }.`
+      const asset = (err.detail && err.detail.asset) || 'USDC on Base'
+      return `That amount is below the payment processor's minimum for a crypto invoice${
+        minimum ? ` ($${minimum}, paying in ${asset})` : ''
+      }. Enter at least that amount. Smaller amounts (down to $0.01) are only possible with x402 (USDC on Base) — for example the CLI: tessera wallet init, then tessera topup <usd> --wallet.`
     }
     case 'amount_out_of_range':
       return 'That amount is outside the accepted range ($0.01 to $10,000).'
@@ -506,6 +561,19 @@ export function createBillingView(opts = {}) {
         data.status === 'pending' ? 'info' : 'warn',
         null,
         notice,
+      ))
+    }
+
+    // v0.8.0: the server's own readiness verdict (why a $0 account shows
+    // "not ready", whether the free first upload applies, what to do next).
+    const readiness = isRecord(data.readiness) ? data.readiness : null
+    if (readiness && readiness.message) {
+      const ok = readiness.can_upload === true
+      root.appendChild(callout(
+        doc,
+        ok ? 'good' : 'warn',
+        ok ? 'Ready to upload' : 'Not ready to upload yet',
+        String(readiness.message),
       ))
     }
 
@@ -665,8 +733,13 @@ export function createBillingView(opts = {}) {
     section.appendChild(h(doc, 'h3', null, 'Top up balance'))
     section.appendChild(h(
       doc, 'p', 'billing-note',
-      'Prepay a USD balance by crypto invoice. Usage is debited from it as you store and read data. The minimum top-up is $0.01.',
+      'Prepay a USD balance by crypto invoice. Usage is debited from it as you store and read data. The invoice accepts many coins — USDC, USDT, BTC, ETH, XMR, SOL, LTC and more; you pick one on the invoice page. Each coin has the payment processor\u2019s own minimum (about $0.38 for USDC on Base, more for most others).',
     ))
+    section.appendChild(h(
+      doc, 'p', 'billing-note',
+      'Under the crypto minimum (down to $0.01), pay with x402 (USDC on Base) instead — for example the CLI\u2019s built-in wallet: tessera wallet init, then tessera topup <usd> --wallet.',
+    ))
+    let invoiceMin = null
 
     const form = h(doc, 'form', 'billing-form')
     const label = h(doc, 'label', 'billing-label', 'Amount (USD)')
@@ -677,19 +750,48 @@ export function createBillingView(opts = {}) {
     input.setAttribute('id', 'billing-topup-amount')
     input.type = 'number'
     input.setAttribute('type', 'number')
-    input.value = '0.01'
-    input.setAttribute('value', '0.01')
+    input.value = TOPUP_DEFAULT_USD
+    input.setAttribute('value', TOPUP_DEFAULT_USD)
     input.setAttribute('inputmode', 'decimal')
     input.setAttribute('min', String(TOPUP_MIN_USD))
     input.setAttribute('max', String(TOPUP_MAX_USD))
     input.setAttribute('step', '0.01')
     form.appendChild(input)
+    const warn = h(doc, 'p', 'billing-warn')
+    form.appendChild(warn)
     const error = h(doc, 'p', 'billing-error')
     error.setAttribute('role', 'alert')
     form.appendChild(error)
     const submit = h(doc, 'button', 'btn btn-primary', 'Open invoice')
     submit.type = 'submit'
     form.appendChild(submit)
+
+    // Inline minimum check: below the live minimum, say so and disable the
+    // button (the server refuses the same amount with 409 anyway).
+    function belowMinimumText() {
+      const amount = Number(input.value)
+      if (invoiceMin === null || !Number.isFinite(amount) || amount <= 0) return ''
+      if (amount >= invoiceMin) return ''
+      return `The minimum for a crypto invoice is $${invoiceMin.toFixed(2)} (paying in USDC on Base; other coins cost more). Smaller amounts, down to $0.01, are only possible with x402.`
+    }
+    function refreshMinimum() {
+      const text = belowMinimumText()
+      warn.textContent = text
+      submit.disabled = !!text
+    }
+    if (typeof input.addEventListener === 'function') input.addEventListener('input', refreshMinimum)
+    if (client && typeof client.getTopupMinimums === 'function') {
+      Promise.resolve()
+        .then(() => client.getTopupMinimums())
+        .then((m) => {
+          invoiceMin = invoiceMinimumUsd(m)
+          if (invoiceMin !== null) {
+            input.setAttribute('min', invoiceMin.toFixed(2))
+          }
+          refreshMinimum()
+        })
+        .catch(() => {})
+    }
 
     function reset() {
       form.textContent = ''
@@ -715,7 +817,7 @@ export function createBillingView(opts = {}) {
         ))
       }
       if (intent && intent.expires_at) {
-        form.appendChild(h(doc, 'p', 'billing-note', `Expires ${formatDateTime(intent.expires_at)}`))
+        form.appendChild(h(doc, 'p', 'billing-note', `Invoice open until ${formatDateTimeZone(intent.expires_at)} (your local time)`))
       }
       const again = h(doc, 'button', 'btn', 'Start another top-up')
       again.type = 'button'
@@ -732,6 +834,11 @@ export function createBillingView(opts = {}) {
       }
       if (amount > TOPUP_MAX_USD) {
         error.textContent = 'Enter an amount of $10,000 or less.'
+        return
+      }
+      const minText = belowMinimumText()
+      if (minText) {
+        error.textContent = minText
         return
       }
       if (!client) {
@@ -758,8 +865,10 @@ export function createBillingView(opts = {}) {
     function buildForm() {
       form.appendChild(label)
       form.appendChild(input)
+      form.appendChild(warn)
       form.appendChild(error)
       form.appendChild(submit)
+      refreshMinimum()
     }
 
     section.appendChild(form)

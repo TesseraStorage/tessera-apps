@@ -64,8 +64,21 @@ contextBridge.exposeInMainWorld('tesseraDesktop', {
   versionsRestore: (relPath, n) => ipcRenderer.invoke('tessera-versions-restore', relPath, n),
 
   // ── Update check (Packet 4) ───────────────────────────
-  // Reports whether a newer tessera-apps release exists; never installs.
+  // Reports whether a newer tessera-apps release exists.
   checkUpdate: () => ipcRenderer.invoke('tessera-update-check'),
+  // v0.8.0: download the matching installer, verify SHA256SUMS, install.
+  downloadUpdate: () => ipcRenderer.invoke('tessera-update-download'),
+  disableUpdateCheck: () => ipcRenderer.invoke('tessera-update-disable'),
+  onUpdateAvailable: (callback) => {
+    const handler = (_event, info) => callback(info)
+    ipcRenderer.on('tessera-update-available', handler)
+    return () => ipcRenderer.removeListener('tessera-update-available', handler)
+  },
+  onUpdateProgress: (callback) => {
+    const handler = (_event, p) => callback(p)
+    ipcRenderer.on('tessera-update-progress', handler)
+    return () => ipcRenderer.removeListener('tessera-update-progress', handler)
+  },
   openExternal: (url) => ipcRenderer.invoke('tessera-open-external', url),
 
   // Progress events from main process
