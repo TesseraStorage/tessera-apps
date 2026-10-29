@@ -55,7 +55,7 @@ export function readinessMessage(code, op = 'upload') {
   const needed = op === 'upload' ? UPLOAD_HOSTS_NEEDED : DOWNLOAD_HOSTS_NEEDED
   switch (code) {
     case 'insufficient_balance':
-      return 'Insufficient balance: your account has no funds for storage hosts. Add funds (minimum $0.01) and try again.'
+      return 'Insufficient balance: your account has no funds for storage hosts. Add funds and try again: from $0.01 with an x402 wallet (USDC on Base), or from about $0.38 by crypto checkout (the minimum depends on the coin).'
     case 'hosts_unreachable':
       return 'Your account is funded, but fewer than the ' + needed + ' storage hosts a ' + op +
         ' needs could be reached from this network. A firewall, VPN, proxy or restricted network may be blocking them. Try another network.'

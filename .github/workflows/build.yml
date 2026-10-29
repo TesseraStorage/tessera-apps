@@ -152,17 +152,25 @@ jobs:
           merge-multiple: true
       - name: List artifacts
         run: find artifacts -type f -exec ls -lh {} \;
+      # v0.8.0: the desktop updater verifies every download against this
+      # file before it opens or swaps anything in.
+      - name: Write SHA256SUMS
+        working-directory: artifacts
+        run: |
+          sha256sum *.dmg *.AppImage *.deb *.rpm *.exe 2>/dev/null > SHA256SUMS
+          cat SHA256SUMS
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          # Exactly the 5 distributables: deb, AppImage, win exe, and
-          # the two macOS dmg files. Nothing else.
+          # The distributables (deb, rpm, AppImage, win exe, the two macOS
+          # dmg files) plus SHA256SUMS for the updater. Nothing else.
           files: |
             artifacts/*.dmg
             artifacts/*.AppImage
             artifacts/*.deb
             artifacts/*.rpm
             artifacts/*.exe
+            artifacts/SHA256SUMS
           name: ${{ github.ref_name }}
           generate_release_notes: true
           fail_on_unmatched_files: false
