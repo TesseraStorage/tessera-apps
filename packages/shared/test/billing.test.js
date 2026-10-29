@@ -120,7 +120,7 @@ test('Decision 3 copy constants carry the load-bearing phrases', () => {
   // Bug 7: the desktop APP wording must not reference the CLI at all.
   assert.match(BILLING_DESKTOP_APP_MESSAGE, /Welcome screen/)
   assert.ok(!/tessera login/.test(BILLING_DESKTOP_APP_MESSAGE))
-  assert.equal(TOPUP_MIN_USD, 5)
+  assert.equal(TOPUP_MIN_USD, 0.01)
   assert.equal(TOPUP_MAX_USD, 10000)
 })
 

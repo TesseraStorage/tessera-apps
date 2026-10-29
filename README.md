@@ -208,13 +208,36 @@ marker, or placed in a URL query. Legacy `?handoff=` links are re-written to
 the fragment immediately, but the initial request that carried the query
 remains loggable server-side — use fragment links.
 
+### Transfer readiness (new accounts)
+
+A new account gets a free $0.05 credit for its first upload; the server funds
+the storage hosts a few seconds after the client first asks for hosts. Until
+that lands, the SDK reports a host shortage. `packages/shared/src/readiness.js`
+(`withTransferReadiness`) wraps uploads and downloads on web, desktop and Drop:
+on a host-shortage error it shows "Waiting for your account to be ready…" and
+retries every 5 s for up to 120 s. The raw "no more hosts available" error is
+never shown; instead the user sees one of:
+
+- insufficient balance (balance still $0 after 30 s): top up, min $0.01;
+- not enough storage hosts reachable from this network (balance is funded but
+  the shortage persists): each upload needs 30 hosts reachable over TCP,
+  each download 10;
+- account not ready yet (balance unknown): try again shortly.
+
+Transfers are not gated on the account `Ready` flag, so a free account that is
+still paused (`born_paused`) can make its first upload without waiting forever.
+The CLI (v1.10.0+) does the same check up front and can also count reachable
+hosts.
+
 ### Billing views
 
 `packages/shared/src/billing.js` is the account view: balance, plan, period
 end, days left, open slabs, egress usage/allowance, warnings, and
 `status`/`kind`/`topup_url`. On the web it fetches same-origin `/api/v1` with
-the ambient `tessera_session` cookie; the top-up form renders only when
-`topup_open === true` (public top-up is closed by default). On desktop the
+the ambient `tessera_session` cookie; the top-up form renders only when the
+NOWPayments rail is open (`topup_rails.nowpayments`, falling back to
+`topup_open` on an older API). Top-ups are open on production via NOWPayments
+and x402; the minimum is $0.01. On desktop the
 module never calls `fetch`: it reads account data through
 `window.tesseraDesktop.billingAccount()`, implemented in
 `apps/desktop/electron/` by `cli-bridge.mjs` (IPC `tessera-billing-account`,
@@ -226,7 +249,7 @@ map to `no_credentials` (the "run `tessera login`" empty state),
 
 **CLI dependency:** desktop account data requires a bundled `tessera-cli` that
 supports `account`. The pinned default (`TESSERA_CLI_VERSION`, currently
-`v1.6.1`) includes it, so a release build feeds the balance panel from the
+`v1.10.0`) includes it, so a release build feeds the balance panel from the
 bundled CLI; with no billing credential it shows the "run `tessera login`"
 empty state. For local
 development/testing you can bundle a locally built binary with the

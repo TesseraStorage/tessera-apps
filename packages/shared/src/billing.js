@@ -41,7 +41,7 @@ export const BILLING_DESKTOP_MESSAGE =
 export const BILLING_DESKTOP_APP_MESSAGE =
   'You are not signed in. Sign in from the Welcome screen to see your balance and usage.'
 
-export const TOPUP_MIN_USD = 5
+export const TOPUP_MIN_USD = 0.01
 export const TOPUP_MAX_USD = 10000
 
 const USD = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' })
@@ -430,7 +430,7 @@ function describeTopupError(err) {
       }.`
     }
     case 'amount_out_of_range':
-      return 'That amount is outside the accepted range ($5 to $10,000).'
+      return 'That amount is outside the accepted range ($0.01 to $10,000).'
     case 'topup_closed':
       return 'Public top-ups are not open yet. They will be announced once crypto payment is live; your balance, plan and promo codes keep working as usual.'
     case 'payments_unconfigured':
@@ -665,7 +665,7 @@ export function createBillingView(opts = {}) {
     section.appendChild(h(doc, 'h3', null, 'Top up balance'))
     section.appendChild(h(
       doc, 'p', 'billing-note',
-      'Prepay a USD balance by crypto invoice. Usage is debited from it as you store and read data. The minimum top-up is $5.',
+      'Prepay a USD balance by crypto invoice. Usage is debited from it as you store and read data. The minimum top-up is $0.01.',
     ))
 
     const form = h(doc, 'form', 'billing-form')
@@ -677,8 +677,8 @@ export function createBillingView(opts = {}) {
     input.setAttribute('id', 'billing-topup-amount')
     input.type = 'number'
     input.setAttribute('type', 'number')
-    input.value = '5'
-    input.setAttribute('value', '5')
+    input.value = '0.01'
+    input.setAttribute('value', '0.01')
     input.setAttribute('inputmode', 'decimal')
     input.setAttribute('min', String(TOPUP_MIN_USD))
     input.setAttribute('max', String(TOPUP_MAX_USD))
@@ -727,7 +727,7 @@ export function createBillingView(opts = {}) {
       error.textContent = ''
       const amount = Number(input.value)
       if (!Number.isFinite(amount) || amount < TOPUP_MIN_USD) {
-        error.textContent = 'Enter an amount of $5 or more.'
+        error.textContent = 'Enter an amount of $0.01 or more.'
         return
       }
       if (amount > TOPUP_MAX_USD) {

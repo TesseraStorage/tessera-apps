@@ -18,8 +18,9 @@ import {
 } from './auth.js'
 import {
   listFiles, computeTotals, uploadFile, downloadToDisk,
-  deleteFile, createShareURL, getObject, getAccount, waitForReady, initRelay,
+  deleteFile, createShareURL, getObject, getAccount, waitForReady, waitForConnected, initRelay,
 } from './files.js'
+import { withTransferReadiness } from './readiness.js'
 import {
   getState, patchState, subscribe, selectedFile,
   showToast, setBusy, setScreen,
@@ -645,7 +646,7 @@ async function enterMain() {
 
   try {
     patchState({ status: 'Checking account\u2026' })
-    await waitForReady(sdk)
+    await waitForConnected(sdk, 30000)
     const acct = await getAccount(sdk)
     patchState({ accountReady: !!acct.ready, status: '' })
     await refreshFiles()
@@ -728,10 +729,10 @@ async function doUpload(file) {
   setBusy(true)
   patchState({ status: '', progress: { stage: 'Preparing\u2026', percent: 0, elapsed: 0 } })
   try {
-    await waitForReady(sdk)
-    const obj = await uploadFile(sdk, file, ({ stage, percent, elapsed }) => {
+    await waitForConnected(sdk, 10000)
+    const obj = await withTransferReadiness(() => uploadFile(sdk, file, ({ stage, percent, elapsed }) => {
       patchState({ progress: { stage, percent, elapsed } })
-    })
+    }), { op: 'upload', onWaiting: ({ text }) => patchState({ progress: { stage: text, percent: 0, elapsed: 0 } }) })
     patchState({ progress: null })
     const name = (file && file.name) || (obj && obj.id && obj.id.slice(0, 12) + '...')
     showToast('\u2705 ' + (name || 'File') + ' uploaded')
@@ -747,7 +748,7 @@ async function onDownload() {
   const sdk = getState().sdk; if (!sdk) return
   setBusy(true); patchState({ status: 'Downloading\u2026' })
   try {
-    await downloadToDisk(sdk, sf.id, sf.name)
+    await withTransferReadiness(() => downloadToDisk(sdk, sf.id, sf.name), { op: 'download', onWaiting: ({ text }) => patchState({ status: text }) })
     showToast('\u2B07\uFE0F Downloaded: ' + sf.name)
     patchState({ status: '' })
   } catch (e) {

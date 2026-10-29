@@ -26,7 +26,7 @@ import {
 } from './auth.js'
 import {
   listFiles, computeTotals, uploadFile, uploadFilesPacked, downloadToDisk,
-  deleteFile, createShareURL, getAccount, waitForReady, initRelay,
+  deleteFile, createShareURL, getAccount, waitForReady, waitForConnected, initRelay,
   setCredsPrefix,
   isTailZone,
   buildPath, folderMarkerName, validateFolderName, computeFolderView,
@@ -42,6 +42,7 @@ import {
   isDebugOn, diaryPush, hex8,
 } from './files.js'
 import { createUploadMap } from './map.js'
+import { withTransferReadiness, packedShortageError, parseBalanceUSD } from './readiness.js'
 import {
   getState, patchState, subscribe, selectedFile,
   showToast, setBusy, setScreen,
@@ -1400,6 +1401,24 @@ async function initHandoff() {
 // empty state, everything else to a retryable load error.
 
 let billingClient = null
+
+// READINESS: balance for withTransferReadiness(); null (unknown) when signed
+// out of billing, which never blocks a transfer.
+async function readinessBalanceUSD() {
+  if (!billingClient) return null
+  return parseBalanceUSD(await billingClient.getAccount())
+}
+function readinessOpts(op) {
+  return {
+    op,
+    getBalanceUSD: readinessBalanceUSD,
+    onWaiting: ({ text }) => {
+      stopEncodingAnim()
+      r.progressWrap.classList.remove('hidden')
+      r.progressLabel.textContent = text
+    },
+  }
+}
 let billingView = null
 
 function onShowBilling() {
@@ -3586,7 +3605,7 @@ async function doUpload(file, destPathOverride) {
     // (line ~714, background/non-blocking, only feeds the header dot)
     // keeps its original 5-minute default -- that one was never the
     // hang, since it never gates Add.
-    await waitForReady(sdk, 10000)
+    await waitForConnected(sdk, 10000)
     // FIX (2026-09-14, "tessera-web-occupy-fade"): REMOVED. The extra
     // sdk.hosts({limit:60}) call the "tessera-web-map-30" packet added
     // here (for the Add-start candidate preview) is a SECOND, real
@@ -3630,7 +3649,7 @@ async function doUpload(file, destPathOverride) {
     const siblingNames = existingBasenamesInFolder(files, destPath)
     const finalBasename = resolveCollisionName(siblingNames, file.name)
     const metaName = destPath ? buildPath(destPath, finalBasename) : (finalBasename !== file.name ? finalBasename : undefined)
-    await uploadFile(sdk, file, ({ stage, percent, elapsed, hostKey, transferMs, marks }) => {
+    await withTransferReadiness(() => uploadFile(sdk, file, ({ stage, percent, elapsed, hostKey, transferMs, marks }) => {
       // ADD STAGE CLOCKS: every tick (encoding included) carries the
       // SAME marks object reference from files.js -- captured here on
       // every call so whichever tick happens to be the LAST one before
@@ -3707,7 +3726,7 @@ async function doUpload(file, destPathOverride) {
       // pinObject() has already returned -- never this eased path.
       setProgressTarget(percent)
       patchState({ progress: { stage, percent, elapsed, hostKey, transferMs } })
-    }, metaName)
+    }, metaName), readinessOpts('upload'))
     stopEase()
     // Safety net (2026-09-16): if uploadFile resolved without ever
     // firing a real progress tick (e.g. a 0-shard/trivial object), the
@@ -3806,6 +3825,8 @@ async function doUpload(file, destPathOverride) {
     const tag = buildFailTag(failCode, shardsLandedAtFail, expectedShardsAtFail)
     renderProgressBar(0)
     r.progressLabel.textContent = FAIL_SENTENCE[failCode] + tag
+    // READINESS: a classified host-shortage error carries its own message.
+    if (e && e.readiness) r.progressLabel.textContent = e.message
     // ADD STAGE CLOCKS: okTag is now exactly this packet's own 7-code
     // vocabulary (T20/T20M/T0T/TWT/TR/T0P/T0), the SAME string the
     // fail path just painted on the page (stripped of its N/M suffix
@@ -3912,7 +3933,7 @@ async function doPackedUpload(collected, destPathOverride) {
   patchState({ status: '' })
   let sawRealShardProgress = false
   try {
-    await waitForReady(sdk, 10000)
+    await waitForConnected(sdk, 10000)
     const { currentPath, files } = getState()
 
     // Normalize the input to [{ file, destPath }] and resolve every
@@ -3943,7 +3964,7 @@ async function doPackedUpload(collected, destPathOverride) {
     const fileList = planned.map(p => p.file)
     const metaNames = planned.map(p => p.metaName)
 
-    const results = await uploadFilesPacked(sdk, fileList, ({ stage, percent, elapsed, hostKey, transferMs, marks }) => {
+    const results = await withTransferReadiness(async () => { const res = await uploadFilesPacked(sdk, fileList, ({ stage, percent, elapsed, hostKey, transferMs, marks }) => {
       if (marks) addMarks = marks
       if (stage === 'attempt') {
         stopEncodingAnim()
@@ -3961,7 +3982,7 @@ async function doPackedUpload(collected, destPathOverride) {
       if (getState().status) patchState({ status: '' })
       setProgressTarget(percent)
       patchState({ progress: { stage, percent, elapsed, hostKey, transferMs } })
-    }, metaNames)
+    }, metaNames); const short = packedShortageError(res); if (short) throw short; return res }, readinessOpts('upload'))
 
     stopEase()
     stopEncodingAnim()
@@ -4009,6 +4030,8 @@ async function doPackedUpload(collected, destPathOverride) {
     const tag = buildFailTag(failCode, shardsLandedAtFail, expectedShardsAtFail)
     renderProgressBar(0)
     r.progressLabel.textContent = FAIL_SENTENCE[failCode] + tag
+    // READINESS: a classified host-shortage error carries its own message.
+    if (e && e.readiness) r.progressLabel.textContent = e.message
     printAddTime(addT0, addMarks, failCode, addMarks ? addMarks.expectedShards : null)
     const lastTicks = (addMarks && Array.isArray(addMarks.lastTicks)) ? addMarks.lastTicks : []
     const lastTick = lastTicks.length ? lastTicks[lastTicks.length - 1] : null
@@ -4081,7 +4104,7 @@ async function onDownload() {
   // exists, Download respects it exactly like every other action.
   if (getMapShownPref() === null) showMap()
   try {
-    await downloadToDisk(sdk, sf.id, sf.name, ({ hostKey, direction, transferMs, percent, dlComplete }) => {
+    await withTransferReadiness(() => downloadToDisk(sdk, sf.id, sf.name, ({ hostKey, direction, transferMs, percent, dlComplete }) => {
       if (mapController && hostKey) mapController.landedHost(hostKey, direction, transferMs)
       // FADE-TOGETHER (2026-09-30, "tessera-web-dl-arc-fade"): files.js
       // flags the exact tick that reaches MinShards (10 on 10+20) with
@@ -4102,7 +4125,7 @@ async function onDownload() {
         renderProgressBar(percent)
         r.progressLabel.textContent = 'downloading (' + percent + '%)'
       }
-    })
+    }), readinessOpts('download'))
     if (mapController) mapController.completeWrite()
     // DONE (2026-09-19, "tessera-web-download-progress"): "use one word
     // for both" -- doUpload's own success line is '\u2705 Success!'
@@ -4128,7 +4151,7 @@ async function onDownload() {
     // path (renderProgressBar(0) there is the exception it uses for
     // its OWN, different, fail case -- Download's law only asks that
     // stale success not persist, not that the fail bar move at all).
-    r.progressLabel.textContent = 'Could not download this file. Try again.'
+    r.progressLabel.textContent = (e && e.readiness) ? e.message : 'Could not download this file. Try again.'
     console.error(e)
   } finally { setBusy(false) }
 }
