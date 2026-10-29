@@ -206,18 +206,18 @@ test('topup_open true renders the form and submits through the client', async ()
   assert.match(view.el.textContent, /Start another top-up/)
 })
 
-test('top-up validation rejects below the $5 minimum before any call', async () => {
+test('top-up validation rejects below the $0.01 minimum before any call', async () => {
   const calls = []
   const client = { createTopup: async (amount) => { calls.push(amount); return {} } }
   const doc = createDocument()
   const view = createBillingView({ doc, client })
   view.showAccount({ ...ACCOUNT, topup_open: true })
   const input = byTag(view.el, 'input')[0]
-  input.value = '2'
+  input.value = '0.001'
   byTag(view.el, 'form')[0].fire('submit')
   await tick()
   assert.deepEqual(calls, [])
-  assert.match(view.el.textContent, /Enter an amount of \$5 or more\./)
+  assert.match(view.el.textContent, /Enter an amount of \$0\.01 or more\./)
 })
 
 test('a 503 topup_closed from the server shows the closed copy, not a crash', async () => {

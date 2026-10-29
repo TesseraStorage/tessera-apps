@@ -2496,6 +2496,30 @@ export async function waitForReady(sdk, timeoutMs = 300000) {
   throw new Error('Account not ready after ' + (timeoutMs / 1000) + 's')
 }
 
+// READINESS (2026-10-29, "agent-readiness"): Add/Drop used to gate every
+// upload on waitForReady(), i.e. on the indexer's Ready flag. Ready tracks
+// repair-redundancy host funding, and a free account keeps Ready:false until
+// its first paid top-up even though its free first upload works, so that gate
+// failed every free upload. Transfers now only need a live indexer
+// connection; host funding is handled by readiness.js's
+// withTransferReadiness() around the transfer itself. Same per-attempt
+// timeout race as waitForReady() above.
+export async function waitForConnected(sdk, timeoutMs = 10000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const remaining = deadline - Date.now()
+    let timer = null
+    const acct = await Promise.race([
+      getAccount(sdk),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('account() timed out')), remaining) }),
+    ]).catch(() => null).finally(() => { if (timer) clearTimeout(timer) })
+    if (acct) return acct
+    if (Date.now() >= deadline) break
+    await new Promise(r => setTimeout(r, Math.min(2000, Math.max(0, deadline - Date.now()))))
+  }
+  throw new Error('Account not ready after ' + (timeoutMs / 1000) + 's')
+}
+
 // ── relay init ──────────────────────────────────────────
 
 /**
