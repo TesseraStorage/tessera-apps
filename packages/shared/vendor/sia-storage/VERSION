@@ -1,12 +1,18 @@
 # sia-storage vendor marker — P6 Task 4 (Decision 5)
 #
 # sdk-sha: 4cdd5e635232cd947792def16c1e4e37dc376c86 (tessera-sdk branch tessera)
+#          + UNCOMMITTED working-tree changes on top (egress-reporting
+#          removal, sonnet-packet-remove-client-egress-report-2026-10-30,
+#          Money 10). Per that packet's law: no commit, no push. This marker
+#          will need a real sha once those changes land.
 # wasm-bindgen: 0.2.126
 # wasm-pack: 0.15.0
 # command: cd /root/tessera-sdk/sia_storage_wasm && wasm-pack build --target web --release --out-dir pkg
 # check:   cd packages/shared/vendor/sia-storage && sha256sum -c VERSION
-97330f709d5487db549cafcfc3480c124b5ec253553dae2977229b7d042ffbfc  wasm/sia_storage_wasm.js
-400d9d43d91bd382e899497a7e00895a2a07941ec45e0519fc646b82d8d74595  wasm/sia_storage_wasm_bg.wasm
-ba784ab53ec068343544acb34fb71e94072fa0c25dd4b7c4ec03412e316607d3  wasm/sia_storage_wasm.d.ts
-e7334f49e6dc3b5d5322782db414526d97f3eebf50962ae4d8f426507effe5d0  wasm/sia_storage_wasm_bg.wasm.d.ts
-60d8966e46950963a0cb9b591bbb9516a003885aaeda83c7d80e137e717bf946  dist/index.js
+# note: the old "dist/index.js" line below has no corresponding build output
+# under this path in the current tree (apps/web's vite build writes
+# apps/web/dist/, not packages/shared/dist/); left out rather than guessed.
+f33e0764b1880c3c492502278be394ff1528887fe6759b2477a84f71793a439e  wasm/sia_storage_wasm.js
+ad8aee4829be2c206aa2c90790aff74df2694298a8f919feeac3a2f11ca9a0b0  wasm/sia_storage_wasm_bg.wasm
+236920a1cd8577753feb0467573a07515aded0776eb33ad8bc055f94dc4bd3d0  wasm/sia_storage_wasm.d.ts
+f943bb8560a331a2068207da614851689f32fb672bb9031d0bbc499e53e76a90  wasm/sia_storage_wasm_bg.wasm.d.ts

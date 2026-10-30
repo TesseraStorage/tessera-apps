@@ -126,44 +126,6 @@ export class Builder {
         return ret;
     }
     /**
-     * Sets the maximum number of events per reported egress batch.
-     * Defaults to 500; values below 1 are treated as 1.
-     * @param {number} batch_max
-     */
-    egressBatchMax(batch_max) {
-        const ret = wasm.builder_egressBatchMax(this.__wbg_ptr, batch_max);
-        if (ret[1]) {
-            throw takeFromExternrefTable0(ret[0]);
-        }
-    }
-    /**
-     * Sets how often queued egress events are flushed, in milliseconds.
-     * Defaults to 30000 (30 seconds); the batch threshold flushes sooner.
-     * @param {number} ms
-     */
-    egressIntervalMs(ms) {
-        const ret = wasm.builder_egressIntervalMs(this.__wbg_ptr, ms);
-        if (ret[1]) {
-            throw takeFromExternrefTable0(ret[0]);
-        }
-    }
-    /**
-     * Enables signed egress reporting (P3b) and sets the URL served-shard
-     * batches are POSTed to. Reporting stays disabled until this is set.
-     *
-     * The wasm reporter is memory-only (no filesystem spool); see
-     * `egressIntervalMs` and `egressBatchMax` for batching.
-     * @param {string} url
-     */
-    egressUrl(url) {
-        const ptr0 = passStringToWasm0(url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-        const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.builder_egressUrl(this.__wbg_ptr, ptr0, len0);
-        if (ret[1]) {
-            throw takeFromExternrefTable0(ret[0]);
-        }
-    }
-    /**
      * @param {string} indexer_url
      * @param {AppMetadata} app
      */
@@ -1571,7 +1533,7 @@ function __wbg_get_imports() {
             return ret;
         },
         __wbindgen_cast_0000000000000003: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 893, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 862, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_baa1b51bcdcd1a91___convert__closures_____invoke___wasm_bindgen_baa1b51bcdcd1a91___JsValue__core_ed718c3d60ebd546___result__Result_____wasm_bindgen_baa1b51bcdcd1a91___JsError___true_);
             return ret;
         },
@@ -1586,7 +1548,7 @@ function __wbg_get_imports() {
             return ret;
         },
         __wbindgen_cast_0000000000000006: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 701, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 672, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_baa1b51bcdcd1a91___convert__closures_____invoke_______true_);
             return ret;
         },

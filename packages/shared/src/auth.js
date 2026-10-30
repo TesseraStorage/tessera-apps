@@ -20,29 +20,6 @@ import { randomAppId, fromHex, toHex } from './utils.js'
 import { hasWrappedVault, clearVault, wrapAppKey } from './vault.js'
 import { IS_STOCK } from './door.js'
 
-// ── egress reporting (P6 Task 4, Decision 5) ────────────
-//
-// Tessera Web reports served-shard egress to its own origin
-// (`/api/v1/usage/egress`, nginx -> moneyd; ingest is not gated by the
-// top-up switch). Web ONLY:
-//   - Drop and any non-'tesseraweb' prefix are excluded;
-//   - the stock door aliases the untouched Foundation SDK, which has no
-//     egressUrl(); IS_STOCK is compile-time, so the branch is dropped
-//     entirely from the stock bundle;
-//   - desktop (Electron loads file://, or window.tesseraDesktop even on
-//     the dev server) passes fetchMode undefined -- never 'idx' -- and is
-//     excluded twice over by the fetchMode and window checks.
-// The wasm builder refuses egress config once finalized, so this must run
-// before requestConnection()/register()/connected().
-function wireEgress(builder, prefix, fetchMode) {
-  if (IS_STOCK || prefix !== 'tesseraweb' || fetchMode !== 'idx') return
-  if (typeof location === 'undefined') return
-  if (location.protocol !== 'http:' && location.protocol !== 'https:') return
-  if (typeof window !== 'undefined' && window.tesseraDesktop && window.tesseraDesktop.isDesktop) return
-  if (typeof builder.egressUrl !== 'function') return
-  builder.egressUrl(location.origin + '/api/v1/usage/egress')
-}
-
 // ── local-storage keys ──────────────────────────────────
 function lsKeys(prefix) {
   return {
@@ -162,7 +139,6 @@ export async function beginConnection(prefix = 'tessera', fetchMode) {
     description: 'Tessera storage client',
     serviceUrl: idxUrl,
   })
-  wireEgress(builder, prefix, fetchMode)
 
   await builder.requestConnection()
   const approvalUrl = builder.responseUrl()
@@ -279,9 +255,7 @@ export async function tryReconnect(prefix = 'tessera', fetchMode) {
  * WebTransport shim regardless of the invite-connect path's 'idx' mode.
  * Now threads fetchMode through like every other auth.js function.
  *
- * PREFIX (P6 Task 4): threaded through for the same reason -- Unlock is
- * Tessera Web's primary path back into an existing account, so the egress
- * reporter has to be configured here too (see wireEgress).
+ * PREFIX (P6 Task 4): threaded through for the same reason.
  */
 export async function reconnectWithAppKey(appId, appKeyHex, fetchMode, prefix = 'tessera') {
   await initSia(fetchMode)
@@ -293,7 +267,6 @@ export async function reconnectWithAppKey(appId, appKeyHex, fetchMode, prefix = 
       description: 'Tessera storage client',
       serviceUrl: idxUrl,
     })
-    wireEgress(builder, prefix, fetchMode)
     const key = new AppKey(fromHex(appKeyHex))
     const sdk = await builder.connected(key)
     if (sdk) registerSdk(sdk)
@@ -407,7 +380,6 @@ export async function recoverWithConnectKey(
     description: 'Tessera storage client',
     serviceUrl: idxUrl,
   })
-  wireEgress(builder, prefix, fetchMode)
 
   await builder.requestConnection()
   const approvalUrl = builder.responseUrl()
@@ -486,7 +458,6 @@ export async function beginRecovery(phrase, onStatus, prefix = 'tessera', fetchM
     description: 'Tessera storage client',
     serviceUrl: idxUrl,
   })
-  wireEgress(approvalBuilder, prefix, fetchMode)
 
   await approvalBuilder.requestConnection()
   const approvalUrl = approvalBuilder.responseUrl()
