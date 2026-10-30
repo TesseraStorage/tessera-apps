@@ -241,12 +241,11 @@ the packaged app; release builds always take the pinned download.
 
 ### Egress reporting
 
-Tessera Web reports served-shard egress to its own origin: `wireEgress()` in
-`packages/shared/src/auth.js` calls
-`builder.egressUrl(location.origin + '/api/v1/usage/egress')` (nginx → moneyd)
-when the app prefix is `tesseraweb`, the fetch mode is `idx`, the page is
-`http(s):`, and it is neither the stock door nor desktop. Desktop egress from
-`file://` is deferred; the desktop and stock builds never configure it.
+Removed (sonnet-packet-remove-client-egress-report-2026-10-30, Money 10). No
+T-SDK posts a client-asserted read/egress report. The server's residual meter
+(balance-drop measurement) is the only read evidence trusted for billing.
+`wireEgress()` and `builder.egressUrl()` no longer exist anywhere in the
+shared package or the vendored SDK.
 
 ---
 

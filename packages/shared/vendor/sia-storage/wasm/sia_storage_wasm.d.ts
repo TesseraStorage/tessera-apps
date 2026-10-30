@@ -211,24 +211,6 @@ export class Builder {
      * Returns a Sdk if the key is valid, or undefined if not registered.
      */
     connected(app_key: AppKey): Promise<Sdk | undefined>;
-    /**
-     * Sets the maximum number of events per reported egress batch.
-     * Defaults to 500; values below 1 are treated as 1.
-     */
-    egressBatchMax(batch_max: number): void;
-    /**
-     * Sets how often queued egress events are flushed, in milliseconds.
-     * Defaults to 30000 (30 seconds); the batch threshold flushes sooner.
-     */
-    egressIntervalMs(ms: number): void;
-    /**
-     * Enables signed egress reporting (P3b) and sets the URL served-shard
-     * batches are POSTed to. Reporting stays disabled until this is set.
-     *
-     * The wasm reporter is memory-only (no filesystem spool); see
-     * `egressIntervalMs` and `egressBatchMax` for batching.
-     */
-    egressUrl(url: string): void;
     constructor(indexer_url: string, app: AppMetadata);
     /**
      * Completes registration and returns a Sdk instance.
@@ -569,9 +551,6 @@ export interface InitOutput {
     readonly appkey_sign: (a: number, b: number, c: number) => [number, number];
     readonly appkey_verifySignature: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly builder_connected: (a: number, b: number) => any;
-    readonly builder_egressBatchMax: (a: number, b: number) => [number, number];
-    readonly builder_egressIntervalMs: (a: number, b: number) => [number, number];
-    readonly builder_egressUrl: (a: number, b: number, c: number) => [number, number];
     readonly builder_new: (a: number, b: number, c: any) => [number, number, number];
     readonly builder_register: (a: number, b: number, c: number) => any;
     readonly builder_requestConnection: (a: number) => any;
