@@ -240,7 +240,7 @@ NOWPayments rail is open (`topup_rails.nowpayments`, falling back to
 `topup_open` on an older API). Top-ups are open on production via NOWPayments
 and x402.
 
-**Top-up minimums (v0.8.0).** The form defaults to **$5.00**. The absolute
+**Top-up minimums (v0.9.0).** The form defaults to **$1.00**. The absolute
 floor is $0.01, but only the x402 rail (USDC on Base, paid from a wallet —
 `tessera wallet init` then `tessera topup <usd> --wallet`) goes that low.
 Crypto checkout (NOWPayments) accepts many coins — USDC on Base, LTC, TRX,
@@ -262,7 +262,7 @@ map to `no_credentials` (the "run `tessera login`" empty state),
 
 **CLI dependency:** desktop account data requires a bundled `tessera-cli` that
 supports `account`. The pinned default (`TESSERA_CLI_VERSION`, currently
-`v1.11.1`, checked against the release's SHA256SUMS) includes it, so a release build feeds the balance panel from the
+`v1.12.0`, checked against the release's SHA256SUMS) includes it, so a release build feeds the balance panel from the
 bundled CLI; with no billing credential it shows the "run `tessera login`"
 empty state. For local
 development/testing you can bundle a locally built binary with the

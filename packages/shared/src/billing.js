@@ -42,9 +42,9 @@ export const BILLING_DESKTOP_APP_MESSAGE =
   'You are not signed in. Sign in from the Welcome screen to see your balance and usage.'
 
 export const TOPUP_MIN_USD = 0.01
-// Form default (v0.8.0): $5, comfortably above every common coin's
-// processor minimum, and the amount the first-top-up bonus starts at.
-export const TOPUP_DEFAULT_USD = '5.00'
+// Form default (v0.9.0): $1, above the USDC-on-Base checkout minimum
+// (about $0.38); other coins show their own live minimum inline.
+export const TOPUP_DEFAULT_USD = '1.00'
 
 // Plain names for the processor's coin codes (v0.8.0). Unknown codes fall
 // back to the upper-cased code.
@@ -82,7 +82,7 @@ const USD = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' 
 //
 // Byte formatting is decimal (1 TB = 10^12 bytes) on purpose: that is the
 // unit every price is quoted in, so an allowance of "1 TB" here always means
-// the same thing as "$8 per TB" on the pricing page.
+// the same thing as "per TB" on the pricing page (live rates: GET /api/v1/billing/rates).
 
 /** Coerce API values (number, numeric string, null) to a finite number. */
 export function toNumber(value) {
@@ -94,9 +94,18 @@ export function toNumber(value) {
   return null
 }
 
+const USD_SMALL = new Intl.NumberFormat('en-US', {
+  style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 6,
+})
+
+/** USD for display: 2 decimals from $1 (and for 0), up to 6 below $1, "<$0.000001" for tiny. */
 export function formatUsd(value) {
   const amount = toNumber(value)
-  return amount === null ? '—' : USD.format(amount)
+  if (amount === null) return '—'
+  const abs = Math.abs(amount)
+  if (abs === 0 || abs >= 1) return USD.format(amount)
+  if (abs < 0.000001) return amount < 0 ? '-<$0.000001' : '<$0.000001'
+  return USD_SMALL.format(amount)
 }
 
 const BYTE_UNITS = ['B', 'kB', 'MB', 'GB', 'TB', 'PB']
@@ -655,7 +664,7 @@ export function createBillingView(opts = {}) {
       if (percent >= 100) {
         wrap.appendChild(h(
           doc, 'p', 'billing-over',
-          'Over the included allowance — further egress is metered at $5/TB.',
+          'Over the included allowance — further downloads are billed at $10/TB.',
         ))
       }
       section.appendChild(wrap)
@@ -664,12 +673,12 @@ export function createBillingView(opts = {}) {
     if (!allowance) {
       section.appendChild(h(
         doc, 'p', 'billing-note',
-        'Pay-as-you-go accounts have no included egress; reads are metered at $5/TB.',
+        'Pay-as-you-go accounts have no included downloads; downloads are billed at $10/TB ($0.000419 per 40 MiB block).',
       ))
     }
     section.appendChild(h(
       doc, 'p', 'billing-note',
-      'Storage is metered per open slab-day and egress per slab served; ingress is free. Reads are reported by the client, so this figure can lag slightly.',
+      'Storage is $2.50 per TB-month, uploads $1 per TB and downloads $10 per TB, billed per 40 MiB block. Downloads are measured from host spend about every 5 minutes, so this figure can lag slightly.',
     ))
     return section
   }

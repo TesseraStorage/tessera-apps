@@ -316,23 +316,23 @@ test('billing screen is wired to the shared client and view, desktop hook includ
   assert.ok(WEB_UI.includes("from './billing.js'"))
 })
 
-// ── v0.8.0: $5 default, live minimum, readiness, plain asset names ──
+// ── v0.9.0: $1 default, live minimum, readiness, plain asset names ──
 
 const MINIMUMS = {
   floor_usd: '0.01',
-  default_usd: '5.00',
+  default_usd: '1.00',
   rails: {
     nowpayments: { enabled: true, pay_currency: 'usdcbase', asset: 'USDC on Base', minimum_usd: '0.38' },
     x402: { enabled: true, asset: 'USDC on Base', minimum_usd: '0.01' },
   },
 }
 
-test('the top-up form defaults to $5 and says the invoice accepts many coins', () => {
+test('the top-up form defaults to $1 and says the invoice accepts many coins', () => {
   const doc = createDocument()
   const view = createBillingView({ doc, client: { createTopup: async () => ({}) } })
   view.showAccount({ ...ACCOUNT, topup_open: true })
   const input = byTag(view.el, 'input')[0]
-  assert.equal(input.value, '5.00')
+  assert.equal(input.value, '1.00')
   assert.match(view.el.textContent, /USDC, USDT, BTC, ETH, XMR/)
   assert.match(view.el.textContent, /x402/)
 })
@@ -349,7 +349,7 @@ test('below the live minimum the form warns inline, disables the button and neve
   await tick(); await tick()
   const input = byTag(view.el, 'input')[0]
   const submit = byTag(view.el, 'button').find((b) => b.type === 'submit')
-  assert.equal(submit.disabled, false, '$5 is above the minimum')
+  assert.equal(submit.disabled, false, '$1 is above the minimum')
   input.value = '0.01'
   input.fire('input')
   assert.equal(submit.disabled, true)
