@@ -41,6 +41,10 @@ test('formatUsd coerces strings and renders em dash for missing values', () => {
   assert.equal(formatUsd(12.5), '$12.50')
   assert.equal(formatUsd('7.5'), '$7.50')
   assert.equal(formatUsd(0), '$0.00')
+  assert.equal(formatUsd('0.0986962705066666'), '$0.098696')
+  assert.equal(formatUsd(0.00056623104), '$0.000566')
+  assert.equal(formatUsd(0.0000001), '<$0.000001')
+  assert.equal(formatUsd(13.5), '$13.50')
 })
 
 test('formatBytes is decimal (1 TB = 10^12) and handles null', () => {
